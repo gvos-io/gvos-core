@@ -1,0 +1,68 @@
+# G-VOS one-command deployment (spike stage).
+# Brings up: gv-core (billing control plane), Kamailio (signaling),
+# RTPengine (media), a demo SIP gateway, and PostgreSQL.
+#
+# Usage:
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# Then run the SIPp scenario against kamailio:5060:
+#   docker run --rm --network gvos_default ghcr.io/sipp/sipp:latest \
+#     -sf /scenarios/basic_call.xml -s 1000 kamailio   (see test/sipp/)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gvos
+      POSTGRES_PASSWORD: gvos_dev
+      POSTGRES_DB: gvos
+    volumes:
+      - ../migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gvos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gv-core:
+    build:
+      context: ..
+      dockerfile: deploy/gv-core.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GVOS_DB_DSN: "postgres://gvos:gvos_dev@postgres:5432/gvos?sslmode=disable"
+      GVOS_LISTEN: ":8080"
+    ports:
+      - "8080:8080"
+
+  kamailio:
+    image: kamailio/kamailio-ci:latest
+    depends_on:
+      - gv-core
+      - rtpengine
+    volumes:
+      - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+
+  rtpengine:
+    # Community image; if unmaintained, build from
+    # https://github.com/sipwise/rtpengine (deploy/rtpengine/ holds our
+    # Dockerfile once we need custom patches).
+    image: robertcrystalline/rtpengine:latest
+    command: ["rtpengine", "--interface", "internal/0.0.0.0", "--listen-ng", "2223", "--log-level=6"]
+    ports:
+      - "2223:2223/udp"
+
+  demo-gw:
+    # Stand-in for a carrier gateway: a UAS that answers INVITEs with
+    # 200. Replaced by SIPp scenarios for load tests.
+    image: drachtio/sipp-scb:latest
+    entrypoint: ["sipp", "-sn", "uas", "-p", "5060"]
+
+volumes:
+  pgdata:

@@ -1,0 +1,23 @@
+# Build artifacts
+bin/
+*.exe
+*.out
+*.test
+
+# Local env / secrets
+.env
+*.local
+
+# Go
+/vendor/
+
+# Editor/OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local runtime data
+pgdata/
+*.log
