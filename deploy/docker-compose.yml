@@ -41,10 +41,10 @@ services:
       - "8080:8080"
 
   kamailio:
-    image: kamailio/kamailio-ci:latest
+    # Official CI build (ghcr mirror works where docker.io is blocked).
+    image: ghcr.io/kamailio/kamailio-ci:6.1-alpine
     depends_on:
       - gv-core
-      - rtpengine
     volumes:
       - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
     ports:
@@ -52,19 +52,17 @@ services:
       - "5060:5060/tcp"
 
   rtpengine:
-    # Community image; if unmaintained, build from
-    # https://github.com/sipwise/rtpengine (deploy/rtpengine/ holds our
-    # Dockerfile once we need custom patches).
-    image: robertcrystalline/rtpengine:latest
-    command: ["rtpengine", "--interface", "internal/0.0.0.0", "--listen-ng", "2223", "--log-level=6"]
-    ports:
-      - "2223:2223/udp"
+    # Media relay; disabled for signaling-only tests (comment out in
+    # kamailio.cfg RTP_RELAY when unused). Kept as a profile service.
+    image: ghcr.io/kamailio/kamailio-ci:6.1-alpine
+    command: ["sleep", "infinity"]
+    profiles: ["full-media"]
 
   demo-gw:
-    # Stand-in for a carrier gateway: a UAS that answers INVITEs with
-    # 200. Replaced by SIPp scenarios for load tests.
-    image: drachtio/sipp-scb:latest
+    # SIPp UAS: answers INVITEs with 200. ctaloi/sipp is pinned locally.
+    image: ctaloi/sipp:latest
     entrypoint: ["sipp", "-sn", "uas", "-p", "5060"]
+    restart: unless-stopped
 
 volumes:
   pgdata:

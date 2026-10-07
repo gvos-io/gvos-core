@@ -125,6 +125,14 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	if accID == "" {
 		accID = "1000" // spike default caller
 	}
+	// Spike compatibility: unknown callers (e.g. SIPp's default
+	// "service" user) bill the demo account instead of 404. Production
+	// rejects with 401/404 after real auth.
+	if _, err := s.store.Get(accID); err != nil {
+		if _, err2 := s.store.Get("1000"); err2 == nil {
+			accID = "1000"
+		}
+	}
 	if err := s.calls.Start(req.CallID, accID, req.To, entry, 60); err != nil {
 		// Insufficient balance is a 403 for the caller; account limits
 		// are a 429 (retry later); unknown account a 404.
@@ -173,13 +181,22 @@ func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		CallID  string `json:"call_id"`
-		DurSecs int    `json:"duration"`
+		DurSecs int    `json:"duration"` // optional: defaulted from call start
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CallID == "" {
 		httpError(w, 400, "call_id required")
 		return
 	}
-	cdr, err := s.calls.End(req.CallID, req.DurSecs)
+	seconds := req.DurSecs
+	if seconds == 0 {
+		// Kamailio sends the BYE without duration: derive it from the
+		// call's start time (SIPp's failed call lasted ~0s, real calls
+		// bill their true length).
+		if info, ok := s.calls.Info(req.CallID); ok {
+			seconds = int(time.Since(info).Seconds())
+		}
+	}
+	cdr, err := s.calls.End(req.CallID, seconds)
 	if err != nil {
 		httpError(w, 404, err.Error())
 		return

@@ -353,3 +353,15 @@ func (m *Manager) Live() int {
 	defer m.mu.Unlock()
 	return len(m.calls)
 }
+
+// Info returns the start time of a live call (for duration derivation
+// when the BYE event carries no duration).
+func (m *Manager) Info(callID string) (time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.calls[callID]
+	if !ok {
+		return time.Time{}, false
+	}
+	return c.Start, true
+}

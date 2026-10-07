@@ -1,14 +1,14 @@
-# Multi-stage build for gv-core.
-# Build context: repo root (see deploy/docker-compose.yml).
+# Multi-stage build for gv-core. Dependencies are vendored so the
+# image builds fully offline (no module proxy inside docker).
 
 FROM golang:1.21-alpine AS build
 WORKDIR /src
-COPY go.mod ./
-RUN go mod download
+COPY go.mod go.sum ./
+COPY vendor/ vendor/
 COPY cmd/ cmd/
 COPY internal/ internal/
 COPY pkg/ pkg/
-RUN CGO_ENABLED=0 go build -o /out/gvos-core ./cmd/gvos-core
+RUN CGO_ENABLED=0 go build -mod=vendor -o /out/gvos-core ./cmd/gvos-core
 
 FROM alpine:3.19
 RUN adduser -D -H -u 10001 gvos
