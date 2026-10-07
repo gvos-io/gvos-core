@@ -141,3 +141,61 @@ func approxEqual(a, b, tol float64) bool {
 	}
 	return b-a <= tol
 }
+
+// TestBlocklistRejectsCall: a blacklisted destination is 403-rejected
+// before rating/billing; removing the rule restores the call.
+func TestBlocklistRejectsCall(t *testing.T) {
+	s := NewServer()
+	srv := httptest.NewServer(muxFor(s))
+	defer srv.Close()
+
+	call := func(dest string) int {
+		b, _ := json.Marshal(map[string]string{
+			"call_id": "bl-" + dest, "from_user": "1000", "to_user": dest,
+		})
+		resp, err := http.Post(srv.URL+"/v1/call/start", "application/json", bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// Baseline: the number is routable.
+	if code := call("8613800138000"); code != 200 {
+		t.Fatalf("baseline call: %d", code)
+	}
+
+	// Blacklist the prefix via the admin API.
+	b, _ := json.Marshal(map[string]any{"kind": "black", "scope": "dest", "pattern": "86139"})
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/blocklist", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 201 {
+		t.Fatalf("blocklist add: %v code=%d", err, resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Calls to the blacklisted range now 403.
+	if code := call("8613912345678"); code != 403 {
+		t.Errorf("blacklisted call: %d, want 403", code)
+	}
+	// Unaffected numbers still work.
+	if code := call("8613800138000"); code != 200 {
+		t.Errorf("non-matching call: %d, want 200", code)
+	}
+
+	// Remove the rule; the range is callable again.
+	rb, _ := json.Marshal(map[string]any{"kind": "black", "scope": "dest", "pattern": "86139", "remove": true})
+	req2, _ := http.NewRequest("POST", srv.URL+"/v1/admin/blocklist", bytes.NewReader(rb))
+	req2.Header.Set("Authorization", "Bearer "+adminToken)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil || resp2.StatusCode != 200 {
+		t.Fatalf("blocklist remove: %v code=%d", err, resp2.StatusCode)
+	}
+	resp2.Body.Close()
+
+	if code := call("8613912345678"); code != 200 {
+		t.Errorf("call after rule removal: %d, want 200", code)
+	}
+}

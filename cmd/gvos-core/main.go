@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gvos/gvos-core/internal/account"
+	"github.com/gvos/gvos-core/internal/blocklist"
 	"github.com/gvos/gvos-core/internal/callstate"
 	"github.com/gvos/gvos-core/internal/rate"
 	"github.com/gvos/gvos-core/internal/store"
@@ -33,6 +34,7 @@ type Server struct {
 	pg        *store.PG   // nil in memory mode
 	userIndex map[string]string // SIP username -> account ID (PG mode)
 	recordEnabled bool          // global recording opt-in (admin toggle)
+	blocklist *blocklist.List  // number screening (black/white rules)
 	startAt   time.Time
 }
 
@@ -53,7 +55,7 @@ func (s *Server) rebuildRates() {
 
 // NewServer builds the in-memory demo server (dev/test mode).
 func NewServer() *Server {
-	s := &Server{store: account.NewStore(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), startAt: time.Now()}
 
 	// Demo seed: one tenant chain and a small rate table. The tenant
 	// root is postpaid (it invoices); agents and users are prepaid.
@@ -73,7 +75,7 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: account.NewStore(), pg: pg, startAt: time.Now()}
+	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), startAt: time.Now()}
 	n, err := pg.LoadAccounts(ctx, s.store)
 	if err != nil {
 		pg.Close()
@@ -83,6 +85,11 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	if err != nil {
 		pg.Close()
 		return nil, err
+	}
+	if n, err := pg.LoadBlocklist(ctx, s.blocklist); err != nil {
+		log.Printf("blocklist load failed: %v", err)
+	} else if n > 0 {
+		log.Printf("loaded %d screening rules", n)
 	}
 	s.userIndex = map[string]string{}
 	for _, a := range mustList(s.store) {
@@ -133,6 +140,12 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CallID == "" || req.To == "" {
 		httpError(w, 400, "call_id and to_user required")
+		return
+	}
+	// Number screening happens before rating: a blacklisted (or
+	// non-whitelisted) destination never reaches billing.
+	if ok, why := s.blocklist.CheckScreen(req.To, "dest"); !ok {
+		httpError(w, 403, "destination blocked: "+why)
 		return
 	}
 	now := time.Now()
@@ -323,6 +336,7 @@ func muxFor(s *Server) *http.ServeMux {
 	mux.HandleFunc("/v1/admin/rates", s.routeRates)
 	mux.HandleFunc("/v1/admin/cdrs", s.handleCDRList)
 	mux.HandleFunc("/v1/admin/record", s.handleRecordToggle)
+	mux.HandleFunc("/v1/admin/blocklist", s.handleBlocklist)
 	// Static admin console (token entered in the UI).
 	mux.HandleFunc("/ui", s.handleUI)
 	mux.HandleFunc("/ui/", s.handleUI)

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gvos/gvos-core/internal/account"
+	"github.com/gvos/gvos-core/internal/blocklist"
 	"github.com/gvos/gvos-core/internal/rate"
 )
 
@@ -234,4 +235,43 @@ func (s *Server) handleRecordToggle(w http.ResponseWriter, r *http.Request) {
 	s.recordEnabled = req.Enabled
 	s.audit(r, "toggle", "recording", "", map[string]any{"enabled": before}, map[string]any{"enabled": req.Enabled})
 	writeJSON(w, 200, map[string]any{"enabled": s.recordEnabled})
+}
+
+// POST /v1/admin/blocklist {"kind","scope","pattern","is_regex"} -
+// add a screening rule; DELETE semantics via {"remove":true}.
+func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		var req struct {
+			Kind    string `json:"kind"`   // black | white
+			Scope   string `json:"scope"`  // src | dest
+			Pattern string `json:"pattern"`
+			IsRegex bool   `json:"is_regex"`
+			Remove  bool   `json:"remove"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
+			(req.Kind != "black" && req.Kind != "white") ||
+			(req.Scope != "src" && req.Scope != "dest") || req.Pattern == "" {
+			httpError(w, 400, "kind(black|white), scope(src|dest), pattern required")
+			return
+		}
+		if req.Remove {
+			n := s.blocklist.Remove("", req.Kind, req.Scope, req.Pattern)
+			s.audit(r, "remove", "blocklist", req.Pattern, map[string]any{"removed": n}, nil)
+			writeJSON(w, 200, map[string]any{"removed": n})
+			return
+		}
+		s.blocklist.Add(blocklist.Entry{
+			Kind: req.Kind, Scope: req.Scope, Pattern: req.Pattern, IsRegex: req.IsRegex,
+		})
+		s.audit(r, "create", "blocklist", req.Pattern, nil, req)
+		writeJSON(w, 201, map[string]any{"kind": req.Kind, "scope": req.Scope, "pattern": req.Pattern})
+	case http.MethodGet:
+		writeJSON(w, 200, map[string]any{"rules": s.blocklist.Count()})
+	default:
+		httpError(w, 405, "POST or GET")
+	}
 }

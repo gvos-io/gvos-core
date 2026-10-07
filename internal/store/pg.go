@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/gvos/gvos-core/internal/account"
+	"github.com/gvos/gvos-core/internal/blocklist"
 	"github.com/gvos/gvos-core/internal/callstate"
 	"github.com/gvos/gvos-core/internal/rate"
 )
@@ -224,6 +225,29 @@ func (p *PG) UpsertRate(ctx context.Context, groupID, prefix string, price float
 		return fmt.Errorf("upsert rate: %w", err)
 	}
 	return nil
+}
+
+// LoadBlocklist reads number_lists into a blocklist.List.
+func (p *PG) LoadBlocklist(ctx context.Context, dst *blocklist.List) (int, error) {
+	rows, err := p.pool.Query(ctx, `
+        SELECT coalesce(tenant_id::text, ''), kind, scope, pattern, is_regex
+        FROM number_lists`)
+	if err != nil {
+		return 0, fmt.Errorf("query number_lists: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []blocklist.Entry
+	for rows.Next() {
+		var e blocklist.Entry
+		if err := rows.Scan(&e.TenantID, &e.Kind, &e.Scope, &e.Pattern, &e.IsRegex); err != nil {
+			return len(entries), fmt.Errorf("scan list entry: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	n := len(entries)
+	dst.Reload(entries)
+	return n, rows.Err()
 }
 
 func nullIfEmpty(s string) any {
