@@ -62,6 +62,7 @@ func (s *Server) rebuildRates() {
 // NewServer builds the in-memory demo server (dev/test mode).
 func NewServer() *Server {
 	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), startAt: time.Now()}
+	s.userIndex = map[string]string{}
 
 	// Demo seed: one tenant chain and a small rate table. The tenant
 	// root is postpaid (it invoices); agents and users are prepaid.

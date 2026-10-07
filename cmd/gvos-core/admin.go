@@ -80,11 +80,16 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.store.Put(&account.Account{
-		ID: id, ParentID: req.ParentID, Name: req.Name,
+		ID: id, ParentID: req.ParentID, Name: req.Name, Username: req.Username,
 		RateGroup: req.RateGroup, Postpaid: req.Postpaid, Credit: req.Credit,
 	}); err != nil {
 		httpError(w, 500, err.Error())
 		return
+	}
+	// Keep the live username->ID index warm so freshly created accounts
+	// are immediately callable/resolvable by SIP username.
+	if s.userIndex != nil {
+		s.userIndex[req.Username] = id
 	}
 	s.audit(r, "create", "account", id, nil,
 		map[string]any{"username": req.Username, "credit": req.Credit})

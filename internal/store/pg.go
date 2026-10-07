@@ -212,20 +212,29 @@ func (p *PG) TopUp(ctx context.Context, accountID string, delta float64, reason,
 	return balance, nil
 }
 
-// UpsertRate inserts or updates one rate row (prefix unique within the
-// group for the base variant).
+// UpsertRate replaces the current rate for a prefix: superseded rows
+// are marked ended_at (the loader reads only live rows), and a fresh
+// row carries the new price - so a price change is a version, not a
+// mutation (audit trail intact).
 func (p *PG) UpsertRate(ctx context.Context, groupID, prefix string, price float64, initDur, stepDur, minDur int) error {
-	_, err := p.pool.Exec(ctx, `
-        INSERT INTO rates (group_id, prefix, price, init_dur, step_dur, min_dur)
-        VALUES ($1::uuid, $2, $3, $4, $5, $6)
-        ON CONFLICT (group_id, prefix, priority, effective_at)
-        DO UPDATE SET price = EXCLUDED.price, init_dur = EXCLUDED.init_dur,
-                      step_dur = EXCLUDED.step_dur, min_dur = EXCLUDED.min_dur`,
-		groupID, prefix, price, initDur, stepDur, minDur)
+	tx, err := p.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("upsert rate: %w", err)
+		return fmt.Errorf("upsert rate begin: %w", err)
 	}
-	return nil
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+        UPDATE rates SET ended_at = now()
+        WHERE group_id = $1::uuid AND prefix = $2 AND ended_at IS NULL`,
+		groupID, prefix); err != nil {
+		return fmt.Errorf("upsert rate supersede: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+        INSERT INTO rates (group_id, prefix, price, init_dur, step_dur, min_dur, effective_at)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, now())`,
+		groupID, prefix, price, initDur, stepDur, minDur); err != nil {
+		return fmt.Errorf("upsert rate insert: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // LoadBlocklist reads number_lists into a blocklist.List.
