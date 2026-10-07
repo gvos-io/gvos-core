@@ -87,9 +87,14 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 }
 func (s *Server) newCallManager() *callstate.Manager {
 	// Teardown in production sends CANCEL/BYE via Kamailio.
-	return callstate.NewManager(s.store, func(callID, reason string) {
+	m := callstate.NewManager(s.store, func(callID, reason string) {
 		log.Printf("TEARDOWN %s reason=%s", callID, reason)
 	}, 10*time.Second)
+	// Zombie sweeper: calls whose BYE never arrives (SIPp timeout
+	// kills, gateway drops) settle after 10 minutes instead of
+	// leaking their pre-answer locks.
+	m.StartSweeper(10*time.Minute, 30*time.Second)
+	return m
 }
 
 func demoRates() []rate.Rate {

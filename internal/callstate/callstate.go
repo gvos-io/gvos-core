@@ -72,6 +72,59 @@ func NewManager(store *account.Store, teardown TeardownFunc, interval time.Durat
 // SetClock overrides the time source (tests).
 func (m *Manager) SetClock(f func() time.Time) { m.now = f }
 
+// StartSweeper launches the zombie-call sweeper: calls that never saw
+// a BYE (caller vanished, gateway dropped) are force-settled after
+// timeout, billing the elapsed duration so the pre-answer lock stops
+// leaking. Returns a stop function.
+func (m *Manager) StartSweeper(timeout time.Duration, interval time.Duration) (stop func()) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				m.sweep(timeout)
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+// sweep settles one pass of timed-out calls. The release reason is
+// "zombie-timeout" so the CDR trail shows what happened.
+func (m *Manager) sweep(timeout time.Duration) {
+	now := m.now()
+	type victim struct {
+		id string
+		d  int
+	}
+	var victims []victim
+
+	m.mu.Lock()
+	for id, c := range m.calls {
+		if now.Sub(c.Start) > timeout {
+			victims = append(victims, victim{id, int(now.Sub(c.Start).Seconds())})
+		}
+	}
+	m.mu.Unlock()
+
+	for _, v := range victims {
+		m.markRelease(v.id, "zombie-timeout")
+		if _, err := m.End(v.id, v.d); err == nil {
+			// settled fine
+		}
+	}
+}
+
 // Start reserves the estimate and registers the call, after checking
 // the account's concurrent and CPS limits. Errors: account.ErrLimit
 // (HTTP 429), insufficient balance (403), no account (404).
