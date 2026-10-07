@@ -1,0 +1,85 @@
+# HA deployment: PG primary + hot-standby replication, dual Kamailio
+# signaling nodes (stateless, fronted by any LB), gv-core pair with
+# shared PG state. Use: docker compose -f deploy/compose-ha.yml -p
+# gvosha up -d
+#
+# The failover drill (test/ha/drill.sh) kills the standby/promotes
+# replication and measures recovery - the RTO/RPO evidence the PRD
+# requires per delivery.
+
+services:
+  pg-primary:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gvos
+      POSTGRES_PASSWORD: gvos_dev
+      POSTGRES_DB: gvos
+    command: ["postgres", "-c", "wal_level=replica", "-c", "max_wal_senders=5", "-c", "hot_standby=on"]
+    volumes:
+      - ../migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - pgprim:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gvos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  pg-standby:
+    image: postgres:16-alpine
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    # Replica bootstrap: basebackup from primary at first start, then
+    # continuous WAL shipping. If the data dir is already initialized,
+    # the entrypoint skips straight to standby mode.
+    entrypoint: ["sh", "-c", "
+      if [ ! -f /var/lib/postgresql/data/PG_VERSION ]; then
+        PGPASSWORD=gvos_dev pg_basebackup -h pg-primary -U replicator -D /tmp/basebackup -R -Fp -Xs &&
+        cp -a /tmp/basebackup/. /var/lib/postgresql/data/ &&
+        rm -rf /tmp/basebackup;
+      fi;
+      exec docker-entrypoint.sh postgres -c hot_standby=on"]
+    environment:
+      POSTGRES_USER: gvos
+      POSTGRES_PASSWORD: gvos_dev
+    volumes:
+      - pgstdby:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gvos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gv-core:
+    build:
+      context: ..
+      dockerfile: deploy/gv-core.Dockerfile
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    environment:
+      GVOS_DB_DSN: "postgres://gvos:gvos_dev@pg-primary:5432/gvos?sslmode=disable"
+      GVOS_LISTEN: ":8080"
+
+  # Signaling pair: two stateless Kamailio nodes. Real deployments
+  # front them with any UDP/TCP LB (or DNS SRV); here they share the
+  # dispatcher config so either serves the calls.
+  kamailio-1:
+    image: ghcr.io/kamailio/kamailio-ci:6.1-alpine
+    depends_on: [gv-core]
+    volumes:
+      - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
+    ports:
+      - "5060:5060/udp"
+
+  kamailio-2:
+    image: ghcr.io/kamailio/kamailio-ci:6.1-alpine
+    depends_on: [gv-core]
+    volumes:
+      - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
+    ports:
+      - "5061:5060/udp"
+
+volumes:
+  pgprim:
+  pgstdby:

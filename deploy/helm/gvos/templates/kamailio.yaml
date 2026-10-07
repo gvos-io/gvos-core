@@ -1,0 +1,70 @@
+{{- /* Kamailio signaling nodes: stateless, scale horizontally. The
+       kamailio.cfg mounts from a ConfigMap (schema in
+       deploy/kamailio/). */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-kamailio
+  labels:
+    app: kamailio
+spec:
+  replicas: {{ .Values.replicaCount.kamailio }}
+  selector:
+    matchLabels:
+      app: kamailio
+  template:
+    metadata:
+      labels:
+        app: kamailio
+    spec:
+      containers:
+        - name: kamailio
+          image: "{{ .Values.image.kamailio.repository }}:{{ .Values.image.kamailio.tag }}"
+          args: ["-DD", "-E"]
+          ports:
+            - containerPort: 5060
+              protocol: UDP
+              name: sip-udp
+            - containerPort: 5060
+              protocol: TCP
+              name: sip-tcp
+            {{- if .Values.sip.ws.enabled }}
+            - containerPort: {{ .Values.sip.ws.port }}
+              protocol: TCP
+              name: sip-ws
+            {{- end }}
+          volumeMounts:
+            - name: kamailio-cfg
+              mountPath: /etc/kamailio/kamailio.cfg
+              subPath: kamailio.cfg
+          resources:
+            {{- toYaml .Values.resources.kamailio | nindent 12 }}
+      volumes:
+        - name: kamailio-cfg
+          configMap:
+            {{- if .Values.kamailio.cfgConfigMap }}
+            name: {{ .Values.kamailio.cfgConfigMap }}
+            {{- else }}
+            name: {{ .Release.Name }}-kamailio-cfg
+            {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-sip
+spec:
+  type: {{ .Values.sip.service.type }}
+  selector:
+    app: kamailio
+  ports:
+    - port: 5060
+      protocol: UDP
+      name: sip-udp
+    - port: 5060
+      protocol: TCP
+      name: sip-tcp
+    {{- if .Values.sip.ws.enabled }}
+    - port: {{ .Values.sip.ws.port }}
+      protocol: TCP
+      name: sip-ws
+    {{- end }}

@@ -1,0 +1,49 @@
+# Default values for the gvos chart.
+
+replicaCount:
+  gvCore: 1      # stateless behind shared PG; scale for capacity
+  kamailio: 2    # stateless signaling nodes
+
+image:
+  gvCore:
+    repository: gvos/gvos-core
+    tag: "0.1.0"
+  kamailio:
+    repository: ghcr.io/kamailio/kamailio-ci
+    tag: "6.1-alpine"
+
+# Database: production brings an external HA Postgres (Patroni or
+# managed). The chart does NOT ship a database by default.
+database:
+  dsn: ""        # e.g. postgres://user:pass@patroni:5432/gvos
+  existingSecret: ""  # k8s secret name holding 'dsn' key
+
+api:
+  service:
+    type: ClusterIP
+    port: 8080
+  ingress:
+    enabled: false
+    host: gvos.example.com
+    tls: false
+
+sip:
+  service:
+    type: LoadBalancer   # UDP+TCP 5060
+  ws:
+    enabled: true
+    port: 4444
+
+media:
+  rtpengine:
+    enabled: true
+    host: ""             # external rtpengine host+ng port when set
+
+kamailio:
+  cfgConfigMap: ""       # override configmap name for kamailio.cfg
+
+resources:
+  gvCore:
+    requests: { cpu: 500m, memory: 512Mi }
+  kamailio:
+    requests: { cpu: 250m, memory: 256Mi }
