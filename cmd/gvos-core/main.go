@@ -8,10 +8,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gvos/gvos-core/internal/account"
@@ -124,7 +126,18 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		accID = "1000" // spike default caller
 	}
 	if err := s.calls.Start(req.CallID, accID, req.To, entry, 60); err != nil {
-		// Insufficient balance is a 403 for the caller.
+		// Insufficient balance is a 403 for the caller; account limits
+		// are a 429 (retry later); unknown account a 404.
+		var limit *callstate.ErrLimit
+		if errors.As(err, &limit) {
+			w.Header().Set("Retry-After", "1")
+			httpError(w, 429, err.Error())
+			return
+		}
+		if strings.Contains(err.Error(), "not found") {
+			httpError(w, 404, err.Error())
+			return
+		}
 		httpError(w, 403, err.Error())
 		return
 	}

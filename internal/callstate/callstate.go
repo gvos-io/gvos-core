@@ -30,6 +30,18 @@ type Call struct {
 	Tick        int     // interim deduction rounds completed
 }
 
+// ErrLimit encapsulates a rejection due to account limits so the HTTP
+// layer can map it to 429 (vs 403 for balance).
+type ErrLimit struct {
+	AccountID string
+	Kind      string // "concurrent" | "cps"
+	Detail    string
+}
+
+func (e *ErrLimit) Error() string {
+	return fmt.Sprintf("account %q exceeded %s limit: %s", e.AccountID, e.Kind, e.Detail)
+}
+
 // Manager owns live calls and their billing lifecycle.
 type Manager struct {
 	mu          sync.Mutex
@@ -60,16 +72,35 @@ func NewManager(store *account.Store, teardown TeardownFunc, interval time.Durat
 // SetClock overrides the time source (tests).
 func (m *Manager) SetClock(f func() time.Time) { m.now = f }
 
-// Start reserves the estimate and registers the call. It returns an
-// error when the account cannot afford the estimate (caller answers
-// with 403).
+// Start reserves the estimate and registers the call, after checking
+// the account's concurrent and CPS limits. Errors: account.ErrLimit
+// (HTTP 429), insufficient balance (403), no account (404).
 func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedSecs int) error {
-	est := m.charger.EstimatedCost(e, expectedSecs)
-	if _, err := m.store.Reserve(accountID, est); err != nil {
+	acc, err := m.store.Get(accountID)
+	if err != nil {
 		return err
 	}
+
+	est := m.charger.EstimatedCost(e, expectedSecs)
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
+
+	// Concurrent limit: live calls of this account (chain ancestors
+	// each carry their own limit — the whole chain must admit it).
+	if err := m.admitConcurrent(accountID, acc); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	// CPS limit: start events in the current second for this account.
+	if err := m.admitCPS(accountID, acc); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+
+	if _, err := m.store.Reserve(accountID, est); err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	m.calls[callID] = &Call{
 		ID:          callID,
 		AccountID:   accountID,
@@ -78,7 +109,101 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 		Start:       m.now(),
 		Lock:        est,
 	}
+	m.mu.Unlock()
 	return nil
+}
+
+// admitConcurrent enforces the account's own concurrent limit and, via
+// the chain walk, the limits of every ancestor (agents cap their
+// sub-tree). Caller holds m.mu.
+func (m *Manager) admitConcurrent(accountID string, acc *account.Account) error {
+	live := m.liveCountLocked(accountID)
+	if acc.Concurrent > 0 && live >= acc.Concurrent {
+		return &ErrLimit{AccountID: accountID, Kind: "concurrent",
+			Detail: fmt.Sprintf("%d live >= cap %d", live, acc.Concurrent)}
+	}
+	// Ancestors: count the whole sub-tree under each limit.
+	chain, err := m.store.Chain(accountID)
+	if err != nil {
+		return err
+	}
+	for _, a := range chain {
+		if a.Concurrent <= 0 || a.ID == accountID {
+			continue
+		}
+		live := m.subtreeLiveLocked(a.ID)
+		if live >= a.Concurrent {
+			return &ErrLimit{AccountID: a.ID, Kind: "concurrent",
+				Detail: fmt.Sprintf("sub-tree live %d >= cap %d", live, a.Concurrent)}
+		}
+	}
+	return nil
+}
+
+// admitCPS enforces the account's calls-per-second cap (own calls only;
+// ancestor CPS follows from their direct sub-agents' own caps).
+// Caller holds m.mu.
+func (m *Manager) admitCPS(accountID string, acc *account.Account) error {
+	if acc.CPS <= 0 {
+		return nil
+	}
+	now := m.now()
+	startedInSecond := 0
+	for _, c := range m.calls {
+		if c.AccountID == accountID && c.Start.Unix() == now.Unix() {
+			startedInSecond++
+		}
+	}
+	if startedInSecond >= acc.CPS {
+		return &ErrLimit{AccountID: accountID, Kind: "cps",
+			Detail: fmt.Sprintf("%d starts this second >= cap %d", startedInSecond, acc.CPS)}
+	}
+	return nil
+}
+
+// liveCountLocked counts live calls of one exact account.
+func (m *Manager) liveCountLocked(accountID string) int {
+	n := 0
+	for _, c := range m.calls {
+		if c.AccountID == accountID {
+			n++
+		}
+	}
+	return n
+}
+
+// subtreeLiveLocked counts live calls of the account and every
+// descendant. The account tree is small (chain walk per start is
+// acceptable at spike scale; production moves this to a counter).
+func (m *Manager) subtreeLiveLocked(rootID string) int {
+	desc := map[string]bool{rootID: true}
+	// Walk all accounts once, marking those whose chain passes rootID.
+	all, _ := m.store.List()
+	byID := map[string]*account.Account{}
+	for _, a := range all {
+		byID[a.ID] = a
+	}
+	for _, a := range all {
+		cur := a.ID
+		for cur != "" {
+			if cur == rootID {
+				desc[a.ID] = true
+				break
+			}
+			p := byID[cur]
+			if p == nil {
+				break
+			}
+			cur = p.ParentID
+		}
+	}
+	n := 0
+	for _, c := range m.calls {
+		if desc[c.AccountID] {
+			n++
+		}
+	}
+	return n
 }
 
 // Interim runs the periodic deduction for one call: it charges the
