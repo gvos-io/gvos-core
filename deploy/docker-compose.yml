@@ -37,6 +37,8 @@ services:
     environment:
       GVOS_DB_DSN: "postgres://gvos:gvos_dev@postgres:5432/gvos?sslmode=disable"
       GVOS_LISTEN: ":8080"
+    volumes:
+      - ./tls:/etc/gvos/tls:ro
     ports:
       - "8080:8080"
 

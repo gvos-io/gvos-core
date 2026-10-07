@@ -338,6 +338,8 @@ func httpError(w http.ResponseWriter, code int, msg string) {
 func main() {
 	listen := flag.String("listen", ":8080", "HTTP listen address")
 	dsn := flag.String("dsn", "", "PostgreSQL DSN; empty = in-memory demo mode")
+	tlsCert := flag.String("tls-cert", os.Getenv("GVOS_TLS_CERT"), "TLS cert (enables HTTPS)")
+	tlsKey := flag.String("tls-key", os.Getenv("GVOS_TLS_KEY"), "TLS key")
 	flag.Parse()
 
 	// Compose/deploy environments pass the DSN via env; the flag wins
@@ -360,6 +362,10 @@ func main() {
 		s = NewServer()
 	}
 	log.Printf("gvos-core listening on %s", *listen)
+	if *tlsCert != "" && *tlsKey != "" {
+		log.Printf("TLS enabled (%s)", *tlsCert)
+		log.Fatal(http.ListenAndServeTLS(*listen, *tlsCert, *tlsKey, muxFor(s)))
+	}
 	log.Fatal(http.ListenAndServe(*listen, muxFor(s)))
 }
 
