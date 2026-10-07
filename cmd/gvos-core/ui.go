@@ -56,6 +56,7 @@ const adminHTML = `<!DOCTYPE html>
   <button id="tab-rates" onclick="tab('rates')">费率</button>
   <button id="tab-cdrs" onclick="tab('cdrs')">话单 CDR</button>
   <button id="rec-btn" onclick="toggleRecord()" style="margin-left:auto;color:var(--warn)">录音: 关</button>
+  <button id="lang-btn" onclick="toggleLang()" style="color:var(--dim)">EN</button>
 </nav>
 <main>
   <div id="msg" class="msg"></div>
@@ -192,9 +193,37 @@ async function toggleRecord() {
   b.textContent = '录音: ' + (j.enabled ? '开' : '关');
   msg(true, j.enabled ? '录音已开启：下一通电话起生效' : '录音已关闭');
 }
+// i18n: zh labels with EN fallbacks; toggle re-renders static texts.
+const I18N = {
+  '账户': 'Accounts', '费率': 'Rates', '话单 CDR': 'CDRs',
+  '管理台': 'Console', '模式：': 'mode: ', '内存': 'memory', '在线呼叫': 'Live calls',
+  '累计 CDR': 'CDRs', '演示账户余额': 'Demo balance', '用户名': 'Username', '名称': 'Name',
+  '预存款': 'Credit', '创建账户': 'Create account', '充值账户ID': 'Top-up account ID',
+  '金额(±)': 'Amount(±)', '充值/调整': 'Top up / adjust', '前缀': 'Prefix', '每分钟价': 'Per-min price',
+  '首步秒': 'First step(s)', '步长秒': 'Step(s)', '保存费率': 'Save rate',
+  '通话秒': 'Talk(s)', '计费秒': 'Billed(s)', '费用': 'Cost', '释放原因': 'Release',
+  '录音': 'Recording', '刷新': 'Refresh', '保存': 'Save', '运行': 'uptime',
+};
+let LANG = localStorage.getItem('gvos_lang') || 'zh';
+function applyLang() {
+  document.querySelectorAll('button,th,label,.stat .k,header h1').forEach(el => {
+    const t = el.textContent.trim();
+    if (LANG === 'en' && I18N[t]) el.textContent = I18N[t];
+  });
+  const rb = document.getElementById('rec-btn');
+  if (rb) rb.textContent = (LANG === 'en' ? 'Recording: ' : '录音: ') + (rb.textContent.includes('开') || rb.textContent.includes('on') ? (LANG==='en'?'on':'开') : (LANG==='en'?'off':'关'));
+  document.getElementById('lang-btn').textContent = LANG === 'en' ? '中' : 'EN';
+}
+function toggleLang() {
+  LANG = LANG === 'zh' ? 'en' : 'zh';
+  localStorage.setItem('gvos_lang', LANG);
+  location.reload();
+}
 tab('accounts');
 load();
+setTimeout(applyLang, 300);
 setInterval(load, 5000);
+setInterval(applyLang, 6000);
 </script>
 </body>
 </html>`
