@@ -52,11 +52,13 @@ services:
       - "5060:5060/tcp"
 
   rtpengine:
-    # Media relay; disabled for signaling-only tests (comment out in
-    # kamailio.cfg RTP_RELAY when unused). Kept as a profile service.
-    image: ghcr.io/kamailio/kamailio-ci:6.1-alpine
-    command: ["sleep", "infinity"]
-    profiles: ["full-media"]
+    # Media relay built from Debian packages (see rtpengine.Dockerfile);
+    # userspace forwarding (no kernel module in-container).
+    build:
+      context: .
+      dockerfile: rtpengine.Dockerfile
+    image: gvos-rtpengine
+    restart: unless-stopped
 
   demo-gw:
     # SIPp UAS: answers INVITEs with 200. ctaloi/sipp is pinned locally.
