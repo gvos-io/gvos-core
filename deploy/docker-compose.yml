@@ -47,9 +47,11 @@ services:
       - gv-core
     volumes:
       - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
+      - ./tls:/etc/kamailio/tls:ro
     ports:
       - "5060:5060/udp"
       - "5060:5060/tcp"
+      - "4444:4444/tcp"
 
   rtpengine:
     # Media relay built from Debian packages (see rtpengine.Dockerfile);
