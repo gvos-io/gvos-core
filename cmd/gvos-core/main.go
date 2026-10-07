@@ -278,11 +278,40 @@ func muxFor(s *Server) *http.ServeMux {
 	mux.HandleFunc("/v1/admin/accounts", s.routeAccounts)
 	mux.HandleFunc("/v1/admin/topup", s.handleTopUp)
 	mux.HandleFunc("/v1/admin/rates", s.routeRates)
+	mux.HandleFunc("/v1/admin/cdrs", s.handleCDRList)
+	// Static admin console (token entered in the UI).
+	mux.HandleFunc("/ui", s.handleUI)
+	mux.HandleFunc("/ui/", s.handleUI)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		fmt.Fprintln(w, "ok")
 	})
 	return mux
+}
+
+// GET /v1/admin/cdrs?limit=50 - latest CDRs (in-memory ring; PG mode
+// reads would come from the DB, same shape).
+func (s *Server) handleCDRList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := json.Number(l).Int64(); err == nil && n > 0 && n <= 500 {
+			limit = int(n)
+		}
+	}
+	out := []*callstate.CDR{}
+	for i := len(s.cdrs) - 1; i >= 0 && len(out) < limit; i-- {
+		out = append(out, s.cdrs[i])
+	}
+	writeJSON(w, 200, map[string]any{"cdrs": out, "count": len(out)})
+}
+
+// handleUI serves the embedded single-file admin console.
+func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(adminHTML))
 }
 
 // routeAccounts dispatches by verb (Go 1.21: no method patterns).
