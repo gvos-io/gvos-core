@@ -167,15 +167,16 @@ func (p *PG) AppendAudit(ctx context.Context, tenantID, operator, action, entity
 	return err
 }
 
-// CreateAccount inserts an account row and returns its UUID.
-func (p *PG) CreateAccount(ctx context.Context, tenantID, parentID, name, username, secretHash, rateGroup string, postpaid bool, credit float64) (string, error) {
+// CreateAccountWithHA1 inserts an account row with its SIP Digest
+// credential and returns the UUID.
+func (p *PG) CreateAccountWithHA1(ctx context.Context, tenantID, parentID, name, username, ha1, rateGroup string, postpaid bool, credit float64) (string, error) {
 	var id string
 	err := p.pool.QueryRow(ctx, `
         INSERT INTO accounts (tenant_id, parent_id, name, username, secret_hash,
-                              rate_group, postpaid, credit)
-        VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8)
+                              ha1, rate_group, postpaid, credit)
+        VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9)
         RETURNING id::text`,
-		tenantID, nullIfEmpty(parentID), name, username, secretHash, rateGroup, postpaid, credit).Scan(&id)
+		tenantID, nullIfEmpty(parentID), name, username, "x", ha1, rateGroup, postpaid, credit).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create account: %w", err)
 	}

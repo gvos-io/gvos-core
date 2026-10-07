@@ -13,7 +13,7 @@ CREATE TABLE version (
     table_name TEXT NOT NULL PRIMARY KEY,
     table_version INT NOT NULL DEFAULT 0
 );
-INSERT INTO version (table_name, table_version) VALUES ('accounts', 7);
+INSERT INTO version (table_name, table_version) VALUES ('accounts', 7), ('gateways', 4);
 
 CREATE TABLE tenants (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),

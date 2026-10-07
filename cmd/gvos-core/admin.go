@@ -5,7 +5,10 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -60,11 +63,16 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// SIP credential: random password, HA1 = MD5(user:realm:pass).
+	// Returned once in the response; never retrievable again.
+	sipPass := genSIPPassword(12)
+	ha1 := computeHA1(req.Username, "gvos.local", sipPass)
+
 	id := "acc-" + req.Username + "-" + time.Now().Format("150405")
 	if s.pg != nil {
 		var err error
-		id, err = s.pg.CreateAccount(r.Context(), demoTenant, req.ParentID,
-			req.Name, req.Username, "x", req.RateGroup, req.Postpaid, req.Credit)
+		id, err = s.pg.CreateAccountWithHA1(r.Context(), demoTenant, req.ParentID,
+			req.Name, req.Username, ha1, req.RateGroup, req.Postpaid, req.Credit)
 		if err != nil {
 			httpError(w, 500, err.Error())
 			return
@@ -77,8 +85,13 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err.Error())
 		return
 	}
-	s.audit(r, "create", "account", id, nil, req)
-	writeJSON(w, 201, map[string]any{"id": id, "username": req.Username, "credit": req.Credit})
+	s.audit(r, "create", "account", id, nil,
+		map[string]any{"username": req.Username, "credit": req.Credit})
+	writeJSON(w, 201, map[string]any{
+		"id": id, "username": req.Username, "credit": req.Credit,
+		"sip_password": sipPass, "sip_realm": "gvos.local",
+		"note":          "sip password is shown once; store it now",
+	})
 }
 
 // POST /v1/admin/topup {"account_id","delta","reason"}
@@ -347,4 +360,22 @@ func (s *Server) handleStreamPush(w http.ResponseWriter, r *http.Request) {
 	}
 	c := stream.Push(dir, audio)
 	writeJSON(w, 200, map[string]any{"call_id": req.CallID, "seq": c.Seq, "bytes": len(audio)})
+}
+
+
+// genSIPPassword produces a pronounceable-ish random SIP password.
+func genSIPPassword(n int) string {
+	const alphabet = "abcdefghjkmnpqrstuvwxyz23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+	b := make([]byte, n)
+	rand.Read(b)
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return string(b)
+}
+
+// computeHA1: MD5(username:realm:password) for Digest auth.
+func computeHA1(user, realm, pass string) string {
+	sum := md5.Sum([]byte(user + ":" + realm + ":" + pass))
+	return hex.EncodeToString(sum[:])
 }
