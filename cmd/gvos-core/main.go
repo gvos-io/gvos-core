@@ -1,11 +1,12 @@
 // Command gvos-core is the billing control plane: it exposes the
 // event endpoints Kamailio calls (call start/answer/end) plus health.
-// This spike wires the in-memory account store, rate table and call
-// state manager; the production build persists via PostgreSQL and
-// serves the full REST API.
+// Without -dsn it runs fully in memory with demo seed data (dev/test);
+// with -dsn it loads accounts/rates from PostgreSQL and persists CDRs,
+// ledger and audit rows.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,38 +17,70 @@ import (
 	"github.com/gvos/gvos-core/internal/account"
 	"github.com/gvos/gvos-core/internal/callstate"
 	"github.com/gvos/gvos-core/internal/rate"
+	"github.com/gvos/gvos-core/internal/store"
 )
 
-// Server bundles the spike control plane.
+// Server bundles the billing control plane.
 type Server struct {
 	store   *account.Store
 	rates   *rate.Table
 	calls   *callstate.Manager
 	cdrs    []*callstate.CDR
+	pg      *store.PG // nil in memory mode
 	startAt time.Time
 }
 
+// NewServer builds the in-memory demo server (dev/test mode).
 func NewServer() *Server {
 	s := &Server{store: account.NewStore(), startAt: time.Now()}
 
-	// Spike seed: one tenant chain and a small rate table. The tenant
+	// Demo seed: one tenant chain and a small rate table. The tenant
 	// root is postpaid (it invoices); agents and users are prepaid.
 	s.store.Put(&account.Account{ID: "tenant", Name: "Demo Tenant", RateGroup: "demo", Postpaid: true})
 	s.store.Put(&account.Account{ID: "agent1", ParentID: "tenant", Credit: 1000, RateGroup: "demo"})
 	s.store.Put(&account.Account{ID: "1000", ParentID: "agent1", Name: "Demo SIP user", Credit: 10, RateGroup: "demo"})
 
-	s.rates = rate.NewTable([]rate.Rate{
+	s.rates = demoRateTable()
+	s.calls = s.newCallManager()
+	return s
+}
+
+// NewPGServer loads accounts and the rate table from PostgreSQL.
+func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
+	pg, err := store.Open(ctx, dsn)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{store: account.NewStore(), pg: pg, startAt: time.Now()}
+	n, err := pg.LoadAccounts(ctx, s.store)
+	if err != nil {
+		pg.Close()
+		return nil, err
+	}
+	s.rates, err = pg.LoadRates(ctx, "demo")
+	if err != nil {
+		pg.Close()
+		return nil, err
+	}
+	log.Printf("loaded %d accounts from PostgreSQL", n)
+	s.calls = s.newCallManager()
+	return s, nil
+}
+
+func (s *Server) newCallManager() *callstate.Manager {
+	// Teardown in production sends CANCEL/BYE via Kamailio.
+	return callstate.NewManager(s.store, func(callID, reason string) {
+		log.Printf("TEARDOWN %s reason=%s", callID, reason)
+	}, 10*time.Second)
+}
+
+func demoRateTable() *rate.Table {
+	return rate.NewTable([]rate.Rate{
 		{Prefix: "86", Price: 0.06, InitDur: 60, StepDur: 6},
 		{Prefix: "8613", Price: 0.05, InitDur: 60, StepDur: 6},
 		{Prefix: "1", Price: 0.03, InitDur: 60, StepDur: 6},
 		{Prefix: "91", Price: 0.9, InitDur: 60, StepDur: 6},
 	})
-
-	// Teardown in production sends CANCEL/BYE via Kamailio.
-	s.calls = callstate.NewManager(s.store, func(callID, reason string) {
-		log.Printf("TEARDOWN %s reason=%s", callID, reason)
-	}, 10*time.Second)
-	return s
 }
 
 // handleStart is the pre-answer lock: Kamailio calls it on INVITE.
@@ -123,18 +156,36 @@ func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.cdrs = append(s.cdrs, cdr)
+	if s.pg != nil {
+		// Persistence failures log but never block the billing answer:
+		// the CDR is already returned and held in memory for retry.
+		if err := s.pg.InsertCDR(r.Context(), cdr); err != nil {
+			log.Printf("CDR persist failed (call %s): %v", cdr.CallID, err)
+		}
+		if bal, err := account.Balance(s.store, cdr.AccountID); err == nil {
+			if err := s.pg.AppendLedger(r.Context(), cdr.AccountID, -cdr.Cost, bal, "call-settle", cdr.CallID); err != nil {
+				log.Printf("ledger persist failed (call %s): %v", cdr.CallID, err)
+			}
+		}
+	}
 	writeJSON(w, 200, cdr)
 }
 
 // handleStats is a monitoring hook (Prometheus comes later).
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	bal, _ := account.Balance(s.store, "1000")
-	writeJSON(w, 200, map[string]any{
+	resp := map[string]any{
 		"live_calls": s.calls.Live(),
 		"cdrs":       len(s.cdrs),
-		"caller_bal": bal,
 		"uptime_s":   int(time.Since(s.startAt).Seconds()),
-	})
+		"mode":       "memory",
+	}
+	if s.pg != nil {
+		resp["mode"] = "postgres"
+	}
+	if bal, err := account.Balance(s.store, "1000"); err == nil {
+		resp["caller_bal"] = bal
+	}
+	writeJSON(w, 200, resp)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -149,9 +200,21 @@ func httpError(w http.ResponseWriter, code int, msg string) {
 
 func main() {
 	listen := flag.String("listen", ":8080", "HTTP listen address")
+	dsn := flag.String("dsn", "", "PostgreSQL DSN; empty = in-memory demo mode")
 	flag.Parse()
 
-	s := NewServer()
+	var s *Server
+	if *dsn != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		var err error
+		s, err = NewPGServer(ctx, *dsn)
+		cancel()
+		if err != nil {
+			log.Fatalf("postgres mode failed: %v", err)
+		}
+	} else {
+		s = NewServer()
+	}
 	log.Printf("gvos-core listening on %s", *listen)
 	log.Fatal(http.ListenAndServe(*listen, muxFor(s)))
 }

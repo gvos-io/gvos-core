@@ -4,6 +4,9 @@
 -- all timestamps UTC, soft-delete via deleted_at on mutable business
 -- rows, append-only audit on cdr/audit_log.
 
+-- gen_random_uuid(): built into PG14+. ltree needs the extension.
+CREATE EXTENSION IF NOT EXISTS ltree;
+
 CREATE TABLE tenants (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name        TEXT NOT NULL,

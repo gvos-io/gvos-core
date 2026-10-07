@@ -32,13 +32,14 @@ type Call struct {
 
 // Manager owns live calls and their billing lifecycle.
 type Manager struct {
-	mu       sync.Mutex
-	calls    map[string]*Call
-	store    *account.Store
-	charger  *billing.Charger
-	teardown TeardownFunc
-	interval time.Duration // interim deduction period
-	now      func() time.Time
+	mu          sync.Mutex
+	calls       map[string]*Call
+	store       *account.Store
+	charger     *billing.Charger
+	teardown    TeardownFunc
+	interval    time.Duration // interim deduction period
+	now         func() time.Time
+	lastRelease map[string]string // callID -> release reason set at teardown
 }
 
 func NewManager(store *account.Store, teardown TeardownFunc, interval time.Duration) *Manager {
@@ -46,12 +47,13 @@ func NewManager(store *account.Store, teardown TeardownFunc, interval time.Durat
 		interval = 10 * time.Second
 	}
 	return &Manager{
-		calls:    map[string]*Call{},
-		store:    store,
-		charger:  &billing.Charger{},
-		teardown: teardown,
-		interval: interval,
-		now:      time.Now,
+		calls:       map[string]*Call{},
+		store:       store,
+		charger:     &billing.Charger{},
+		teardown:    teardown,
+		interval:    interval,
+		now:         time.Now,
+		lastRelease: map[string]string{},
 	}
 }
 
@@ -105,10 +107,10 @@ func (m *Manager) Interim(callID string) (bool, error) {
 	if delta > 0 {
 		if _, err := m.store.Reserve(c.AccountID, delta); err != nil {
 			// Cannot afford the next interval: forced teardown.
+			m.markRelease(callID, "balance-exhausted")
 			if m.teardown != nil {
 				m.teardown(callID, "balance-exhausted")
 			}
-			_ = m.store.Commit("", c.AccountID, 0, 0) // no-op, balances already reflect accrual
 			return false, nil
 		}
 		// Reserve succeeded: fold the delta into accrued (release trick:
@@ -126,6 +128,7 @@ func (m *Manager) Interim(callID string) (bool, error) {
 	if err == nil {
 		bal, _ := account.Balance(m.store, c.AccountID)
 		if bal < nextCost-c.Accrued {
+			m.markRelease(callID, "balance-exhausted")
 			if m.teardown != nil {
 				m.teardown(callID, "balance-exhausted")
 			}
@@ -133,6 +136,14 @@ func (m *Manager) Interim(callID string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// markRelease remembers why a call is being torn down so the CDR can
+// carry it (End reads and clears it).
+func (m *Manager) markRelease(callID, reason string) {
+	m.mu.Lock()
+	m.lastRelease[callID] = reason
+	m.mu.Unlock()
 }
 
 // End finalizes the call: charges the real duration, releases the
@@ -152,9 +163,20 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 	m.mu.Unlock()
 
 	billedSecs, cost, err := m.charger.ChargeFor(entry, seconds)
+	release := "normal"
 	if err != nil {
 		// Unratable connected call: treat as zero cost but keep CDR.
-		billedSecs, cost = seconds, 0
+		billedSecs, cost, release = seconds, 0, "unratable"
+		err = nil
+	}
+	price := 0.0
+	if entry != nil {
+		price = entry.Price
+	}
+	// If the manager tore the call down for balance exhaustion, mark it.
+	if m.lastRelease[callID] != "" {
+		release = m.lastRelease[callID]
+		delete(m.lastRelease, callID)
 	}
 	// Final settle against what was already taken (pre-answer lock plus
 	// interim accruals): top up when the call cost more, refund when it
@@ -181,6 +203,8 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 		BilledSecs: billedSecs,
 		Cost:       cost,
 		RatePrefix: entry.Prefix,
+		Price:      price,
+		Release:    release,
 	}, nil
 }
 
@@ -194,6 +218,8 @@ type CDR struct {
 	BilledSecs int // billed seconds
 	Cost       float64
 	RatePrefix string
+	Price      float64 // per-minute price applied
+	Release    string  // normal | balance-exhausted | unratable
 }
 
 // Live returns the count of live calls (monitoring hook).
