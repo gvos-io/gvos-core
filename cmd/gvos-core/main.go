@@ -100,6 +100,7 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 		s.userIndex[a.Username] = a.ID
 	}
 	log.Printf("loaded %d accounts from PostgreSQL", n)
+	s.startReportWorker()
 	s.calls = s.newCallManager()
 	return s, nil
 }
@@ -367,6 +368,7 @@ func muxFor(s *Server) *http.ServeMux {
 	mux.HandleFunc("/v1/admin/blocklist", s.handleBlocklist)
 	mux.HandleFunc("/v1/admin/risk", s.handleRiskRules)
 	mux.HandleFunc("/v1/admin/stream-push", s.handleStreamPush)
+	mux.HandleFunc("/v1/admin/reports", s.handleReports)
 	mux.HandleFunc("/v1/stream/", s.handleMediaStream)
 	// Static admin console (token entered in the UI).
 	mux.HandleFunc("/ui", s.handleUI)

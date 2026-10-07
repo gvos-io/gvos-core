@@ -268,3 +268,118 @@ func marshalOrNull(v any) (any, error) {
 	}
 	return string(b), nil
 }
+
+// RollupDaily aggregates one day's CDRs into usage_daily (idempotent:
+// the row is replaced). This is the T+1 worker's core query.
+func (p *PG) RollupDaily(ctx context.Context, day string) (int, error) {
+	tag, err := p.pool.Exec(ctx, `
+        INSERT INTO usage_daily (day, tenant_id, account_id, calls, answered,
+                                 duration, billed_secs, cost)
+        SELECT start_time::date,
+               tenant_id,
+               account_id,
+               count(*),
+               count(*) FILTER (WHERE answer_time IS NOT NULL OR duration > 0),
+               coalesce(sum(duration), 0),
+               coalesce(sum(billed_secs), 0),
+               coalesce(sum(cost), 0)
+        FROM cdr
+        WHERE start_time::date = $1::date
+        GROUP BY 1, tenant_id, account_id
+        ON CONFLICT (day, tenant_id, account_id) DO UPDATE SET
+            calls = EXCLUDED.calls,
+            answered = EXCLUDED.answered,
+            duration = EXCLUDED.duration,
+            billed_secs = EXCLUDED.billed_secs,
+            cost = EXCLUDED.cost`,
+		day)
+	if err != nil {
+		return 0, fmt.Errorf("rollup: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// DailyReport rows for one account (or all when accountID is empty).
+type DailyReportRow struct {
+	Day        string  `json:"day"`
+	AccountID  string  `json:"account_id"`
+	Calls      int     `json:"calls"`
+	Answered   int     `json:"answered"`
+	Duration   int     `json:"duration"`
+	BilledSecs int     `json:"billed_secs"`
+	Cost       float64 `json:"cost"`
+}
+
+// QueryDaily reads rolled-up rows ordered by day.
+func (p *PG) QueryDaily(ctx context.Context, day, accountID string) ([]DailyReportRow, error) {
+	rows, err := p.pool.Query(ctx, `
+        SELECT day::text, account_id::text, calls, answered, duration, billed_secs, cost
+        FROM usage_daily
+        WHERE ($1 = '' OR day = $1::date)
+          AND ($2 = '' OR account_id::text = $2)
+        ORDER BY day DESC, cost DESC
+        LIMIT 500`, day, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("query daily: %w", err)
+	}
+	defer rows.Close()
+	var out []DailyReportRow
+	for rows.Next() {
+		var r DailyReportRow
+		if err := rows.Scan(&r.Day, &r.AccountID, &r.Calls, &r.Answered, &r.Duration, &r.BilledSecs, &r.Cost); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GatewayDaily aggregates answer-seizure ratio per gateway for one day
+// (the ASR/ACD/PDD report the PRD asks for).
+type GatewayReportRow struct {
+	Day       string  `json:"day"`
+	GatewayID string  `json:"gateway_id"`
+	Calls     int     `json:"calls"`
+	Answered  int     `json:"answered"`
+	ASR       float64 `json:"asr"`
+	ACDSecs   float64 `json:"acd_secs"`
+	Cost      float64 `json:"cost"`
+}
+
+// QueryGatewayDaily reads live CDR aggregates per gateway (day '' = all).
+func (p *PG) QueryGatewayDaily(ctx context.Context, day string) ([]GatewayReportRow, error) {
+	rows, err := p.pool.Query(ctx, `
+        SELECT d.day::text,
+               d.gw,
+               d.calls,
+               d.ans,
+               CASE WHEN d.calls = 0 THEN 0 ELSE d.ans::float / d.calls END,
+               CASE WHEN d.ans = 0 THEN 0 ELSE d.dur::float / d.ans END,
+               d.cost
+        FROM (
+            SELECT start_time::date AS day,
+                   coalesce(gateway_id::text, 'unknown') AS gw,
+                   count(*) AS calls,
+                   count(*) FILTER (WHERE duration > 0) AS ans,
+                   coalesce(sum(duration), 0) AS dur,
+                   coalesce(sum(cost), 0) AS cost
+            FROM cdr
+            WHERE ($1 = '' OR start_time::date = $1::date)
+            GROUP BY 1, 2
+        ) d
+        ORDER BY d.day DESC, d.calls DESC
+        LIMIT 200`, day)
+	if err != nil {
+		return nil, fmt.Errorf("query gateway daily: %w", err)
+	}
+	defer rows.Close()
+	var out []GatewayReportRow
+	for rows.Next() {
+		var r GatewayReportRow
+		if err := rows.Scan(&r.Day, &r.GatewayID, &r.Calls, &r.Answered, &r.ASR, &r.ACDSecs, &r.Cost); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

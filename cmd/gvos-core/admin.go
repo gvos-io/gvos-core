@@ -379,3 +379,89 @@ func computeHA1(user, realm, pass string) string {
 	sum := md5.Sum([]byte(user + ":" + realm + ":" + pass))
 	return hex.EncodeToString(sum[:])
 }
+
+// startReportWorker runs the T+1 rollup: every hour, aggregates
+// yesterday (and today-so-far at each pass, so intra-day numbers
+// stay fresh). Manual trigger: POST /v1/admin/reports {"day":"..."}.
+func (s *Server) startReportWorker() {
+	if s.pg == nil {
+		return
+	}
+	run := func() {
+		ctx, cancel := contextWithTimeoutDuration(context.Background(), 30*time.Second)
+		defer cancel()
+		for _, day := range []string{todayStr(-1), todayStr(0)} {
+			if n, err := s.pg.RollupDaily(ctx, day); err != nil {
+				logPrintf("REPORT rollup %s failed: %v", day, err)
+			} else if n > 0 {
+				logPrintf("REPORT rollup %s: %d account-rows", day, n)
+			}
+		}
+	}
+	go func() {
+		run() // immediate first pass
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for range t.C {
+			run()
+		}
+	}()
+}
+
+func todayStr(offsetDays int) string {
+	return time.Now().AddDate(0, 0, offsetDays).Format("2006-01-02")
+}
+
+// POST /v1/admin/reports {"day":"2026-10-07"} - manual rollup trigger;
+// GET /v1/admin/reports?day=&account=&view=daily|gateway - report read.
+func (s *Server) handleReports(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if s.pg == nil {
+		httpError(w, 503, "reports need postgres mode")
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		var req struct {
+			Day string `json:"day"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Day == "" {
+			req.Day = todayStr(0)
+		}
+		ctx, cancel := contextWithTimeout(r.Context())
+		defer cancel()
+		n, err := s.pg.RollupDaily(ctx, req.Day)
+		if err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		s.audit(r, "rollup", "usage_daily", req.Day, nil, map[string]any{"rows": n})
+		writeJSON(w, 200, map[string]any{"day": req.Day, "account_rows": n})
+	case http.MethodGet:
+		day := r.URL.Query().Get("day")
+		account := r.URL.Query().Get("account")
+		view := r.URL.Query().Get("view")
+		ctx, cancel := contextWithTimeout(r.Context())
+		defer cancel()
+		if view == "gateway" {
+			rows, err := s.pg.QueryGatewayDaily(ctx, day)
+			if err != nil {
+				httpError(w, 500, err.Error())
+				return
+			}
+			writeJSON(w, 200, map[string]any{"view": "gateway", "rows": rows, "count": len(rows)})
+			return
+		}
+		rows, err := s.pg.QueryDaily(ctx, day, account)
+		if err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"view": "daily", "rows": rows, "count": len(rows)})
+	default:
+		httpError(w, 405, "GET or POST")
+	}
+}
