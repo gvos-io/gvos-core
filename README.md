@@ -4,7 +4,7 @@
 
 > 战略与市场依据见 [vos-competitive-analysis.md](vos-competitive-analysis.md)，产品/架构/定价/迁移方案见 [docs/](docs/)。
 
-## 当前状态：M4 核心闭环完成（SIP 实链路 + 管理台）
+## 当前状态：M4-M8 完成（含媒体面/录音/黑名单，soak 运行中）
 
 已完成的端到端闭环（INVITE 锁定 → 通话 → BYE 结算 → CDR → 落库）：
 
@@ -70,6 +70,16 @@ deploy/            # docker-compose + Kamailio cfg + Dockerfile
 docs/              # PRD / 架构 / 定价 / 迁移方案
 research/          # 竞品与市场原始调研
 ```
+
+
+## 录音 / 黑名单（P1 模块）
+
+- **录音**：管理台“录音: 开/关”或 `POST /v1/admin/record {"enabled":true}`；开启后每通电话
+  rtpengine 落 pcap+元数据（volume `recdata`，按 call-id 命名），CDR `recorded` 列标记
+- **黑名单**：`POST /v1/admin/blocklist {"kind":"black|white","scope":"src|dest","pattern":"86139"}`
+  （加 `"remove":true` 删除）；前缀索引 220ns/次（10 万规则）；白名单进入 default-deny 模式；
+  拦截发生在计费之前（403 带命中规则）
+- **长稳**：`bash test/sipp/soak.sh 1440 10 2`（每波对账检查点；UAS 波间重启）
 
 ## 管理台
 
