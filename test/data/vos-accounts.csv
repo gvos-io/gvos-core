@@ -1,0 +1,7 @@
+账户,名称,上级账户,费率组,余额
+agent_a,华北代理,,wholesale,5000.5000000
+agent_b,华南代理,,wholesale,1200.0000000
+user_1001,客户甲,agent_a,retail,86.4200000
+user_1002,客户乙,agent_a,retail,12.0000000
+user_1003,客户丙,agent_b,retail,-3.7000000
+user_orphan,孤儿用户,agent_b,retail,5.0000000

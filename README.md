@@ -78,3 +78,16 @@ compose 起来后打开 `http://127.0.0.1:8080/ui`，输入开发令牌 `dev-adm
 - **费率**：前缀表 + 保存（下一通电话即生效）
 - **话单 CDR**：真实 SIP 呼叫的话单（含计费秒数/费用/释放原因）
 - 顶部统计卡每 5 秒刷新（在线呼叫/累计 CDR/余额）
+
+## VOS 迁移工具（gvos-migrate）
+
+```bash
+# 四步流水线（对 VOS 导出的账户/费率/网关 CSV）
+go run ./cmd/gvos-migrate extract  -accounts vos-accounts.csv -rates vos-rates.csv -gateways vos-gw.csv -out snapshot.json
+go run ./cmd/gvos-migrate validate -snapshot snapshot.json     # 孤儿账户/负费率拦截
+go run ./cmd/gvos-migrate plan     -snapshot snapshot.json -out plan.md  # 语义差异表
+go run ./cmd/gvos-migrate load     -snapshot snapshot.json -api http://127.0.0.1:8080 -token dev-admin-token
+
+# 已验证：6 账户+6 费率导入运行中系统，导入账户立即可计费
+# 负余额清零导入（欠费留在旧账）、非数字前缀自动清洗、中英文表头自适应
+```
