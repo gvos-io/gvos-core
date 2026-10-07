@@ -25,7 +25,7 @@ func TestStartEndFullCycle(t *testing.T) {
 	var torn []string
 	m, store := setup(t, func(id, reason string) { torn = append(torn, id) })
 
-	err := m.Start("call-1", "end1", "8613800138000", endToEndEntry(), 60)
+	err := m.Start("call-1", "end1", "8613800138000", endToEndEntry(), 60, false)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -59,14 +59,14 @@ func TestStartEndFullCycle(t *testing.T) {
 func TestInsufficientBalanceRejectsStart(t *testing.T) {
 	m, _ := setup(t, nil)
 	// end1 has 100; a call estimated at 0.06 is fine. Drain the parent instead.
-	err := m.Start("call-1", "agent1", "86", endToEndEntry(), 60)
+	err := m.Start("call-1", "agent1", "86", endToEndEntry(), 60, false)
 	if err != nil {
 		t.Fatalf("agent1 should afford: %v", err)
 	}
 	m.End("call-1", 60)
 
 	// Now an end1 call with a huge estimate must fail.
-	err = m.Start("call-2", "end1", "86", endToEndEntry(), 100000)
+	err = m.Start("call-2", "end1", "86", endToEndEntry(), 100000, false)
 	if err == nil {
 		t.Fatal("expected insufficient balance error on Start")
 	}
@@ -86,7 +86,7 @@ func TestTeardownOnExhaustion(t *testing.T) {
 	cur := base
 	m.SetClock(func() time.Time { return cur })
 
-	m.Start("call-1", "end1", "86", endToEndEntry(), 60)
+	m.Start("call-1", "end1", "86", endToEndEntry(), 60, false)
 
 	// Advance 60s: interim charge 0.06. Both end1 and agent1 had 100,
 	// minus the 0.06 start lock = 99.94. Drain 99.9 so end1 is left with

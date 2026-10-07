@@ -30,11 +30,11 @@ func TestConcurrentLimitOwn(t *testing.T) {
 	store.Put(&account.Account{ID: "user-a", ParentID: "agent", Credit: 1e3, Concurrent: 2})
 
 	for i := 1; i <= 2; i++ {
-		if err := m.Start("c"+string(rune('0'+i)), "user-a", "86", entry2(), 60); err != nil {
+		if err := m.Start("c"+string(rune('0'+i)), "user-a", "86", entry2(), 60, false); err != nil {
 			t.Fatalf("call %d should pass: %v", i, err)
 		}
 	}
-	err := m.Start("c3", "user-a", "86", entry2(), 60)
+	err := m.Start("c3", "user-a", "86", entry2(), 60, false)
 	var limit *ErrLimit
 	if !errors.As(err, &limit) || limit.Kind != "concurrent" {
 		t.Fatalf("expected concurrent limit error, got %v", err)
@@ -42,7 +42,7 @@ func TestConcurrentLimitOwn(t *testing.T) {
 
 	// End one call -> the next passes again.
 	m.End("c1", 60)
-	if err := m.Start("c3", "user-a", "86", entry2(), 60); err != nil {
+	if err := m.Start("c3", "user-a", "86", entry2(), 60, false); err != nil {
 		t.Fatalf("start after end should pass: %v", err)
 	}
 }
@@ -52,13 +52,13 @@ func TestConcurrentLimitOwn(t *testing.T) {
 func TestConcurrentLimitAncestorSubtree(t *testing.T) {
 	m, _ := limitSetup(t) // agent has Concurrent: 2
 
-	if err := m.Start("a1", "user-a", "86", entry2(), 60); err != nil {
+	if err := m.Start("a1", "user-a", "86", entry2(), 60, false); err != nil {
 		t.Fatalf("call 1 (user-a): %v", err)
 	}
-	if err := m.Start("b1", "user-b", "86", entry2(), 60); err != nil {
+	if err := m.Start("b1", "user-b", "86", entry2(), 60, false); err != nil {
 		t.Fatalf("call 2 (user-b): %v", err)
 	}
-	err := m.Start("a2", "user-a", "86", entry2(), 60)
+	err := m.Start("a2", "user-a", "86", entry2(), 60, false)
 	var limit *ErrLimit
 	if !errors.As(err, &limit) || limit.Kind != "concurrent" || limit.AccountID != "agent" {
 		t.Fatalf("expected agent sub-tree limit, got %+v", err)
@@ -73,10 +73,10 @@ func TestCPSLimit(t *testing.T) {
 	cur := base
 	m.SetClock(func() time.Time { return cur })
 
-	if err := m.Start("p1", "user-b", "86", entry2(), 60); err != nil {
+	if err := m.Start("p1", "user-b", "86", entry2(), 60, false); err != nil {
 		t.Fatalf("first call in second: %v", err)
 	}
-	err := m.Start("p2", "user-b", "86", entry2(), 60)
+	err := m.Start("p2", "user-b", "86", entry2(), 60, false)
 	var limit *ErrLimit
 	if !errors.As(err, &limit) || limit.Kind != "cps" {
 		t.Fatalf("expected cps limit, got %v", err)
@@ -84,7 +84,7 @@ func TestCPSLimit(t *testing.T) {
 
 	// Next second passes.
 	cur = base.Add(time.Second)
-	if err := m.Start("p2", "user-b", "86", entry2(), 60); err != nil {
+	if err := m.Start("p2", "user-b", "86", entry2(), 60, false); err != nil {
 		t.Fatalf("call in next second: %v", err)
 	}
 }
@@ -96,7 +96,7 @@ func TestNoLimitWhenZero(t *testing.T) {
 	store.Put(&account.Account{ID: "user-c", ParentID: "tenant", Credit: 1e9, RateGroup: "g"})
 
 	for i := 0; i < 50; i++ {
-		if err := m.Start("n"+string(rune('a'+i)), "user-c", "86", entry2(), 60); err != nil {
+		if err := m.Start("n"+string(rune('a'+i)), "user-c", "86", entry2(), 60, false); err != nil {
 			t.Fatalf("call %d on unlimited account: %v", i, err)
 		}
 	}

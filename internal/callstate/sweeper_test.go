@@ -20,7 +20,7 @@ func TestSweeperSettlesZombies(t *testing.T) {
 	cur := base
 	m.SetClock(func() time.Time { return cur })
 
-	if err := m.Start("z1", "u1", "86", entry2(), 60); err != nil {
+	if err := m.Start("z1", "u1", "86", entry2(), 60, false); err != nil {
 		t.Fatal(err)
 	}
 	if m.Live() != 1 {
@@ -53,7 +53,7 @@ func TestSweeperIgnoresFreshCalls(t *testing.T) {
 	cur := base
 	m.SetClock(func() time.Time { return cur })
 
-	m.Start("f1", "u1", "86", entry2(), 60)
+	m.Start("f1", "u1", "86", entry2(), 60, false)
 	cur = base.Add(5 * time.Minute)
 	m.sweep(10 * time.Minute)
 
@@ -73,7 +73,7 @@ func TestSweeperLoop(t *testing.T) {
 	cur := base
 	m.SetClock(func() time.Time { return cur })
 
-	m.Start("loop1", "u1", "86", entry2(), 60)
+	m.Start("loop1", "u1", "86", entry2(), 60, false)
 
 	stop := m.StartSweeper(50*time.Millisecond, 10*time.Millisecond)
 	deadline := time.After(3 * time.Second)
@@ -103,7 +103,7 @@ func TestZombieCDRReleaseReason(t *testing.T) {
 	cur := base
 	m.SetClock(func() time.Time { return cur })
 
-	m.Start("zr1", "u1", "86", entry2(), 60)
+	m.Start("zr1", "u1", "86", entry2(), 60, false)
 	cur = base.Add(11 * time.Minute)
 	m.markRelease("zr1", "zombie-timeout")
 	cdr, err := m.End("zr1", 660)

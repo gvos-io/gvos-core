@@ -216,3 +216,22 @@ func (s *Server) audit(r *http.Request, action, entity, entityID string, before,
 func contextWithTimeout(parent context.Context) (context.Context, context.CancelFunc) {
 	return contextWithTimeoutDuration(parent, 5*time.Second)
 }
+// POST /v1/admin/record {"enabled":bool} - global recording toggle.
+// Kamailio reads the start-event answer's record flag and engages
+// rtpengine recording per call.
+func (s *Server) handleRecordToggle(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) || !requirePOST(w, r) {
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, 400, "body required")
+		return
+	}
+	before := s.recordEnabled
+	s.recordEnabled = req.Enabled
+	s.audit(r, "toggle", "recording", "", map[string]any{"enabled": before}, map[string]any{"enabled": req.Enabled})
+	writeJSON(w, 200, map[string]any{"enabled": s.recordEnabled})
+}

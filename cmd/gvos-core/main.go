@@ -32,6 +32,7 @@ type Server struct {
 	cdrs      []*callstate.CDR
 	pg        *store.PG   // nil in memory mode
 	userIndex map[string]string // SIP username -> account ID (PG mode)
+	recordEnabled bool          // global recording opt-in (admin toggle)
 	startAt   time.Time
 }
 
@@ -154,7 +155,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 			accID = "1000"
 		}
 	}
-	if err := s.calls.Start(req.CallID, accID, req.To, entry, 60); err != nil {
+	if err := s.calls.Start(req.CallID, accID, req.To, entry, 60, s.recordEnabled); err != nil {
 		// Insufficient balance is a 403 for the caller; account limits
 		// are a 429 (retry later); unknown account a 404.
 		var limit *callstate.ErrLimit
@@ -175,6 +176,8 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		"rate_prefix": entry.Prefix,
 		"price":       entry.Price,
 		"lock":        entry.Price,
+		// Recording opt-in: Kamailio calls start_recording() when true.
+		"record": s.recordEnabled,
 	})
 }
 
@@ -319,6 +322,7 @@ func muxFor(s *Server) *http.ServeMux {
 	mux.HandleFunc("/v1/admin/topup", s.handleTopUp)
 	mux.HandleFunc("/v1/admin/rates", s.routeRates)
 	mux.HandleFunc("/v1/admin/cdrs", s.handleCDRList)
+	mux.HandleFunc("/v1/admin/record", s.handleRecordToggle)
 	// Static admin console (token entered in the UI).
 	mux.HandleFunc("/ui", s.handleUI)
 	mux.HandleFunc("/ui/", s.handleUI)

@@ -28,6 +28,7 @@ type Call struct {
 	Lock        float64 // pre-answer reservation
 	Accrued     float64 // deducted so far
 	Tick        int     // interim deduction rounds completed
+	Recorded    bool    // rtpengine recording engaged for this call
 }
 
 // ErrLimit encapsulates a rejection due to account limits so the HTTP
@@ -128,7 +129,7 @@ func (m *Manager) sweep(timeout time.Duration) {
 // Start reserves the estimate and registers the call, after checking
 // the account's concurrent and CPS limits. Errors: account.ErrLimit
 // (HTTP 429), insufficient balance (403), no account (404).
-func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedSecs int) error {
+func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedSecs int, recorded bool) error {
 	acc, err := m.store.Get(accountID)
 	if err != nil {
 		return err
@@ -161,6 +162,7 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 		Rate:        e,
 		Start:       m.now(),
 		Lock:        est,
+		Recorded:    recorded,
 	}
 	m.mu.Unlock()
 	return nil
@@ -338,6 +340,7 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 	lock := c.Lock
 	accrued := c.Accrued
 	start := c.Start
+	recorded := c.Recorded
 	m.mu.Unlock()
 
 	billedSecs, cost, err := m.charger.ChargeFor(entry, seconds)
@@ -383,6 +386,7 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 		RatePrefix: entry.Prefix,
 		Price:      price,
 		Release:    release,
+		Recorded:   recorded,
 	}, nil
 }
 
@@ -400,6 +404,7 @@ type CDR struct {
 	Release    string  // normal | balance-exhausted | unratable
 	PDDMs      int     // post-dial delay (INVITE -> first 200), Kamailio-measured
 	SIPCode    int     // final SIP response on the release path
+	Recorded   bool    // rtpengine recording was engaged (file named by call-id)
 }
 
 // Live returns the count of live calls (monitoring hook).

@@ -59,6 +59,8 @@ services:
       dockerfile: rtpengine.Dockerfile
     image: gvos-rtpengine
     restart: unless-stopped
+    volumes:
+      - recdata:/recording
 
   demo-gw:
     # SIPp UAS: answers INVITEs with 200. ctaloi/sipp is pinned locally.
@@ -68,3 +70,4 @@ services:
 
 volumes:
   pgdata:
+  recdata:

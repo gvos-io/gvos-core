@@ -55,6 +55,7 @@ const adminHTML = `<!DOCTYPE html>
   <button id="tab-accounts" onclick="tab('accounts')">账户</button>
   <button id="tab-rates" onclick="tab('rates')">费率</button>
   <button id="tab-cdrs" onclick="tab('cdrs')">话单 CDR</button>
+  <button id="rec-btn" onclick="toggleRecord()" style="margin-left:auto;color:var(--warn)">录音: 关</button>
 </nav>
 <main>
   <div id="msg" class="msg"></div>
@@ -92,7 +93,7 @@ const adminHTML = `<!DOCTYPE html>
     <button id="refresh" onclick="load()">刷新</button>
     <table id="tbl-cdrs"><thead><tr>
       <th>Call-ID</th><th>账户</th><th>被叫</th><th>费率前缀</th>
-      <th class="num">通话秒</th><th class="num">计费秒</th><th class="num">费用</th><th>释放原因</th>
+      <th class="num">通话秒</th><th class="num">计费秒</th><th class="num">费用</th><th>释放原因</th><th>录音</th>
     </tr></thead><tbody></tbody></table>
   </div>
 </main>
@@ -181,7 +182,15 @@ async function loadCDRs() {
   document.querySelector('#tbl-cdrs tbody').innerHTML = (j.cdrs||[]).map(c =>
     '<tr><td>'+esc(c.CallID)+'</td><td>'+esc(c.AccountID)+'</td><td>'+esc(c.Dest)+'</td><td>'+esc(c.RatePrefix)+'</td>'+
     '<td class="num">'+(c.Duration??0)+'</td><td class="num">'+(c.BilledSecs??0)+'</td><td class="num">'+fmt(c.Cost)+'</td>'+
-    '<td>'+(c.Release==='normal'?'<span class="badge ok">normal</span>':'<span class="badge err">'+esc(c.Release)+'</span>')+'</td></tr>').join('');
+    '<td>'+(c.Release==='normal'?'<span class="badge ok">normal</span>':'<span class="badge err">'+esc(c.Release)+'</span>')+'</td>'+
+    '<td>'+(c.Recorded?'<span class="badge ok">●</span>':'—')+'</td></tr>').join('');
+}
+async function toggleRecord() {
+  const b = document.getElementById('rec-btn');
+  const on = b.textContent.includes('开');
+  const j = await api('/v1/admin/record', {method:'POST', body:JSON.stringify({enabled:!on})});
+  b.textContent = '录音: ' + (j.enabled ? '开' : '关');
+  msg(true, j.enabled ? '录音已开启：下一通电话起生效' : '录音已关闭');
 }
 tab('accounts');
 load();
