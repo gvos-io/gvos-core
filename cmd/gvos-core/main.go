@@ -20,6 +20,7 @@ import (
 	"github.com/gvos/gvos-core/internal/account"
 	"github.com/gvos/gvos-core/internal/blocklist"
 	"github.com/gvos/gvos-core/internal/callstate"
+	"github.com/gvos/gvos-core/internal/mediastream"
 	"github.com/gvos/gvos-core/internal/riskctrl"
 	"github.com/gvos/gvos-core/internal/rate"
 	"github.com/gvos/gvos-core/internal/store"
@@ -37,6 +38,7 @@ type Server struct {
 	recordEnabled bool          // global recording opt-in (admin toggle)
 	blocklist *blocklist.List  // number screening (black/white rules)
 	risk      *riskctrl.Engine // real-time fraud engine (freq/cost/prefix)
+	media     *mediastream.Manager // AI media plane (per-call bidirectional streams)
 	startAt   time.Time
 }
 
@@ -57,7 +59,7 @@ func (s *Server) rebuildRates() {
 
 // NewServer builds the in-memory demo server (dev/test mode).
 func NewServer() *Server {
-	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), risk: riskctrl.New(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), risk: riskctrl.New(), media: mediastream.New(), startAt: time.Now()}
 
 	// Demo seed: one tenant chain and a small rate table. The tenant
 	// root is postpaid (it invoices); agents and users are prepaid.
@@ -77,7 +79,7 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), risk: riskctrl.New(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), risk: riskctrl.New(), media: mediastream.New(), startAt: time.Now()}
 	n, err := pg.LoadAccounts(ctx, s.store)
 	if err != nil {
 		pg.Close()
@@ -197,6 +199,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 403, err.Error())
 		return
 	}
+	// Media plane: open the bidirectional stream so AI subscribers
+	// can attach even before the first RTP chunk.
+	s.media.Open(req.CallID)
+
 	writeJSON(w, 200, map[string]any{
 		"call_id":     req.CallID,
 		"rate_prefix": entry.Prefix,
@@ -257,6 +263,12 @@ func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request) {
 	// Fraud engine settlement: reconcile the daily cost accumulation
 	// with the actual CDR cost (estimate was 0.05 basis at start).
 	s.risk.SettleCost(cdr.AccountID, 0.05, cdr.Cost)
+	// Media plane: close the call's stream (subscribers drop, final
+	// stats reported for the RTT budget audit).
+	if st, ok := s.media.Close(req.CallID); ok && st.UplinkChunks+st.DownlinkChunks > 0 {
+		log.Printf("MEDIA call=%s up=%d down=%d maxRTT=%dms", req.CallID,
+			st.UplinkChunks, st.DownlinkChunks, st.MaxRTTMs)
+	}
 	if req.PDDMs > 0 {
 		cdr.PDDMs = req.PDDMs
 	}
@@ -354,6 +366,7 @@ func muxFor(s *Server) *http.ServeMux {
 	mux.HandleFunc("/v1/admin/record", s.handleRecordToggle)
 	mux.HandleFunc("/v1/admin/blocklist", s.handleBlocklist)
 	mux.HandleFunc("/v1/admin/risk", s.handleRiskRules)
+	mux.HandleFunc("/v1/stream/", s.handleMediaStream)
 	// Static admin console (token entered in the UI).
 	mux.HandleFunc("/ui", s.handleUI)
 	mux.HandleFunc("/ui/", s.handleUI)
