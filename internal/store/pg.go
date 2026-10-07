@@ -38,7 +38,7 @@ func (p *PG) Close() { p.pool.Close() }
 // (the live reserve/commit surface). Soft-deleted rows are skipped.
 func (p *PG) LoadAccounts(ctx context.Context, dst *account.Store) (int, error) {
 	rows, err := p.pool.Query(ctx, `
-        SELECT id::text, coalesce(parent_id::text, ''), name,
+        SELECT id::text, coalesce(parent_id::text, ''), name, username,
                rate_group, postpaid, credit, max_debt, max_concurrent, max_cps
         FROM accounts
         WHERE deleted_at IS NULL
@@ -51,17 +51,17 @@ func (p *PG) LoadAccounts(ctx context.Context, dst *account.Store) (int, error) 
 	n := 0
 	for rows.Next() {
 		var (
-			id, parent, name, group string
-			postpaid                 bool
-			credit, maxDebt          float64
-			maxConc, maxCPS          int
+			id, parent, name, username, group string
+			postpaid                          bool
+			credit, maxDebt                   float64
+			maxConc, maxCPS                   int
 		)
-		if err := rows.Scan(&id, &parent, &name, &group, &postpaid, &credit, &maxDebt, &maxConc, &maxCPS); err != nil {
+		if err := rows.Scan(&id, &parent, &name, &username, &group, &postpaid, &credit, &maxDebt, &maxConc, &maxCPS); err != nil {
 			return n, fmt.Errorf("scan account: %w", err)
 		}
 		if err := dst.Put(&account.Account{
-			ID: id, ParentID: parent, Name: name, RateGroup: group,
-			Postpaid: postpaid, Credit: credit, MaxDebt: maxDebt,
+			ID: id, ParentID: parent, Name: name, Username: username,
+			RateGroup: group, Postpaid: postpaid, Credit: credit, MaxDebt: maxDebt,
 			Concurrent: maxConc, CPS: maxCPS,
 		}); err != nil {
 			return n, err

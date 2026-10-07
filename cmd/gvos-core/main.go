@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -24,13 +25,14 @@ import (
 
 // Server bundles the billing control plane.
 type Server struct {
-	store    *account.Store
-	rates    *rate.Table
-	rateList []rate.Rate // memory-mode source of truth for the table
-	calls    *callstate.Manager
-	cdrs     []*callstate.CDR
-	pg       *store.PG // nil in memory mode
-	startAt  time.Time
+	store     *account.Store
+	rates     *rate.Table
+	rateList  []rate.Rate // memory-mode source of truth for the table
+	calls     *callstate.Manager
+	cdrs      []*callstate.CDR
+	pg        *store.PG   // nil in memory mode
+	userIndex map[string]string // SIP username -> account ID (PG mode)
+	startAt   time.Time
 }
 
 // rebuildRates recomputes the lookup table. PG mode reloads from the
@@ -81,9 +83,21 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 		pg.Close()
 		return nil, err
 	}
+	s.userIndex = map[string]string{}
+	for _, a := range mustList(s.store) {
+		s.userIndex[a.Username] = a.ID
+	}
 	log.Printf("loaded %d accounts from PostgreSQL", n)
 	s.calls = s.newCallManager()
 	return s, nil
+}
+
+func mustList(st *account.Store) []*account.Account {
+	l, err := st.List()
+	if err != nil {
+		return nil
+	}
+	return l
 }
 func (s *Server) newCallManager() *callstate.Manager {
 	// Teardown in production sends CANCEL/BYE via Kamailio.
@@ -130,11 +144,13 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	if accID == "" {
 		accID = "1000" // spike default caller
 	}
-	// Spike compatibility: unknown callers (e.g. SIPp's default
-	// "service" user) bill the demo account instead of 404. Production
-	// rejects with 401/404 after real auth.
+	// Spike compatibility: unknown callers resolve by SIP username
+	// (Kamailio sends $fU which is the auth username), then fall back
+	// to the demo account. Production rejects with 401/404 after auth.
 	if _, err := s.store.Get(accID); err != nil {
-		if _, err2 := s.store.Get("1000"); err2 == nil {
+		if id, ok := s.userIndex[accID]; ok {
+			accID = id
+		} else if _, err2 := s.store.Get("1000"); err2 == nil {
 			accID = "1000"
 		}
 	}
@@ -266,11 +282,18 @@ func main() {
 	dsn := flag.String("dsn", "", "PostgreSQL DSN; empty = in-memory demo mode")
 	flag.Parse()
 
+	// Compose/deploy environments pass the DSN via env; the flag wins
+	// when both are set.
+	dsnVal := *dsn
+	if dsnVal == "" {
+		dsnVal = os.Getenv("GVOS_DB_DSN")
+	}
+
 	var s *Server
-	if *dsn != "" {
+	if dsnVal != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		var err error
-		s, err = NewPGServer(ctx, *dsn)
+		s, err = NewPGServer(ctx, dsnVal)
 		cancel()
 		if err != nil {
 			log.Fatalf("postgres mode failed: %v", err)

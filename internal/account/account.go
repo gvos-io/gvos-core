@@ -12,6 +12,7 @@ import (
 // group can add margin on the same CDR.
 type Account struct {
 	ID         string
+	Username   string // SIP auth username (PG mode index key)
 	Name       string
 	ParentID   string // "" for tenant root
 	RateGroup  string // which rate.Table applies
