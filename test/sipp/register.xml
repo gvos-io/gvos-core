@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- REGISTER with SIP Digest auth: REGISTER (401) -> REGISTER+Auth
+     (200). User 1000 / password demo1000. -->
+
+<scenario name="Register">
+  <send retrans="500">
+    <![CDATA[
+      REGISTER sip:gvos.local SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK[call_number]
+      From: "1000" <sip:1000@gvos.local>;tag=[call_number]
+      To: "1000" <sip:1000@gvos.local>
+      Call-ID: [call_id]
+      CSeq: 1 REGISTER
+      Contact: <sip:1000@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Expires: 3600
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <recv response="401" auth="true">
+  </recv>
+
+  <send retrans="500">
+    <![CDATA[
+      REGISTER sip:gvos.local SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK[call_number]
+      From: "1000" <sip:1000@gvos.local>;tag=[call_number]
+      To: "1000" <sip:1000@gvos.local>
+      Call-ID: [call_id]
+      CSeq: 2 REGISTER
+      Contact: <sip:1000@[local_ip]:[local_port]>
+      [authentication username=1000 password=demo1000]
+      Max-Forwards: 70
+      Expires: 3600
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <recv response="200">
+  </recv>
+</scenario>
