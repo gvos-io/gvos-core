@@ -4,7 +4,7 @@
 
 > 战略与市场依据见 [vos-competitive-analysis.md](vos-competitive-analysis.md)，产品/架构/定价/迁移方案见 [docs/](docs/)。
 
-## 当前状态：M4 持久化 + 管理 API（进行中）
+## 当前状态：M4 核心闭环完成（SIP 实链路 + 管理台）
 
 已完成的端到端闭环（INVITE 锁定 → 通话 → BYE 结算 → CDR → 落库）：
 
@@ -70,3 +70,11 @@ deploy/            # docker-compose + Kamailio cfg + Dockerfile
 docs/              # PRD / 架构 / 定价 / 迁移方案
 research/          # 竞品与市场原始调研
 ```
+
+## 管理台
+
+compose 起来后打开 `http://127.0.0.1:8080/ui`，输入开发令牌 `dev-admin-token`：
+- **账户**：三层链视图 + 创建账户 + 充值/调整（写审计）
+- **费率**：前缀表 + 保存（下一通电话即生效）
+- **话单 CDR**：真实 SIP 呼叫的话单（含计费秒数/费用/释放原因）
+- 顶部统计卡每 5 秒刷新（在线呼叫/累计 CDR/余额）
