@@ -4,28 +4,41 @@
 
 > 战略与市场依据见 [vos-competitive-analysis.md](vos-competitive-analysis.md)，产品/架构/定价/迁移方案见 [docs/](docs/)。
 
-## 当前状态：M0-M3 架构 spike ✅
+## 当前状态：M4 持久化 + 管理 API（进行中）
 
-已完成的端到端闭环（INVITE 锁定 → 通话 → BYE 结算 → CDR）：
+已完成的端到端闭环（INVITE 锁定 → 通话 → BYE 结算 → CDR → 落库）：
 
 - **计费核心（Go，自研，全部单测覆盖）**
   - `internal/rate`：费率前缀最长匹配（从被叫号码派生前缀探测哈希表，10 万条费率下微秒级）、时段窗口覆盖（周末/夜间费率）、7 位小数第 8 位进一（VOS 精度语义）
   - `internal/billing`：计费时长步长 60+6 / 6+6 / 1+1 / N+M、MinDur、首步价/增量价分解——不变量：**cost 永远精确对 billedSecs 定价**
-  - `internal/account`：租户→多级代理→账户树、全链路原子预锁定（all-or-nothing 回滚）、后付账户跳过锁定、环检测
-  - `internal/callstate`：预锁定→周期扣减→余额耗尽**强制拆线**（teardown 回调）→ 结算补扣/退还，CDR 输出
-- **事件入口**：`cmd/gvos-core` HTTP API（`/v1/call/start|answer|end`、`/v1/stats`、`/healthz`），Kamailio 侧对接点
-- **数据模型**：`migrations/001_init.sql`（账户/费率/网关/路由/CDR 月分区/账本/审计/黑白名单，NUMERIC(18,7)）
-- **部署**：`deploy/docker-compose.yml`（gv-core + Kamailio + RTPengine + demo 网关 + PostgreSQL）一键起
+  - `internal/account`：租户→多级代理→账户树、全链路原子预锁定（all-or-nothing 回滚）、后付账户跳过锁定、环检测、List
+  - `internal/callstate`：预锁定→周期扣减→余额耗尽**强制拆线**（teardown 回调，拆线原因写入 CDR）→ 结算补扣/退还，CDR 输出
+- **持久化（`internal/store`，pgx v5.6）**：账户/费率加载（窗口费率→Effective）、CDR 落月分区表、账本/审计（jsonb before/after）、账户创建/充值（事务）/费率 upsert
+- **双运行模式**：`-dsn` 接 PG（加载+落库）；无 `-dsn` 纯内存（演示/测试）。存储失败只记日志不阻塞计费应答
+- **管理 API**（`/v1/admin/*`，Bearer 守卫）：账户创建/列表、充值（PG 模式下事务+账本+审计）、费率 upsert **下一通电话即时生效**；全部变更写审计
+- **数据模型**：`migrations/001_init.sql` + `002_seed.sql`（演示数据）
+- **部署**：`deploy/docker-compose.yml`（gv-core + Kamailio + RTPengine + demo 网关 + PostgreSQL 带 5432 映射）
 
 ```bash
 # 本地跑测试与构建
 go test ./... && go build -o bin/gvos-core ./cmd/gvos-core
 
-# 冒烟：一通电话的完整计费闭环
+# 真 PG 集成测试（跳过条件：未设置 DSN）
+docker compose -f deploy/docker-compose.yml up -d postgres
+docker exec -i deploy-postgres-1 psql -U gvos < migrations/002_seed.sql
+GVOS_TEST_DSN="postgres://gvos:gvos_dev@127.0.0.1:5432/gvos?sslmode=disable" \
+  go test ./internal/store/ -v
+
+# 冒烟：内存模式一通电话的完整计费闭环
 ./bin/gvos-core -listen :9997 &
 curl -X POST -d '{"call_id":"c1","from_user":"1000","to_user":"8613800138000"}' :9997/v1/call/start
 curl -X POST -d '{"call_id":"c1","duration":66}' :9997/v1/call/end
 # -> {"CallID":"c1","BilledSecs":66,"Cost":0.055,"RatePrefix":"8613"}
+
+# PG 模式 + 管理 API
+./bin/gvos-core -listen :8080 -dsn "postgres://..." &
+curl -X POST -H "Authorization: Bearer dev-admin-token" \
+  -d '{"username":"user1","credit":10}' :8080/v1/admin/accounts
 ```
 
 ## 里程碑（对齐 docs/01-prd.md）

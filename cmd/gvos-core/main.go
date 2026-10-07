@@ -22,12 +22,28 @@ import (
 
 // Server bundles the billing control plane.
 type Server struct {
-	store   *account.Store
-	rates   *rate.Table
-	calls   *callstate.Manager
-	cdrs    []*callstate.CDR
-	pg      *store.PG // nil in memory mode
-	startAt time.Time
+	store    *account.Store
+	rates    *rate.Table
+	rateList []rate.Rate // memory-mode source of truth for the table
+	calls    *callstate.Manager
+	cdrs     []*callstate.CDR
+	pg       *store.PG // nil in memory mode
+	startAt  time.Time
+}
+
+// rebuildRates recomputes the lookup table. PG mode reloads from the
+// database (authoritative); memory mode rebuilds from rateList.
+func (s *Server) rebuildRates() {
+	if s.pg != nil {
+		ctx, cancel := contextWithTimeoutDuration(context.Background(), 5*time.Second)
+		defer cancel()
+		if tbl, err := s.pg.LoadRates(ctx, "demo"); err == nil {
+			s.rates = tbl
+			return
+		}
+		// DB reload failed: fall back to the in-memory list.
+	}
+	s.rates = rate.NewTable(s.rateList)
 }
 
 // NewServer builds the in-memory demo server (dev/test mode).
@@ -40,7 +56,8 @@ func NewServer() *Server {
 	s.store.Put(&account.Account{ID: "agent1", ParentID: "tenant", Credit: 1000, RateGroup: "demo"})
 	s.store.Put(&account.Account{ID: "1000", ParentID: "agent1", Name: "Demo SIP user", Credit: 10, RateGroup: "demo"})
 
-	s.rates = demoRateTable()
+	s.rateList = demoRates()
+	s.rates = rate.NewTable(s.rateList)
 	s.calls = s.newCallManager()
 	return s
 }
@@ -66,7 +83,6 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	s.calls = s.newCallManager()
 	return s, nil
 }
-
 func (s *Server) newCallManager() *callstate.Manager {
 	// Teardown in production sends CANCEL/BYE via Kamailio.
 	return callstate.NewManager(s.store, func(callID, reason string) {
@@ -74,13 +90,13 @@ func (s *Server) newCallManager() *callstate.Manager {
 	}, 10*time.Second)
 }
 
-func demoRateTable() *rate.Table {
-	return rate.NewTable([]rate.Rate{
+func demoRates() []rate.Rate {
+	return []rate.Rate{
 		{Prefix: "86", Price: 0.06, InitDur: 60, StepDur: 6},
 		{Prefix: "8613", Price: 0.05, InitDur: 60, StepDur: 6},
 		{Prefix: "1", Price: 0.03, InitDur: 60, StepDur: 6},
 		{Prefix: "91", Price: 0.9, InitDur: 60, StepDur: 6},
-	})
+	}
 }
 
 // handleStart is the pre-answer lock: Kamailio calls it on INVITE.
@@ -223,15 +239,44 @@ func main() {
 // ServeMux has no method-aware patterns); handlers enforce verbs.
 func muxFor(s *Server) *http.ServeMux {
 	mux := http.NewServeMux()
+	// Kamailio event plane.
 	mux.HandleFunc("/v1/call/start", s.handleStart)
 	mux.HandleFunc("/v1/call/answer", s.handleAnswer)
 	mux.HandleFunc("/v1/call/end", s.handleEnd)
 	mux.HandleFunc("/v1/stats", s.handleStats)
+	// Admin plane (bearer token guarded).
+	mux.HandleFunc("/v1/admin/accounts", s.routeAccounts)
+	mux.HandleFunc("/v1/admin/topup", s.handleTopUp)
+	mux.HandleFunc("/v1/admin/rates", s.routeRates)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		fmt.Fprintln(w, "ok")
 	})
 	return mux
+}
+
+// routeAccounts dispatches by verb (Go 1.21: no method patterns).
+func (s *Server) routeAccounts(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		s.handleAccountCreate(w, r)
+	case http.MethodGet:
+		s.handleAccountList(w, r)
+	default:
+		httpError(w, 405, "POST or GET")
+	}
+}
+
+// routeRates dispatches by verb.
+func (s *Server) routeRates(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		s.handleRateUpsert(w, r)
+	case http.MethodGet:
+		s.handleRateList(w, r)
+	default:
+		httpError(w, 405, "POST or GET")
+	}
 }
 
 // requirePOST rejects non-POST calls (helper for the spike routes).

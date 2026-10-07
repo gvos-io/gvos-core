@@ -166,6 +166,73 @@ func (p *PG) AppendAudit(ctx context.Context, tenantID, operator, action, entity
 	return err
 }
 
+// CreateAccount inserts an account row and returns its UUID.
+func (p *PG) CreateAccount(ctx context.Context, tenantID, parentID, name, username, secretHash, rateGroup string, postpaid bool, credit float64) (string, error) {
+	var id string
+	err := p.pool.QueryRow(ctx, `
+        INSERT INTO accounts (tenant_id, parent_id, name, username, secret_hash,
+                              rate_group, postpaid, credit)
+        VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8)
+        RETURNING id::text`,
+		tenantID, nullIfEmpty(parentID), name, username, secretHash, rateGroup, postpaid, credit).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("create account: %w", err)
+	}
+	return id, nil
+}
+
+// TopUp adjusts an account balance (delta signed) and returns the new
+// balance; it also appends the ledger row so topup and adjustment stay
+// in the append-only history.
+func (p *PG) TopUp(ctx context.Context, accountID string, delta float64, reason, operator string) (float64, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("topup begin: %w", err)
+	}
+	defer tx.Rollback(ctx) // safe no-op after commit
+
+	var balance float64
+	if err := tx.QueryRow(ctx, `
+        UPDATE accounts SET credit = credit + $1
+        WHERE id = $2::uuid AND deleted_at IS NULL
+        RETURNING credit`, delta, accountID).Scan(&balance); err != nil {
+		return 0, fmt.Errorf("topup update: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+        INSERT INTO balance_ledger (account_id, delta, balance, reason, operator)
+        VALUES ($1::uuid, $2, $3, $4, $5)`,
+		accountID, delta, balance, reason, operator); err != nil {
+		return 0, fmt.Errorf("topup ledger: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("topup commit: %w", err)
+	}
+	return balance, nil
+}
+
+// UpsertRate inserts or updates one rate row (prefix unique within the
+// group for the base variant).
+func (p *PG) UpsertRate(ctx context.Context, groupID, prefix string, price float64, initDur, stepDur, minDur int) error {
+	_, err := p.pool.Exec(ctx, `
+        INSERT INTO rates (group_id, prefix, price, init_dur, step_dur, min_dur)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6)
+        ON CONFLICT (group_id, prefix, priority, effective_at)
+        DO UPDATE SET price = EXCLUDED.price, init_dur = EXCLUDED.init_dur,
+                      step_dur = EXCLUDED.step_dur, min_dur = EXCLUDED.min_dur`,
+		groupID, prefix, price, initDur, stepDur, minDur)
+	if err != nil {
+		return fmt.Errorf("upsert rate: %w", err)
+	}
+	return nil
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 func marshalOrNull(v any) (any, error) {
 	if v == nil {
 		return nil, nil

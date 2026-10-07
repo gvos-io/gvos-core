@@ -56,6 +56,18 @@ func (s *Store) Get(id string) (*Account, error) {
 	return &cp, nil
 }
 
+// List returns all accounts (admin/monitoring).
+func (s *Store) List() ([]*Account, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*Account, 0, len(s.accounts))
+	for _, a := range s.accounts {
+		cp := *a
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
 // Chain returns the charging chain from the account up to the tenant
 // root (inclusive), in charge order: end account first, then each
 // ancestor agent, then tenant.
