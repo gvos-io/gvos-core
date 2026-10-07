@@ -21,6 +21,7 @@ import (
 	"github.com/gvos/gvos-core/internal/blocklist"
 	"github.com/gvos/gvos-core/internal/callstate"
 	"github.com/gvos/gvos-core/internal/mediastream"
+	"github.com/gvos/gvos-core/internal/pkgplan"
 	"github.com/gvos/gvos-core/internal/riskctrl"
 	"github.com/gvos/gvos-core/internal/rate"
 	"github.com/gvos/gvos-core/internal/store"
@@ -39,6 +40,7 @@ type Server struct {
 	blocklist *blocklist.List  // number screening (black/white rules)
 	risk      *riskctrl.Engine // real-time fraud engine (freq/cost/prefix)
 	media     *mediastream.Manager // AI media plane (per-call bidirectional streams)
+	pkg       *pkgplan.Engine      // subscription packages (allowance/discount/min-spend)
 	startAt   time.Time
 }
 
@@ -59,7 +61,7 @@ func (s *Server) rebuildRates() {
 
 // NewServer builds the in-memory demo server (dev/test mode).
 func NewServer() *Server {
-	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), risk: riskctrl.New(), media: mediastream.New(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), startAt: time.Now()}
 
 	// Demo seed: one tenant chain and a small rate table. The tenant
 	// root is postpaid (it invoices); agents and users are prepaid.
@@ -79,7 +81,7 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), risk: riskctrl.New(), media: mediastream.New(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), startAt: time.Now()}
 	n, err := pg.LoadAccounts(ctx, s.store)
 	if err != nil {
 		pg.Close()
@@ -261,6 +263,17 @@ func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 404, err.Error())
 		return
 	}
+	// Subscription package: free allowance first, then discount on the
+	// billable remainder. The CDR carries the effective cost; free
+	// seconds are recorded in the record for the bill view.
+	if pr := s.pkg.Apply(cdr.AccountID, cdr.BilledSecs, cdr.Cost); pr.BillableSecs < float64(cdr.BilledSecs) || pr.Discount != 1 {
+		if float64(cdr.BilledSecs) > 0 {
+			ratio := pr.BillableSecs / float64(cdr.BilledSecs)
+			cdr.Cost = roundUp7f(cdr.Cost * ratio * pr.Discount)
+			cdr.FreeSecs = int(pr.FreeSecs)
+		}
+	}
+
 	// Fraud engine settlement: reconcile the daily cost accumulation
 	// with the actual CDR cost (estimate was 0.05 basis at start).
 	s.risk.SettleCost(cdr.AccountID, 0.05, cdr.Cost)
@@ -369,6 +382,8 @@ func muxFor(s *Server) *http.ServeMux {
 	mux.HandleFunc("/v1/admin/risk", s.handleRiskRules)
 	mux.HandleFunc("/v1/admin/stream-push", s.handleStreamPush)
 	mux.HandleFunc("/v1/admin/reports", s.handleReports)
+	mux.HandleFunc("/v1/admin/packages", s.handlePackages)
+	mux.HandleFunc("/v1/admin/packages/usage", s.handlePackageUsage)
 	mux.HandleFunc("/v1/stream/", s.handleMediaStream)
 	// Static admin console (token entered in the UI).
 	mux.HandleFunc("/ui", s.handleUI)
@@ -436,4 +451,17 @@ func requirePOST(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+
+func roundUp7f(p float64) float64 {
+	if p <= 0 {
+		return p
+	}
+	scaled := p * 1e7
+	whole := float64(int64(scaled))
+	if scaled-whole > 1e-9 {
+		whole++
+	}
+	return whole / 1e7
 }

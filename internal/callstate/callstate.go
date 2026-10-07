@@ -405,6 +405,7 @@ type CDR struct {
 	PDDMs      int     // post-dial delay (INVITE -> first 200), Kamailio-measured
 	SIPCode    int     // final SIP response on the release path
 	Recorded   bool    // rtpengine recording was engaged (file named by call-id)
+	FreeSecs   int     // package allowance seconds applied at settlement
 }
 
 // Live returns the count of live calls (monitoring hook).

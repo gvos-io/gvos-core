@@ -17,6 +17,7 @@ import (
 	"github.com/gvos/gvos-core/internal/blocklist"
 	"github.com/gvos/gvos-core/internal/rate"
 	"github.com/gvos/gvos-core/internal/mediastream"
+	"github.com/gvos/gvos-core/internal/pkgplan"
 	"github.com/gvos/gvos-core/internal/riskctrl"
 )
 
@@ -464,4 +465,65 @@ func (s *Server) handleReports(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpError(w, 405, "GET or POST")
 	}
+}
+
+// POST /v1/admin/packages {"id","cycle":"daily|monthly","free_minutes",
+// "discount","min_spend"} + optional {"assign_account":"<id>"}.
+// GET /v1/admin/packages -> list definitions.
+func (s *Server) handlePackages(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) || !requirePOST(w, r) {
+		return
+	}
+	var req struct {
+		ID          string  `json:"id"`
+		Name        string  `json:"name"`
+		Cycle       string  `json:"cycle"`
+		FreeMinutes int     `json:"free_minutes"`
+		Discount    float64 `json:"discount"`
+		MinSpend    float64 `json:"min_spend"`
+		Assign      string  `json:"assign_account"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+		httpError(w, 400, "id required")
+		return
+	}
+	c := pkgplan.Daily
+	if req.Cycle == "monthly" {
+		c = pkgplan.Monthly
+	}
+	s.pkg.Define(pkgplan.Package{
+		ID: req.ID, Name: firstNonEmpty(req.Name, req.ID), Cycle: c,
+		FreeMinutes: req.FreeMinutes, Discount: req.Discount, MinSpend: req.MinSpend,
+	})
+	s.audit(r, "define", "package", req.ID, nil, req)
+	if req.Assign != "" {
+		if err := s.pkg.Assign(req.Assign, req.ID); err != nil {
+			httpError(w, 400, err.Error())
+			return
+		}
+		s.audit(r, "assign", "package", req.ID, nil, map[string]any{"account": req.Assign})
+	}
+	writeJSON(w, 200, map[string]any{"id": req.ID, "assigned": req.Assign})
+}
+
+// GET /v1/admin/packages/usage?account= - cycle usage snapshot.
+func (s *Server) handlePackageUsage(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	acc := r.URL.Query().Get("account")
+	free, spend, ok := s.pkg.Usage(acc)
+	short := s.pkg.MinSpendShortfall(acc)
+	writeJSON(w, 200, map[string]any{
+		"account": acc, "assigned": ok,
+		"free_secs_used": free, "cycle_spend": spend, "min_spend_shortfall": short,
+	})
+}
+
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
