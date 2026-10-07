@@ -12,8 +12,6 @@ package main
 
 import (
 	"bufio"
-	"crypto/sha1"
-	"encoding/base64"
 	"encoding/binary"
 	"log"
 	"net"
@@ -23,8 +21,6 @@ import (
 
 	"github.com/gvos/gvos-core/internal/mediastream"
 )
-
-const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 // handleMediaStream upgrades and runs the media loop.
 func (s *Server) handleMediaStream(w http.ResponseWriter, r *http.Request) {
@@ -68,12 +64,7 @@ func (s *Server) handleMediaStream(w http.ResponseWriter, r *http.Request) {
 	s.runMediaLoop(conn, rw.Reader, callID)
 }
 
-func wsAccept(key string) string {
-	h := sha1.New()
-	h.Write([]byte(key))
-	h.Write([]byte(wsGUID))
-	return base64.StdEncoding.EncodeToString(h.Sum(nil))
-}
+func wsAccept(key string) string { return mediastream.AcceptKey(key) }
 
 // runMediaLoop is the per-connection media pump.
 func (s *Server) runMediaLoop(conn net.Conn, reader *bufio.Reader, callID string) {

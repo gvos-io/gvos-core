@@ -14,6 +14,9 @@ import (
 	"io"
 )
 
+// wsGUID is the RFC 6455 handshake magic GUID.
+const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
 // Opcode constants (RFC 6455 §5.2). Exported for endpoint integrations.
 const (
 	OpContinuationValue = 0x0

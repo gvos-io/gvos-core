@@ -366,6 +366,7 @@ func muxFor(s *Server) *http.ServeMux {
 	mux.HandleFunc("/v1/admin/record", s.handleRecordToggle)
 	mux.HandleFunc("/v1/admin/blocklist", s.handleBlocklist)
 	mux.HandleFunc("/v1/admin/risk", s.handleRiskRules)
+	mux.HandleFunc("/v1/admin/stream-push", s.handleStreamPush)
 	mux.HandleFunc("/v1/stream/", s.handleMediaStream)
 	// Static admin console (token entered in the UI).
 	mux.HandleFunc("/ui", s.handleUI)
