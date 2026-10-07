@@ -345,6 +345,8 @@ type CDR struct {
 	RatePrefix string
 	Price      float64 // per-minute price applied
 	Release    string  // normal | balance-exhausted | unratable
+	PDDMs      int     // post-dial delay (INVITE -> first 200), Kamailio-measured
+	SIPCode    int     // final SIP response on the release path
 }
 
 // Live returns the count of live calls (monitoring hook).

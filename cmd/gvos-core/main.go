@@ -182,6 +182,9 @@ func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CallID  string `json:"call_id"`
 		DurSecs int    `json:"duration"` // optional: defaulted from call start
+		PDDMs   int    `json:"pdd_ms"`  // post-dial delay measured by Kamailio
+		SIPCode int    `json:"sip_code"`
+		Release string `json:"release"` // normal | balance-exhausted | ...
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CallID == "" {
 		httpError(w, 400, "call_id required")
@@ -200,6 +203,15 @@ func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpError(w, 404, err.Error())
 		return
+	}
+	if req.PDDMs > 0 {
+		cdr.PDDMs = req.PDDMs
+	}
+	if req.SIPCode > 0 {
+		cdr.SIPCode = req.SIPCode
+	}
+	if req.Release != "" {
+		cdr.Release = req.Release
 	}
 	s.cdrs = append(s.cdrs, cdr)
 	if s.pg != nil {

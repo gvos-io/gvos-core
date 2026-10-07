@@ -127,12 +127,12 @@ func (p *PG) InsertCDR(ctx context.Context, c *callstate.CDR) error {
 	_, err := p.pool.Exec(ctx, `
         INSERT INTO cdr (call_id, tenant_id, account_id, dest, dest_prefix,
                          start_time, end_time, duration, billed_secs,
-                         price, cost, release)
+                         price, cost, release, pdd_ms, sip_code)
         VALUES ($1, '00000000-0000-0000-0000-000000000001', $2::uuid, $3, $4,
                 $5::timestamptz, $5::timestamptz + ($6::int * interval '1 second'),
-                $6::int, $7::int, $8::numeric, $9::numeric, $10)`,
+                $6::int, $7::int, $8::numeric, $9::numeric, $10, $11::int, $12::int)`,
 		c.CallID, c.AccountID, c.Dest, c.RatePrefix,
-		c.StartTime, c.Duration, c.BilledSecs, c.Price, c.Cost, c.Release)
+		c.StartTime, c.Duration, c.BilledSecs, c.Price, c.Cost, c.Release, c.PDDMs, c.SIPCode)
 	if err != nil {
 		return fmt.Errorf("insert cdr: %w", err)
 	}
