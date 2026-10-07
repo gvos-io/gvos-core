@@ -7,6 +7,14 @@
 -- gen_random_uuid(): built into PG14+. ltree needs the extension.
 CREATE EXTENSION IF NOT EXISTS ltree;
 
+-- Kamailio DB-API version table: auth_db checks this on startup for
+-- every table it touches (0 = unversioned/any structure).
+CREATE TABLE version (
+    table_name TEXT NOT NULL PRIMARY KEY,
+    table_version INT NOT NULL DEFAULT 0
+);
+INSERT INTO version (table_name, table_version) VALUES ('accounts', 7);
+
 CREATE TABLE tenants (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name        TEXT NOT NULL,
@@ -17,6 +25,8 @@ CREATE TABLE tenants (
 
 -- Account tree: tenant root -> agents (any depth) -> end accounts.
 -- parent_id + path makes agent-chain walks index-friendly.
+-- ha1 = MD5(username:realm:password) for SIP Digest auth (Kamailio
+-- auth_db reads this directly).
 CREATE TABLE accounts (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id   UUID NOT NULL REFERENCES tenants(id),
@@ -24,6 +34,7 @@ CREATE TABLE accounts (
     name        TEXT NOT NULL,
     username    TEXT NOT NULL,             -- SIP auth username
     secret_hash TEXT NOT NULL,             -- argon2id
+    ha1         CHAR(32),                 -- MD5(username:realm:password) (DB1_STRING for auth_db)
     rate_group  TEXT NOT NULL,
     postpaid    BOOLEAN NOT NULL DEFAULT false,
     credit      NUMERIC(18,7) NOT NULL DEFAULT 0 CHECK (credit >= 0 OR postpaid),

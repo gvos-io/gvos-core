@@ -9,10 +9,11 @@ INSERT INTO rate_groups (id, tenant_id, name) VALUES
 ON CONFLICT DO NOTHING;
 
 -- Agent chain: tenant root (postpaid) -> agent1 (prepaid) -> user 1000.
-INSERT INTO accounts (id, tenant_id, parent_id, name, username, secret_hash, rate_group, postpaid, credit) VALUES
-  ('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-000000000001', NULL,        'Demo Tenant',  'tenant',  'x', 'demo', true,  0),
-  ('00000000-0000-0000-0000-0000000000a2', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000a1', 'Agent One', 'agent1', 'x', 'demo', false, 1000),
-  ('00000000-0000-0000-0000-0000000000a3', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000a2', 'Demo SIP user', '1000', 'x', 'demo', false, 10)
+-- ha1 = MD5(username:gvos.local:password); demo user password: demo1000.
+INSERT INTO accounts (id, tenant_id, parent_id, name, username, secret_hash, ha1, rate_group, postpaid, credit) VALUES
+  ('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-000000000001', NULL,        'Demo Tenant',  'tenant',  'x', NULL, 'demo', true,  0),
+  ('00000000-0000-0000-0000-0000000000a2', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000a1', 'Agent One', 'agent1', 'x', 'a7e348c525a598d421e857a64cef7899', 'demo', false, 1000),
+  ('00000000-0000-0000-0000-0000000000a3', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000a2', 'Demo SIP user', '1000', 'x', 'bebc8cae76ed72d162506f5a70fa1337', 'demo', false, 10)
 ON CONFLICT DO NOTHING;
 
 -- Mirrors the in-memory demo rate table.
