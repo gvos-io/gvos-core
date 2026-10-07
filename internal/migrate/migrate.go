@@ -111,8 +111,8 @@ func ParseRates(r io.Reader) ([]VOSRate, []Issue, error) {
 	}
 	iPrefix := idx("pre", "prefix", "前缀", "号码前缀")
 	iPrice := idx("amt", "price", "费率", "价格", "每分钟")
-	iInit := idx("init", "首6秒", "首时长", "init_dur")
-	iStep := idx("step", "计费步长", "步长", "step_dur")
+	iInit := idx("first", "initdur", "init_dur", "init", "首6秒", "首时长")
+	iStep := idx("stepdur", "step_dur", "step", "计费步长", "步长")
 	if iPrefix < 0 || iPrice < 0 {
 		return nil, iss, fmt.Errorf("费率导出缺少必需列：需要 前缀 和 费率")
 	}
@@ -259,10 +259,42 @@ type Snapshot struct {
 }
 
 func readCSV(r io.Reader) ([][]string, error) {
-	cr := csv.NewReader(r)
+	// Excel-style BOM breaks the first header name; strip it.
+	cr := csv.NewReader(&bomStripper{r: r})
 	cr.TrimLeadingSpace = true
 	cr.FieldsPerRecord = -1 // tolerate ragged rows
 	return cr.ReadAll()
+}
+
+// bomStripper removes a UTF-8 BOM from the head of the stream and
+// replays the buffered head bytes first.
+type bomStripper struct {
+	r    io.Reader
+	done bool   // head check performed
+	head []byte // non-BOM bytes to replay
+}
+
+func (b *bomStripper) Read(p []byte) (int, error) {
+	if !b.done {
+		b.done = true
+		head := make([]byte, 3)
+		n, err := io.ReadFull(b.r, head)
+		if n == 3 && err == nil && string(head) == "\xEF\xBB\xBF" {
+			// BOM: drop it, fall through to the reader.
+		} else {
+			b.head = append(b.head, head[:n]...)
+			if err == io.ErrUnexpectedEOF || err == io.EOF {
+				b.head = append(b.head, head[:n]...)
+				return copy(p, b.head), nil
+			}
+		}
+	}
+	if len(b.head) > 0 {
+		n := copy(p, b.head)
+		b.head = b.head[n:]
+		return n, nil
+	}
+	return b.r.Read(p)
 }
 
 func mapHeader(header []string) (map[string]int, []Issue) {

@@ -141,3 +141,78 @@ Foo,3001,15.5,x
 		t.Errorf("english headers: %+v", accs)
 	}
 }
+
+// TestParseAccountsVariants: known VOS client export column variants.
+func TestParseAccountsVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		csv  string
+		user string
+		cred float64
+	}{
+		{
+			"中文全列", "账户,名称,上级账户,费率组,余额\nu1,甲,,demo,5.5\n", "u1", 5.5,
+		},
+		{
+			"英文全列", "Username,Name,Parent,RateGroup,Balance\nu2,乙,,demo,7.25\n", "u2", 7.25,
+		},
+		{
+			"只有必需列", "账户,余额\nu3,3.0\n", "u3", 3.0,
+		},
+		{
+			"列序乱+多余列", "余额,备注,账户,区域\n4.5,abc,u4,华东\n", "u4", 4.5,
+		},
+		{
+			"金额带千分位(引号包裹)", "账户,余额\nu5,\"1,234.5678900\"\n", "u5", 1234.56789,
+		},
+		{
+			"金额带货币符号", "账户,余额\nu6,¥9.5\n", "u6", 9.5,
+		},
+	}
+	for _, c := range cases {
+		accs, _, err := ParseAccounts(strings.NewReader(c.csv))
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if len(accs) != 1 || accs[0].Username != c.user || !approxEqualF(accs[0].Credit, c.cred, 1e-7) {
+			t.Errorf("%s: got %+v, want user=%s credit=%v", c.name, accs, c.user, c.cred)
+		}
+	}
+}
+
+// TestParseRatesVariants: rate export column variants.
+func TestParseRatesVariants(t *testing.T) {
+	cases := []struct {
+		name   string
+		csv    string
+		prefix string
+		price  float64
+		init   int
+		step   int
+	}{
+		{"中文", "前缀,费率,计费步长\n861,0.04,60+6\n", "861", 0.04, 60, 6},
+		{"英文", "Prefix,Price,InitDur,StepDur\n862,0.045,6,6\n", "862", 0.045, 6, 6},
+		{"仅前缀费率", "前缀,费率\n863,0.05\n", "863", 0.05, 60, 6}, // 60+6 default
+		{"BOM+数字前缀", "\xEF\xBB\xBF前缀,费率\n864,0.055\n", "864", 0.055, 60, 6},
+	}
+	for _, c := range cases {
+		rates, _, err := ParseRates(strings.NewReader(c.csv))
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if len(rates) != 1 || rates[0].Prefix != c.prefix || !approxEqualF(rates[0].Price, c.price, 1e-7) ||
+			rates[0].InitDur != c.init || rates[0].StepDur != c.step {
+			t.Errorf("%s: got %+v, want %s@%v %d+%d", c.name, rates, c.prefix, c.price, c.init, c.step)
+		}
+	}
+}
+
+func approxEqualF(a, b, tol float64) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d <= tol
+}
