@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -197,5 +198,51 @@ func TestBlocklistRejectsCall(t *testing.T) {
 
 	if code := call("8613912345678"); code != 200 {
 		t.Errorf("call after rule removal: %d, want 200", code)
+	}
+}
+
+// TestRiskEngineBlocksBurst: a freq rule set via the admin API blocks
+// the burst caller mid-stream while a normal-rate caller continues.
+func TestRiskEngineBlocksBurst(t *testing.T) {
+	s := NewServer()
+	srv := httptest.NewServer(muxFor(s))
+	defer srv.Close()
+
+	// Install a 3/min frequency block rule.
+	body, _ := json.Marshal(map[string]any{
+		"rules": []map[string]any{{"id": "burst", "kind": "freq", "action": "block", "limit": 3}},
+	})
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/risk", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("risk rules set: %v %d", err, resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	call := func(id string) int {
+		b, _ := json.Marshal(map[string]string{
+			"call_id": id, "from_user": "1000", "to_user": "8613800138000",
+		})
+		r, err := http.Post(srv.URL+"/v1/call/start", "application/json", bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		return r.StatusCode
+	}
+
+	for i := 1; i <= 3; i++ {
+		if code := call(fmt.Sprintf("r-%d", i)); code != 200 {
+			t.Fatalf("call %d: %d, want 200", i, code)
+		}
+	}
+	// 4th call inside the window: risk-blocked 403.
+	if code := call("r-4"); code != 403 {
+		t.Errorf("burst call: %d, want 403", code)
+	}
+	// Rate/billing paths still work for other destinations.
+	if code := call("r-5"); code != 403 {
+		t.Errorf("window overflow: %d, want 403", code)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/gvos/gvos-core/internal/account"
 	"github.com/gvos/gvos-core/internal/blocklist"
 	"github.com/gvos/gvos-core/internal/rate"
+	"github.com/gvos/gvos-core/internal/riskctrl"
 )
 
 const demoTenant = "00000000-0000-0000-0000-000000000001"
@@ -274,4 +275,39 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpError(w, 405, "POST or GET")
 	}
+}
+
+// POST /v1/admin/risk - set/replace the fraud rule set (audited).
+// Body: {"rules":[{"id","kind","action","limit","cost_limit","prefixes","account"}]}
+func (s *Server) handleRiskRules(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) || !requirePOST(w, r) {
+		return
+	}
+	var req struct {
+		Rules []riskctrl.Rule `json:"rules"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, 400, "body required")
+		return
+	}
+	// Validate kinds before applying.
+	for _, ru := range req.Rules {
+		switch ru.Kind {
+		case "freq", "cost_day", "dest_prefix":
+		default:
+			httpError(w, 400, "rule "+ru.ID+": kind must be freq|cost_day|dest_prefix")
+			return
+		}
+		switch ru.Action {
+		case "block", "alert":
+		default:
+			httpError(w, 400, "rule "+ru.ID+": action must be block|alert")
+			return
+		}
+	}
+	before := s.risk.Rules()
+	s.risk.SetRules(req.Rules)
+	s.audit(r, "replace", "risk_rules", "",
+		map[string]any{"count": len(before)}, map[string]any{"count": len(req.Rules)})
+	writeJSON(w, 200, map[string]any{"rules": len(req.Rules)})
 }

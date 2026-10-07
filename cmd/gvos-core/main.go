@@ -20,6 +20,7 @@ import (
 	"github.com/gvos/gvos-core/internal/account"
 	"github.com/gvos/gvos-core/internal/blocklist"
 	"github.com/gvos/gvos-core/internal/callstate"
+	"github.com/gvos/gvos-core/internal/riskctrl"
 	"github.com/gvos/gvos-core/internal/rate"
 	"github.com/gvos/gvos-core/internal/store"
 )
@@ -35,6 +36,7 @@ type Server struct {
 	userIndex map[string]string // SIP username -> account ID (PG mode)
 	recordEnabled bool          // global recording opt-in (admin toggle)
 	blocklist *blocklist.List  // number screening (black/white rules)
+	risk      *riskctrl.Engine // real-time fraud engine (freq/cost/prefix)
 	startAt   time.Time
 }
 
@@ -55,7 +57,7 @@ func (s *Server) rebuildRates() {
 
 // NewServer builds the in-memory demo server (dev/test mode).
 func NewServer() *Server {
-	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), risk: riskctrl.New(), startAt: time.Now()}
 
 	// Demo seed: one tenant chain and a small rate table. The tenant
 	// root is postpaid (it invoices); agents and users are prepaid.
@@ -75,7 +77,7 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), risk: riskctrl.New(), startAt: time.Now()}
 	n, err := pg.LoadAccounts(ctx, s.store)
 	if err != nil {
 		pg.Close()
@@ -148,12 +150,8 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 403, "destination blocked: "+why)
 		return
 	}
-	now := time.Now()
-	entry := s.rates.Lookup(req.To, int(now.Weekday()), now.Hour()*60+now.Minute())
-	if entry == nil {
-		httpError(w, 404, "no rate for destination "+req.To)
-		return
-	}
+	// Caller resolution first: the risk engine and billing both need
+	// the final account ID.
 	accID := req.From
 	if accID == "" {
 		accID = "1000" // spike default caller
@@ -167,6 +165,21 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		} else if _, err2 := s.store.Get("1000"); err2 == nil {
 			accID = "1000"
 		}
+	}
+	// Fraud engine: frequency/cost/prefix rules, block or alert.
+	// Estimated cost for the cost-cap check uses the 60s lock basis.
+	if h := s.risk.CheckCall(accID, req.To, 0.05); h.Blocked {
+		httpError(w, 403, "risk-blocked ["+h.RuleID+"]: "+h.Reason)
+		return
+	} else if h.Alerted {
+		log.Printf("RISK-ALERT account=%s rule=%s: %s", accID, h.RuleID, h.Reason)
+	}
+
+	now := time.Now()
+	entry := s.rates.Lookup(req.To, int(now.Weekday()), now.Hour()*60+now.Minute())
+	if entry == nil {
+		httpError(w, 404, "no rate for destination "+req.To)
+		return
 	}
 	if err := s.calls.Start(req.CallID, accID, req.To, entry, 60, s.recordEnabled); err != nil {
 		// Insufficient balance is a 403 for the caller; account limits
@@ -241,6 +254,9 @@ func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 404, err.Error())
 		return
 	}
+	// Fraud engine settlement: reconcile the daily cost accumulation
+	// with the actual CDR cost (estimate was 0.05 basis at start).
+	s.risk.SettleCost(cdr.AccountID, 0.05, cdr.Cost)
 	if req.PDDMs > 0 {
 		cdr.PDDMs = req.PDDMs
 	}
@@ -337,6 +353,7 @@ func muxFor(s *Server) *http.ServeMux {
 	mux.HandleFunc("/v1/admin/cdrs", s.handleCDRList)
 	mux.HandleFunc("/v1/admin/record", s.handleRecordToggle)
 	mux.HandleFunc("/v1/admin/blocklist", s.handleBlocklist)
+	mux.HandleFunc("/v1/admin/risk", s.handleRiskRules)
 	// Static admin console (token entered in the UI).
 	mux.HandleFunc("/ui", s.handleUI)
 	mux.HandleFunc("/ui/", s.handleUI)
