@@ -452,6 +452,10 @@ func (s *Server) handleReports(w http.ResponseWriter, r *http.Request) {
 		view := r.URL.Query().Get("view")
 		ctx, cancel := contextWithTimeout(r.Context())
 		defer cancel()
+		if view == "blindzone" || view == "cross" {
+			s.handleReportViews(w, r)
+			return
+		}
 		if view == "gateway" {
 			rows, err := s.pg.QueryGatewayDaily(ctx, day)
 			if err != nil {
@@ -531,4 +535,52 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// GET /v1/admin/reports?view=blindzone&min_calls=5   盲区分析
+// GET /v1/admin/reports?view=cross&day=...           账户×目的地交叉
+func (s *Server) handleReportViews(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) || !requireGET(w, r) {
+		return
+	}
+	if s.pg == nil {
+		httpError(w, 503, "reports need postgres mode")
+		return
+	}
+	view := r.URL.Query().Get("view")
+	ctx, cancel := contextWithTimeout(r.Context())
+	defer cancel()
+	switch view {
+	case "blindzone":
+		minCalls := 5
+		if v := r.URL.Query().Get("min_calls"); v != "" {
+			if n, err := json.Number(v).Int64(); err == nil {
+				minCalls = int(n)
+			}
+		}
+		rows, err := s.pg.QueryBlindZones(ctx, minCalls)
+		if err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"view": "blindzone", "rows": rows, "count": len(rows)})
+	case "cross":
+		rows, err := s.pg.QueryCrossAnalysis(ctx, r.URL.Query().Get("day"))
+		if err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"view": "cross", "rows": rows, "count": len(rows)})
+	default:
+		httpError(w, 400, "view must be blindzone|cross")
+	}
+}
+
+// requireGET guards read-only endpoints.
+func requireGET(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		httpError(w, http.StatusMethodNotAllowed, "GET required")
+		return false
+	}
+	return true
 }

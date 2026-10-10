@@ -392,3 +392,109 @@ func (p *PG) QueryGatewayDaily(ctx context.Context, day string) ([]GatewayReport
 	}
 	return out, rows.Err()
 }
+
+// ---- Blind-zone analysis (盲区分析) ----
+
+// BlindZoneRow is one blind-zone finding: destinations you are blind
+// to - either unrated (no price matched) or unroutable (never answers).
+type BlindZoneRow struct {
+	Prefix   string `json:"prefix"`
+	Calls    int    `json:"calls"`
+	Answered int    `json:"answered"`
+	ASR      float64 `json:"asr"`
+	Reason   string `json:"reason"` // unrated | dead-route
+}
+
+// QueryBlindZones finds destinations that cost money to dial but
+// return nothing: calls whose rate lookup missed (dest_prefix IS NULL)
+// and destination prefixes with >= minCalls attempts and zero answers.
+func (p *PG) QueryBlindZones(ctx context.Context, minCalls int) ([]BlindZoneRow, error) {
+	if minCalls < 1 {
+		minCalls = 5
+	}
+	rows, err := p.pool.Query(ctx, `
+        SELECT prefix, calls, ans, 0::float8, reason FROM (
+            SELECT substr(dest, 1, 4) AS prefix, count(*) AS calls,
+                   count(*) FILTER (WHERE duration > 0) AS ans,
+                   'unrated' AS reason
+            FROM cdr
+            WHERE dest_prefix IS NULL
+            GROUP BY 1
+            HAVING count(*) >= $1
+            UNION ALL
+            SELECT substr(dest, 1, 6) AS prefix, count(*) AS calls,
+                   count(*) FILTER (WHERE duration > 0) AS ans,
+                   'dead-route' AS reason
+            FROM cdr
+            WHERE dest_prefix IS NOT NULL
+            GROUP BY 1
+            HAVING count(*) >= $1 AND count(*) FILTER (WHERE duration > 0) = 0
+        ) z
+        ORDER BY z.calls DESC
+        LIMIT 100`, minCalls)
+	if err != nil {
+		return nil, fmt.Errorf("query blind zones: %w", err)
+	}
+	defer rows.Close()
+	var out []BlindZoneRow
+	for rows.Next() {
+		var r BlindZoneRow
+		if err := rows.Scan(&r.Prefix, &r.Calls, &r.Answered, &r.ASR, &r.Reason); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// CrossRow is one cell of the account x destination-cluster matrix
+// (the practical form of VOS's caller/destination cross analysis:
+// which accounts dial which destination clusters, and how healthy
+// each lane is).
+type CrossRow struct {
+	AccountID string  `json:"account_id"`
+	DestCluster string `json:"dest_cluster"` // first 2-3 digits of the destination
+	Calls     int     `json:"calls"`
+	Answered  int     `json:"answered"`
+	ASR       float64 `json:"asr"`
+	Cost      float64 `json:"cost"`
+}
+
+// QueryCrossAnalysis returns the account x destination matrix.
+func (p *PG) QueryCrossAnalysis(ctx context.Context, day string) ([]CrossRow, error) {
+	rows, err := p.pool.Query(ctx, `
+        SELECT d.acc, d.cluster, d.calls, d.ans,
+               CASE WHEN d.calls = 0 THEN 0 ELSE d.ans::float8 / d.calls END,
+               d.cost
+        FROM (
+            SELECT account_id::text AS acc,
+                   CASE
+                     WHEN dest LIKE '86%'  THEN 'CN(86)'
+                     WHEN dest LIKE '1%'   THEN 'US/CA(1)'
+                     WHEN dest LIKE '44%'  THEN 'UK(44)'
+                     WHEN dest LIKE '91%'  THEN 'IN(91)'
+                     ELSE 'other(' || substr(dest, 1, 2) || ')'
+                   END AS cluster,
+                   count(*) AS calls,
+                   count(*) FILTER (WHERE duration > 0) AS ans,
+                   coalesce(sum(cost), 0) AS cost
+            FROM cdr
+            WHERE ($1 = '' OR start_time::date = $1::date)
+            GROUP BY 1, 2
+        ) d
+        ORDER BY d.cost DESC
+        LIMIT 200`, day)
+	if err != nil {
+		return nil, fmt.Errorf("query cross: %w", err)
+	}
+	defer rows.Close()
+	var out []CrossRow
+	for rows.Next() {
+		var r CrossRow
+		if err := rows.Scan(&r.AccountID, &r.DestCluster, &r.Calls, &r.Answered, &r.ASR, &r.Cost); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
