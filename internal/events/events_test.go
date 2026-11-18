@@ -97,16 +97,23 @@ func TestPublishAfterClose(t *testing.T) {
 // caller. Deterministic: the first Post blocks in the pump, so the
 // channel state is fully under the test's control.
 func TestQueueDrop(t *testing.T) {
-	gate := make(chan struct{})
-	stub := &blockingPoster{gate: gate}
+	stub := newBlockingPoster()
 	p := NewWithPoster(stub)
 
-	p.Publish(SubjectCDRCompleted, "in-flight") // pump takes it, blocks in Post
-	for i := 0; i < queueSize; i++ {            // fill the channel buffer
+	p.Publish(SubjectCDRCompleted, "in-flight")
+	// Deterministic precondition: wait until the pump is actually
+	// blocked inside the first Post (fast CI schedulers race ahead
+	// otherwise and the queue never fills).
+	select {
+	case <-stub.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pump never entered Post")
+	}
+	for i := 0; i < queueSize; i++ { // fill the channel buffer
 		p.Publish(SubjectCDRCompleted, i)
 	}
 	p.Publish(SubjectCDRCompleted, "dropped") // one beyond capacity
-	close(gate)
+	close(stub.gate)
 	p.Close()
 
 	// queueSize buffered + 1 in-flight through the pump = delivered;
@@ -117,15 +124,21 @@ func TestQueueDrop(t *testing.T) {
 }
 
 // blockingPoster blocks the first Post until the gate opens, freezing
-// the pump so the test can deterministically overfill the queue.
+// the pump so the test can deterministically overfill the queue. The
+// entered channel signals when the pump is truly inside Post.
 type blockingPoster struct {
-	gate  chan struct{}
-	once  sync.Once
-	inner stubPoster
+	gate    chan struct{}
+	entered chan struct{}
+	once    sync.Once
+	inner   stubPoster
+}
+
+func newBlockingPoster() *blockingPoster {
+	return &blockingPoster{gate: make(chan struct{}), entered: make(chan struct{})}
 }
 
 func (b *blockingPoster) Post(subject string, data []byte) error {
-	b.once.Do(func() { <-b.gate })
+	b.once.Do(func() { close(b.entered); <-b.gate })
 	return b.inner.Post(subject, data)
 }
 
