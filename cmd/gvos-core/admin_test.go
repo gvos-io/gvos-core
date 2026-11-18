@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gvos/gvos-core/internal/account"
+	"github.com/lixuanqun/gvos-core/internal/account"
 )
 
 // TestAdminAuth guards all admin routes.

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gvos/gvos-core/internal/mediastream"
+	"github.com/lixuanqun/gvos-core/internal/mediastream"
 )
 
 // TestMediaStreamEndToEnd: a raw TCP client upgrades to WebSocket,

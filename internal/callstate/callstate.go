@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gvos/gvos-core/internal/account"
-	"github.com/gvos/gvos-core/internal/billing"
-	"github.com/gvos/gvos-core/internal/rate"
+	"github.com/lixuanqun/gvos-core/internal/account"
+	"github.com/lixuanqun/gvos-core/internal/billing"
+	"github.com/lixuanqun/gvos-core/internal/rate"
 )
 
 // TeardownFunc is invoked when a live call must be torn down (balance

@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gvos/gvos-core/internal/mediastream"
+	"github.com/lixuanqun/gvos-core/internal/mediastream"
 )
 
 // handleMediaStream upgrades and runs the media loop.

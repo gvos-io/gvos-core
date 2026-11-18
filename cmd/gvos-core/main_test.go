@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gvos/gvos-core/internal/account"
+	"github.com/lixuanqun/gvos-core/internal/account"
 )
 
 // TestEndToEndCallFlow simulates the exact Kamailio event sequence for

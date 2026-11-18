@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gvos/gvos-core/internal/dashscope"
-	"github.com/gvos/gvos-core/internal/mediastream"
+	"github.com/lixuanqun/gvos-core/internal/dashscope"
+	"github.com/lixuanqun/gvos-core/internal/mediastream"
 )
 
 func main() {

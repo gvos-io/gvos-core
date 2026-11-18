@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gvos/gvos-core/internal/mediastream"
+	"github.com/lixuanqun/gvos-core/internal/mediastream"
 )
 
 // Config for the ASR session.

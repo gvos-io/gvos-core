@@ -12,10 +12,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/gvos/gvos-core/internal/account"
-	"github.com/gvos/gvos-core/internal/blocklist"
-	"github.com/gvos/gvos-core/internal/callstate"
-	"github.com/gvos/gvos-core/internal/rate"
+	"github.com/lixuanqun/gvos-core/internal/account"
+	"github.com/lixuanqun/gvos-core/internal/blocklist"
+	"github.com/lixuanqun/gvos-core/internal/callstate"
+	"github.com/lixuanqun/gvos-core/internal/rate"
 )
 
 // PG wraps the connection pool.

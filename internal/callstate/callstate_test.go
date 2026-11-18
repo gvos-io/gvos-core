@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gvos/gvos-core/internal/account"
-	"github.com/gvos/gvos-core/internal/rate"
+	"github.com/lixuanqun/gvos-core/internal/account"
+	"github.com/lixuanqun/gvos-core/internal/rate"
 )
 
 func setup(t *testing.T, teardown TeardownFunc) (*Manager, *account.Store) {

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gvos/gvos-core/internal/account"
-	"github.com/gvos/gvos-core/internal/events"
+	"github.com/lixuanqun/gvos-core/internal/account"
+	"github.com/lixuanqun/gvos-core/internal/events"
 )
 
 // capturePoster records every published event (subject + decoded

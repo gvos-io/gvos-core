@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gvos/gvos-core/internal/account"
-	"github.com/gvos/gvos-core/internal/blocklist"
-	"github.com/gvos/gvos-core/internal/callstate"
+	"github.com/lixuanqun/gvos-core/internal/account"
+	"github.com/lixuanqun/gvos-core/internal/blocklist"
+	"github.com/lixuanqun/gvos-core/internal/callstate"
 )
 
 func testDSN() string {

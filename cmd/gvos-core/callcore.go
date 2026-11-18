@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gvos/gvos-core/internal/account"
-	"github.com/gvos/gvos-core/internal/callstate"
-	"github.com/gvos/gvos-core/internal/events"
+	"github.com/lixuanqun/gvos-core/internal/account"
+	"github.com/lixuanqun/gvos-core/internal/callstate"
+	"github.com/lixuanqun/gvos-core/internal/events"
 )
 
 type callStartReq struct {
