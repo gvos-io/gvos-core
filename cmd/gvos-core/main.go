@@ -14,34 +14,48 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/gvos/gvos-core/internal/account"
 	"github.com/gvos/gvos-core/internal/blocklist"
 	"github.com/gvos/gvos-core/internal/callstate"
+	"github.com/gvos/gvos-core/internal/events"
 	"github.com/gvos/gvos-core/internal/mediastream"
 	"github.com/gvos/gvos-core/internal/pkgplan"
-	"github.com/gvos/gvos-core/internal/riskctrl"
 	"github.com/gvos/gvos-core/internal/rate"
+	"github.com/gvos/gvos-core/internal/riskctrl"
 	"github.com/gvos/gvos-core/internal/store"
 )
 
 // Server bundles the billing control plane.
 type Server struct {
-	store     *account.Store
-	rates     *rate.Table
-	rateList  []rate.Rate // memory-mode source of truth for the table
-	calls     *callstate.Manager
-	cdrs      []*callstate.CDR
-	pg        *store.PG   // nil in memory mode
-	userIndex map[string]string // SIP username -> account ID (PG mode)
-	recordEnabled bool          // global recording opt-in (admin toggle)
-	blocklist *blocklist.List  // number screening (black/white rules)
-	risk      *riskctrl.Engine // real-time fraud engine (freq/cost/prefix)
-	media     *mediastream.Manager // AI media plane (per-call bidirectional streams)
-	pkg       *pkgplan.Engine      // subscription packages (allowance/discount/min-spend)
-	startAt   time.Time
+	store         *account.Store
+	rates         *rate.Table
+	rateList      []rate.Rate // memory-mode source of truth for the table
+	calls         *callstate.Manager
+	cdrs          []*callstate.CDR
+	pg            *store.PG            // nil in memory mode
+	userIndex     map[string]string    // SIP username -> account ID (PG mode)
+	recordEnabled bool                 // global recording opt-in (admin toggle)
+	blocklist     *blocklist.List      // number screening (black/white rules)
+	risk          *riskctrl.Engine     // real-time fraud engine (freq/cost/prefix)
+	media         *mediastream.Manager // AI media plane (per-call bidirectional streams)
+	pkg           *pkgplan.Engine      // subscription packages (allowance/discount/min-spend)
+	events        *events.Publisher    // NATS event bus (nil = publishing off)
+	webhookURL    string               // webhook dispatcher target ("" = off)
+	asyncCdr      bool                 // CDRW worker owns CDR persistence
+	asyncAudit    bool                 // AUDIT worker owns the audit trail
+	workers       []*events.Consumer   // running async workers (stopped at exit)
+	workerNames   []string             // surfaced in /v1/stats
+	startAt       time.Time
+}
+
+// emit is the single event-bus seam: nil-safe and best-effort. The
+// billing answer never waits on the bus (publisher queues internally).
+func (s *Server) emit(subject string, payload any) {
+	if s.events != nil {
+		s.events.Publish(subject, payload)
+	}
 }
 
 // rebuildRates recomputes the lookup table. PG mode reloads from the
@@ -98,6 +112,32 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	} else if n > 0 {
 		log.Printf("loaded %d screening rules", n)
 	}
+	// Global runtime settings: admin toggles persisted across the bus
+	// broadcasts (a restart or new replica resumes the recorded state).
+	var recSetting struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := pg.GetSetting(ctx, "recording", &recSetting); err == nil {
+		s.recordEnabled = recSetting.Enabled
+		log.Printf("recording toggle restored from settings (enabled=%v)", s.recordEnabled)
+	} else if !errors.Is(err, store.ErrSettingNotFound) {
+		log.Printf("recording setting load failed: %v", err)
+	}
+	var riskRules []riskctrl.Rule
+	if err := pg.GetSetting(ctx, "risk_rules", &riskRules); err == nil {
+		s.risk.SetRules(riskRules)
+		log.Printf("loaded %d risk rules from settings", len(riskRules))
+	} else if !errors.Is(err, store.ErrSettingNotFound) {
+		log.Printf("risk rules setting load failed: %v", err)
+	}
+	var pkgSnap pkgplan.Snapshot
+	if err := pg.GetSetting(ctx, "packages", &pkgSnap); err == nil {
+		s.pkg.Restore(pkgSnap)
+		log.Printf("restored %d package definitions (%d assignments) from settings",
+			len(pkgSnap.Packages), len(pkgSnap.Assignments))
+	} else if !errors.Is(err, store.ErrSettingNotFound) {
+		log.Printf("packages setting load failed: %v", err)
+	}
 	s.userIndex = map[string]string{}
 	for _, a := range mustList(s.store) {
 		s.userIndex[a.Username] = a.ID
@@ -116,14 +156,26 @@ func mustList(st *account.Store) []*account.Account {
 	return l
 }
 func (s *Server) newCallManager() *callstate.Manager {
-	// Teardown in production sends CANCEL/BYE via Kamailio.
+	// Teardown: the callback only marks and publishes — the TEARDOWN
+	// durable worker (or the direct fallback below) owns dispatch, so
+	// a down executor holds instructions in the stream instead of
+	// losing them to a reply timeout.
 	m := callstate.NewManager(s.store, func(callID, reason string) {
 		log.Printf("TEARDOWN %s reason=%s", callID, reason)
+		s.emit(events.SubjectCallTeardown, map[string]string{"call_id": callID, "reason": reason})
+		if s.events == nil {
+			// No bus: pre-NATS behavior, executor runs inline.
+			dispatchTeardown(callID, reason)
+		}
 	}, 10*time.Second)
 	// Zombie sweeper: calls whose BYE never arrives (SIPp timeout
 	// kills, gateway drops) settle after 10 minutes instead of
 	// leaking their pre-answer locks.
 	m.StartSweeper(10*time.Minute, 30*time.Second)
+	// Interim driver: the 10s deduction slices of the architecture doc.
+	// In-process time slices until RTPengine activity events replace
+	// them; teardown rides the gvos.call.teardown event queue.
+	m.StartInterimDriver(0)
 	return m
 }
 
@@ -137,84 +189,22 @@ func demoRates() []rate.Rate {
 }
 
 // handleStart is the pre-answer lock: Kamailio calls it on INVITE.
+// Thin wrapper — the logic lives in callStart (shared with the NATS
+// service endpoint).
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
-	var req struct {
-		CallID  string `json:"call_id"`
-		From    string `json:"from_user"`
-		To      string `json:"to_user"`
-	}
+	var req callStartReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CallID == "" || req.To == "" {
 		httpError(w, 400, "call_id and to_user required")
 		return
 	}
-	// Number screening happens before rating: a blacklisted (or
-	// non-whitelisted) destination never reaches billing.
-	if ok, why := s.blocklist.CheckScreen(req.To, "dest"); !ok {
-		httpError(w, 403, "destination blocked: "+why)
-		return
+	code, body := s.callStart(req)
+	if code == 429 {
+		w.Header().Set("Retry-After", "1")
 	}
-	// Caller resolution first: the risk engine and billing both need
-	// the final account ID.
-	accID := req.From
-	if accID == "" {
-		accID = "1000" // spike default caller
-	}
-	// Spike compatibility: unknown callers resolve by SIP username
-	// (Kamailio sends $fU which is the auth username), then fall back
-	// to the demo account. Production rejects with 401/404 after auth.
-	if _, err := s.store.Get(accID); err != nil {
-		if id, ok := s.userIndex[accID]; ok {
-			accID = id
-		} else if _, err2 := s.store.Get("1000"); err2 == nil {
-			accID = "1000"
-		}
-	}
-	// Fraud engine: frequency/cost/prefix rules, block or alert.
-	// Estimated cost for the cost-cap check uses the 60s lock basis.
-	if h := s.risk.CheckCall(accID, req.To, 0.05); h.Blocked {
-		httpError(w, 403, "risk-blocked ["+h.RuleID+"]: "+h.Reason)
-		return
-	} else if h.Alerted {
-		log.Printf("RISK-ALERT account=%s rule=%s: %s", accID, h.RuleID, h.Reason)
-	}
-
-	now := time.Now()
-	entry := s.rates.Lookup(req.To, int(now.Weekday()), now.Hour()*60+now.Minute())
-	if entry == nil {
-		httpError(w, 404, "no rate for destination "+req.To)
-		return
-	}
-	if err := s.calls.Start(req.CallID, accID, req.To, entry, 60, s.recordEnabled); err != nil {
-		// Insufficient balance is a 403 for the caller; account limits
-		// are a 429 (retry later); unknown account a 404.
-		var limit *callstate.ErrLimit
-		if errors.As(err, &limit) {
-			w.Header().Set("Retry-After", "1")
-			httpError(w, 429, err.Error())
-			return
-		}
-		if strings.Contains(err.Error(), "not found") {
-			httpError(w, 404, err.Error())
-			return
-		}
-		httpError(w, 403, err.Error())
-		return
-	}
-	// Media plane: open the bidirectional stream so AI subscribers
-	// can attach even before the first RTP chunk.
-	s.media.Open(req.CallID)
-
-	writeJSON(w, 200, map[string]any{
-		"call_id":     req.CallID,
-		"rate_prefix": entry.Prefix,
-		"price":       entry.Price,
-		"lock":        entry.Price,
-		// Recording opt-in: Kamailio calls start_recording() when true.
-		"record": s.recordEnabled,
-	})
+	writeJSON(w, code, body)
 }
 
 // handleAnswer switches the call from lock to live.
@@ -229,9 +219,8 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "call_id required")
 		return
 	}
-	// Interim starts on the first tick; the manager has no explicit
-	// answer event in the spike, so acknowledge.
-	writeJSON(w, 200, map[string]string{"call_id": req.CallID, "status": "live"})
+	code, body := s.callAnswer(req.CallID)
+	writeJSON(w, code, body)
 }
 
 // handleEnd finalizes billing and returns the CDR.
@@ -239,78 +228,22 @@ func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
-	var req struct {
-		CallID  string `json:"call_id"`
-		DurSecs int    `json:"duration"` // optional: defaulted from call start
-		PDDMs   int    `json:"pdd_ms"`  // post-dial delay measured by Kamailio
-		SIPCode int    `json:"sip_code"`
-		Release string `json:"release"` // normal | balance-exhausted | ...
-	}
+	var req callEndReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CallID == "" {
 		httpError(w, 400, "call_id required")
 		return
 	}
-	seconds := req.DurSecs
-	if seconds == 0 {
-		// Kamailio sends the BYE without duration: derive it from the
-		// call's start time (SIPp's failed call lasted ~0s, real calls
-		// bill their true length).
-		if info, ok := s.calls.Info(req.CallID); ok {
-			seconds = int(time.Since(info).Seconds())
-		}
-	}
-	cdr, err := s.calls.End(req.CallID, seconds)
-	if err != nil {
-		httpError(w, 404, err.Error())
-		return
-	}
-	// Subscription package: free allowance first, then discount on the
-	// billable remainder. The CDR carries the effective cost; free
-	// seconds are recorded in the record for the bill view.
-	if pr := s.pkg.Apply(cdr.AccountID, cdr.BilledSecs, cdr.Cost); pr.BillableSecs < float64(cdr.BilledSecs) || pr.Discount != 1 {
-		if float64(cdr.BilledSecs) > 0 {
-			ratio := pr.BillableSecs / float64(cdr.BilledSecs)
-			cdr.Cost = roundUp7f(cdr.Cost * ratio * pr.Discount)
-			cdr.FreeSecs = int(pr.FreeSecs)
-		}
-	}
-
-	// Fraud engine settlement: reconcile the daily cost accumulation
-	// with the actual CDR cost (estimate was 0.05 basis at start).
-	s.risk.SettleCost(cdr.AccountID, 0.05, cdr.Cost)
-	// Media plane: close the call's stream (subscribers drop, final
-	// stats reported for the RTT budget audit).
-	if st, ok := s.media.Close(req.CallID); ok && st.UplinkChunks+st.DownlinkChunks > 0 {
-		log.Printf("MEDIA call=%s up=%d down=%d maxRTT=%dms", req.CallID,
-			st.UplinkChunks, st.DownlinkChunks, st.MaxRTTMs)
-	}
-	if req.PDDMs > 0 {
-		cdr.PDDMs = req.PDDMs
-	}
-	if req.SIPCode > 0 {
-		cdr.SIPCode = req.SIPCode
-	}
-	if req.Release != "" {
-		cdr.Release = req.Release
-	}
-	s.cdrs = append(s.cdrs, cdr)
-	if s.pg != nil {
-		// Persistence failures log but never block the billing answer:
-		// the CDR is already returned and held in memory for retry.
-		if err := s.pg.InsertCDR(r.Context(), cdr); err != nil {
-			log.Printf("CDR persist failed (call %s): %v", cdr.CallID, err)
-		}
-		if bal, err := account.Balance(s.store, cdr.AccountID); err == nil {
-			if err := s.pg.AppendLedger(r.Context(), cdr.AccountID, -cdr.Cost, bal, "call-settle", cdr.CallID); err != nil {
-				log.Printf("ledger persist failed (call %s): %v", cdr.CallID, err)
-			}
-		}
-	}
-	writeJSON(w, 200, cdr)
+	code, body := s.callEnd(r.Context(), req)
+	writeJSON(w, code, body)
 }
 
-// handleStats is a monitoring hook (Prometheus comes later).
+// handleStats is a monitoring hook (Prometheus comes later). The same
+// snapshot serves the gvos.svc.stats request/reply face (startStatsSvc).
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, s.statsBody())
+}
+
+func (s *Server) statsBody() map[string]any {
 	resp := map[string]any{
 		"live_calls": s.calls.Live(),
 		"cdrs":       len(s.cdrs),
@@ -320,10 +253,19 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if s.pg != nil {
 		resp["mode"] = "postgres"
 	}
+	resp["nats"] = "off"
+	if s.events != nil {
+		resp["nats"] = s.events.Mode()
+	}
+	resp["webhook"] = "off"
+	if s.events != nil && s.webhookURL != "" {
+		resp["webhook"] = "on"
+	}
+	resp["workers"] = s.workerNames
 	if bal, err := account.Balance(s.store, "1000"); err == nil {
 		resp["caller_bal"] = bal
 	}
-	writeJSON(w, 200, resp)
+	return resp
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -339,6 +281,8 @@ func httpError(w http.ResponseWriter, code int, msg string) {
 func main() {
 	listen := flag.String("listen", ":8080", "HTTP listen address")
 	dsn := flag.String("dsn", "", "PostgreSQL DSN; empty = in-memory demo mode")
+	natsURL := flag.String("nats", "", "NATS server URL; empty = event bus off")
+	webhook := flag.String("webhook", "", "Webhook endpoint URL (cdr.completed events; requires -nats)")
 	tlsCert := flag.String("tls-cert", os.Getenv("GVOS_TLS_CERT"), "TLS cert (enables HTTPS)")
 	tlsKey := flag.String("tls-key", os.Getenv("GVOS_TLS_KEY"), "TLS key")
 	flag.Parse()
@@ -348,6 +292,14 @@ func main() {
 	dsnVal := *dsn
 	if dsnVal == "" {
 		dsnVal = os.Getenv("GVOS_DB_DSN")
+	}
+	natsVal := *natsURL
+	if natsVal == "" {
+		natsVal = os.Getenv("GVOS_NATS_URL")
+	}
+	webhookVal := *webhook
+	if webhookVal == "" {
+		webhookVal = os.Getenv("GVOS_WEBHOOK_URL")
 	}
 
 	var s *Server
@@ -362,12 +314,45 @@ func main() {
 	} else {
 		s = NewServer()
 	}
-	log.Printf("gvos-core listening on %s", *listen)
+	// Event bus is auxiliary, not authority: a missing/unreachable
+	// broker must not take the control plane down (it reconnects on
+	// its own; publishes just log until the broker appears).
+	var webhookConsumer *events.Consumer
+	if natsVal != "" {
+		if pub, err := events.New(natsVal); err != nil {
+			log.Printf("NATS event bus disabled (connect failed: %v)", err)
+		} else {
+			s.events = pub
+			s.webhookURL = webhookVal
+			startAsyncWorkers(s)
+			startCfgReloadSubscriber(s)
+			startCallSvc(s)
+			startStatsSvc(s)
+			if webhookVal != "" {
+				webhookConsumer = startWebhookDispatcher(s)
+			}
+		}
+	}
+	log.Printf("gvos-core listening on %s (workers=%v)", *listen, s.workerNames)
+	var runErr error
 	if *tlsCert != "" && *tlsKey != "" {
 		log.Printf("TLS enabled (%s)", *tlsCert)
-		log.Fatal(http.ListenAndServeTLS(*listen, *tlsCert, *tlsKey, muxFor(s)))
+		runErr = http.ListenAndServeTLS(*listen, *tlsCert, *tlsKey, muxFor(s))
+	} else {
+		runErr = http.ListenAndServe(*listen, muxFor(s))
 	}
-	log.Fatal(http.ListenAndServe(*listen, muxFor(s)))
+	if webhookConsumer != nil {
+		webhookConsumer.Stop() // drain in-flight webhook deliveries
+	}
+	for _, c := range s.workers {
+		c.Stop() // drain in-flight async writes before closing the bus
+	}
+	if s.events != nil {
+		s.events.Close() // flush pending events before exit
+	}
+	if runErr != nil {
+		log.Fatal(runErr)
+	}
 }
 
 // muxFor builds the HTTP routing table. Path-only patterns (Go 1.21
@@ -459,7 +444,6 @@ func requirePOST(w http.ResponseWriter, r *http.Request) bool {
 	}
 	return true
 }
-
 
 func roundUp7f(p float64) float64 {
 	if p <= 0 {

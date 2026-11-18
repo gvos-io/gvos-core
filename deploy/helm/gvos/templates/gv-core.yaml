@@ -33,6 +33,10 @@ spec:
             - name: GVOS_DB_DSN
               value: {{ .Values.database.dsn | quote }}
             {{- end }}
+            {{- if .Values.nats.url }}
+            - name: GVOS_NATS_URL
+              value: {{ .Values.nats.url | quote }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /healthz

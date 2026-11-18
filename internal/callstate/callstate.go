@@ -100,6 +100,51 @@ func (m *Manager) StartSweeper(timeout time.Duration, interval time.Duration) (s
 	return func() { close(done) }
 }
 
+// StartInterimDriver launches the periodic deduction loop: every
+// interval it reconciles every live call's accrued cost against the
+// account balance and forces teardown when the next tick is no longer
+// affordable — this is what makes "real-time billing, forced release"
+// actually fire on long calls (until RTPengine activity events replace
+// the time slices, the clock is the activity source). Calls already
+// torn down (release reason recorded, BYE pending) are skipped so a
+// slow executor never sees duplicate dispatches. Returns a stop func.
+func (m *Manager) StartInterimDriver(interval time.Duration) (stop func()) {
+	if interval <= 0 {
+		interval = m.interval
+	}
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				m.driveInterim()
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+// driveInterim runs one interim pass over all live calls that have not
+// been torn down yet. Errors from raced-out calls (BYE settled between
+// snapshot and Interim) are ignored: the call is simply gone.
+func (m *Manager) driveInterim() {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.calls))
+	for id := range m.calls {
+		if m.lastRelease[id] == "" {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.Unlock()
+	for _, id := range ids {
+		_, _ = m.Interim(id)
+	}
+}
+
 // sweep settles one pass of timed-out calls. The release reason is
 // "zombie-timeout" so the CDR trail shows what happened.
 func (m *Manager) sweep(timeout time.Duration) {

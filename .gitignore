@@ -21,3 +21,9 @@ Thumbs.db
 # Local runtime data
 pgdata/
 *.log
+
+# Local agent/workspace state
+.zcode/
+
+# TLS material: generate self-signed certs at deploy time (see README)
+deploy/tls/

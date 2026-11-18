@@ -3,11 +3,12 @@
 // media stream, forwards injected uplink audio, and answers pings.
 //
 // Wire protocol (all binary frames, length-prefixed by WS itself):
-//   client->server: raw audio bytes  -> Inject (TTS speaking to caller)
-//   server->client: 1-byte header + audio:
-//       header[0] == 0 -> uplink chunk   (caller audio, ASR input)
-//       header[0] == 1 -> downlink chunk (network audio, what caller hears)
-//   client->server text frame "echo" -> RTT sample against the budget
+//
+//	client->server: raw audio bytes  -> Inject (TTS speaking to caller)
+//	server->client: 1-byte header + audio:
+//	    header[0] == 0 -> uplink chunk   (caller audio, ASR input)
+//	    header[0] == 1 -> downlink chunk (network audio, what caller hears)
+//	client->server text frame "echo" -> RTT sample against the budget
 package main
 
 import (

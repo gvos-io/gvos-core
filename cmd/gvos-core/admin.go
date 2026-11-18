@@ -15,9 +15,10 @@ import (
 
 	"github.com/gvos/gvos-core/internal/account"
 	"github.com/gvos/gvos-core/internal/blocklist"
-	"github.com/gvos/gvos-core/internal/rate"
+	"github.com/gvos/gvos-core/internal/events"
 	"github.com/gvos/gvos-core/internal/mediastream"
 	"github.com/gvos/gvos-core/internal/pkgplan"
+	"github.com/gvos/gvos-core/internal/rate"
 	"github.com/gvos/gvos-core/internal/riskctrl"
 )
 
@@ -93,10 +94,20 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "create", "account", id, nil,
 		map[string]any{"username": req.Username, "credit": req.Credit})
+	// Peer replicas apply the account directly (HA1 never leaves PG:
+	// the bus payload carries billing-relevant fields only).
+	s.emit(events.SubjectCfgReload, map[string]any{
+		"entity": "account", "op": "create",
+		"account": map[string]any{
+			"id": id, "username": req.Username, "name": req.Name,
+			"parent_id": req.ParentID, "rate_group": req.RateGroup,
+			"postpaid": req.Postpaid, "credit": req.Credit,
+		},
+	})
 	writeJSON(w, 201, map[string]any{
 		"id": id, "username": req.Username, "credit": req.Credit,
 		"sip_password": sipPass, "sip_realm": "gvos.local",
-		"note":          "sip password is shown once; store it now",
+		"note": "sip password is shown once; store it now",
 	})
 }
 
@@ -136,6 +147,12 @@ func (s *Server) handleTopUp(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "topup", "account", req.AccountID,
 		map[string]any{"balance": before}, map[string]any{"balance": balance, "delta": req.Delta})
+	// Absolute new balance (not the delta) so replaying the broadcast
+	// is idempotent on peer replicas.
+	s.emit(events.SubjectCfgReload, map[string]any{
+		"entity": "credit", "op": "topup",
+		"account_id": req.AccountID, "credit": balance,
+	})
 	writeJSON(w, 200, map[string]any{"account_id": req.AccountID, "balance": balance})
 }
 
@@ -204,6 +221,9 @@ func (s *Server) handleRateUpsert(w http.ResponseWriter, r *http.Request) {
 	s.rebuildRates()
 
 	s.audit(r, "upsert", "rate", req.Prefix, nil, req)
+	// Broadcast to peer replicas: they rebuild their snapshot from the
+	// authoritative store too ("60s fee window" is now instant).
+	s.emit(events.SubjectCfgReload, map[string]string{"entity": "rate"})
 	writeJSON(w, 200, map[string]any{"prefix": req.Prefix, "price": req.Price})
 }
 
@@ -222,9 +242,18 @@ func (s *Server) handleRateList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"rates": rows, "count": len(rows)})
 }
 
-// audit is a no-op in memory mode; PG mode appends the audit row.
+// audit records one admin mutation. The admin.changed event IS the
+// audit record: with the AUDIT worker running (asyncAudit) the event
+// alone is authoritative (at-least-once write by the consumer);
+// without it, PG mode writes the row inline as the fallback. The
+// event always flows — demo mode (no PG) streams too, so downstream
+// consumers see one uniform feed.
 func (s *Server) audit(r *http.Request, action, entity, entityID string, before, after any) {
-	if s.pg == nil {
+	s.emit(events.SubjectAdminChanged, map[string]any{
+		"action": action, "entity": entity, "entity_id": entityID,
+		"before": before, "after": after,
+	})
+	if s.asyncAudit || s.pg == nil {
 		return
 	}
 	ctx, cancel := contextWithTimeout(r.Context())
@@ -239,6 +268,21 @@ func (s *Server) audit(r *http.Request, action, entity, entityID string, before,
 func contextWithTimeout(parent context.Context) (context.Context, context.CancelFunc) {
 	return contextWithTimeoutDuration(parent, 5*time.Second)
 }
+
+// emitListOp broadcasts one screening-rule change as an operation
+// payload: peers apply it directly to their in-memory list instead of
+// reloading from PG (which would revert memory-only state). The DB
+// write-through is the durability path; this is the propagation path.
+func (s *Server) emitListOp(op string, e blocklist.Entry) {
+	s.emit(events.SubjectCfgReload, map[string]any{
+		"entity": "blocklist", "op": op,
+		"entry": map[string]any{
+			"tenant_id": e.TenantID, "kind": e.Kind, "scope": e.Scope,
+			"pattern": e.Pattern, "is_regex": e.IsRegex,
+		},
+	})
+}
+
 // POST /v1/admin/record {"enabled":bool} - global recording toggle.
 // Kamailio reads the start-event answer's record flag and engages
 // rtpengine recording per call.
@@ -255,7 +299,16 @@ func (s *Server) handleRecordToggle(w http.ResponseWriter, r *http.Request) {
 	}
 	before := s.recordEnabled
 	s.recordEnabled = req.Enabled
+	// Persist (PG mode) so restarts and new replicas load the toggle;
+	// broadcast so existing peers follow instantly.
+	if s.pg != nil {
+		if err := s.pg.PutSetting(r.Context(), "recording", map[string]any{"enabled": req.Enabled}); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+	}
 	s.audit(r, "toggle", "recording", "", map[string]any{"enabled": before}, map[string]any{"enabled": req.Enabled})
+	s.emit(events.SubjectCfgReload, map[string]any{"entity": "recording", "enabled": req.Enabled})
 	writeJSON(w, 200, map[string]any{"enabled": s.recordEnabled})
 }
 
@@ -268,8 +321,8 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		var req struct {
-			Kind    string `json:"kind"`   // black | white
-			Scope   string `json:"scope"`  // src | dest
+			Kind    string `json:"kind"`  // black | white
+			Scope   string `json:"scope"` // src | dest
 			Pattern string `json:"pattern"`
 			IsRegex bool   `json:"is_regex"`
 			Remove  bool   `json:"remove"`
@@ -281,15 +334,31 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if req.Remove {
+			// Write-through (PG mode) before the memory remove: the
+			// DB row is what restarts and new replicas load back.
+			if s.pg != nil {
+				if _, err := s.pg.RemoveNumberList(r.Context(), "", req.Kind, req.Scope, req.Pattern); err != nil {
+					httpError(w, 500, err.Error())
+					return
+				}
+			}
 			n := s.blocklist.Remove("", req.Kind, req.Scope, req.Pattern)
 			s.audit(r, "remove", "blocklist", req.Pattern, map[string]any{"removed": n}, nil)
+			s.emitListOp("remove", blocklist.Entry{Kind: req.Kind, Scope: req.Scope, Pattern: req.Pattern, IsRegex: req.IsRegex})
 			writeJSON(w, 200, map[string]any{"removed": n})
 			return
+		}
+		if s.pg != nil {
+			if err := s.pg.UpsertNumberList(r.Context(), blocklist.Entry{Kind: req.Kind, Scope: req.Scope, Pattern: req.Pattern, IsRegex: req.IsRegex}); err != nil {
+				httpError(w, 500, err.Error())
+				return
+			}
 		}
 		s.blocklist.Add(blocklist.Entry{
 			Kind: req.Kind, Scope: req.Scope, Pattern: req.Pattern, IsRegex: req.IsRegex,
 		})
 		s.audit(r, "create", "blocklist", req.Pattern, nil, req)
+		s.emitListOp("add", blocklist.Entry{Kind: req.Kind, Scope: req.Scope, Pattern: req.Pattern, IsRegex: req.IsRegex})
 		writeJSON(w, 201, map[string]any{"kind": req.Kind, "scope": req.Scope, "pattern": req.Pattern})
 	case http.MethodGet:
 		writeJSON(w, 200, map[string]any{"rules": s.blocklist.Count()})
@@ -327,9 +396,19 @@ func (s *Server) handleRiskRules(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	before := s.risk.Rules()
+	// Persist the full rule set (PG mode): restarts and new replicas
+	// restore the same fraud posture instead of starting bare.
+	if s.pg != nil {
+		if err := s.pg.PutSetting(r.Context(), "risk_rules", req.Rules); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+	}
 	s.risk.SetRules(req.Rules)
-	s.audit(r, "replace", "risk_rules", "",
-		map[string]any{"count": len(before)}, map[string]any{"count": len(req.Rules)})
+	// Audit the complete rules (before had counts only — a compliance
+	// gap: the diff must show what actually changed).
+	s.audit(r, "replace", "risk_rules", "", before, req.Rules)
+	s.emit(events.SubjectCfgReload, map[string]any{"entity": "risk", "rules": req.Rules})
 	writeJSON(w, 200, map[string]any{"rules": len(req.Rules)})
 }
 
@@ -368,7 +447,6 @@ func (s *Server) handleStreamPush(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"call_id": req.CallID, "seq": c.Seq, "bytes": len(audio)})
 }
 
-
 // genSIPPassword produces a pronounceable-ish random SIP password.
 func genSIPPassword(n int) string {
 	const alphabet = "abcdefghjkmnpqrstuvwxyz23456789ABCDEFGHJKMNPQRSTUVWXYZ"
@@ -401,6 +479,13 @@ func (s *Server) startReportWorker() {
 				logPrintf("REPORT rollup %s failed: %v", day, err)
 			} else if n > 0 {
 				logPrintf("REPORT rollup %s: %d account-rows", day, n)
+				// Downstream (reporting, webhook consumers) learns the
+				// rollup completed — the manual trigger emits the same
+				// event via audit().
+				s.emit(events.SubjectAdminChanged, map[string]any{
+					"action": "rollup", "entity": "usage_daily", "entity_id": day,
+					"rows": n,
+				})
 			}
 		}
 	}
@@ -500,17 +585,40 @@ func (s *Server) handlePackages(w http.ResponseWriter, r *http.Request) {
 	if req.Cycle == "monthly" {
 		c = pkgplan.Monthly
 	}
-	s.pkg.Define(pkgplan.Package{
+	pkg := pkgplan.Package{
 		ID: req.ID, Name: firstNonEmpty(req.Name, req.ID), Cycle: c,
 		FreeMinutes: req.FreeMinutes, Discount: req.Discount, MinSpend: req.MinSpend,
-	})
+	}
+	s.pkg.Define(pkg)
 	s.audit(r, "define", "package", req.ID, nil, req)
+	s.emit(events.SubjectCfgReload, map[string]any{"entity": "package", "op": "define", "package": pkg})
 	if req.Assign != "" {
-		if err := s.pkg.Assign(req.Assign, req.ID); err != nil {
+		// Resolve the assign target to the account's internal ID: the
+		// billing path (pkg.Apply) keys on AccountID, and callers
+		// naturally pass the SIP username (same resolution rule as the
+		// caller path in callStart).
+		assignID := req.Assign
+		if _, err := s.store.Get(assignID); err != nil {
+			if id, ok := s.userIndex[assignID]; ok {
+				assignID = id
+			} else {
+				httpError(w, 400, "assign_account not found: "+req.Assign)
+				return
+			}
+		}
+		if err := s.pkg.Assign(assignID, req.ID); err != nil {
 			httpError(w, 400, err.Error())
 			return
 		}
-		s.audit(r, "assign", "package", req.ID, nil, map[string]any{"account": req.Assign})
+		s.audit(r, "assign", "package", req.ID, nil, map[string]any{"account": assignID})
+		s.emit(events.SubjectCfgReload, map[string]any{"entity": "package", "op": "assign", "account": assignID, "package_id": req.ID})
+	}
+	// One durability write covers both mutations (define+assign).
+	if s.pg != nil {
+		if err := s.pg.PutSetting(r.Context(), "packages", s.pkg.Snapshot()); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
 	}
 	writeJSON(w, 200, map[string]any{"id": req.ID, "assigned": req.Assign})
 }
@@ -528,7 +636,6 @@ func (s *Server) handlePackageUsage(w http.ResponseWriter, r *http.Request) {
 		"free_secs_used": free, "cycle_spend": spend, "min_spend_shortfall": short,
 	})
 }
-
 
 func firstNonEmpty(a, b string) string {
 	if a != "" {

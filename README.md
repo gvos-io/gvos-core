@@ -4,7 +4,7 @@
 
 > 战略与市场依据见 [vos-competitive-analysis.md](vos-competitive-analysis.md)，产品/架构/定价/迁移方案见 [docs/](docs/)。
 
-## 当前状态：M4-M8 完成（含媒体面/录音/黑名单，soak 运行中）
+## 当前状态：M4-M8 完成（含媒体面/录音/黑名单/NATS 事件总线，soak 运行中）
 
 已完成的端到端闭环（INVITE 锁定 → 通话 → BYE 结算 → CDR → 落库）：
 
@@ -14,10 +14,11 @@
   - `internal/account`：租户→多级代理→账户树、全链路原子预锁定（all-or-nothing 回滚）、后付账户跳过锁定、环检测、List
   - `internal/callstate`：预锁定→周期扣减→余额耗尽**强制拆线**（teardown 回调，拆线原因写入 CDR）→ 结算补扣/退还，CDR 输出
 - **持久化（`internal/store`，pgx v5.6）**：账户/费率加载（窗口费率→Effective）、CDR 落月分区表、账本/审计（jsonb before/after）、账户创建/充值（事务）/费率 upsert
+- **事件总线（`internal/events`，NATS）**：JetStream stream `GVOS`（subjects `gvos.>`，无 JS 时自动降级 core pub/sub）；非阻塞发布——队列满或 broker 失联只记日志，**计费应答永不等待总线**
 - **双运行模式**：`-dsn` 接 PG（加载+落库）；无 `-dsn` 纯内存（演示/测试）。存储失败只记日志不阻塞计费应答
 - **管理 API**（`/v1/admin/*`，Bearer 守卫）：账户创建/列表、充值（PG 模式下事务+账本+审计）、费率 upsert **下一通电话即时生效**；全部变更写审计
 - **数据模型**：`migrations/001_init.sql` + `002_seed.sql`（演示数据）
-- **部署**：`deploy/docker-compose.yml`（gv-core + Kamailio + RTPengine + demo 网关 + PostgreSQL 带 5432 映射）
+- **部署**：`deploy/docker-compose.yml`（gv-core + Kamailio + RTPengine + demo 网关 + PostgreSQL + NATS）
 
 ```bash
 # 本地跑测试与构建
@@ -39,6 +40,12 @@ curl -X POST -d '{"call_id":"c1","duration":66}' :9997/v1/call/end
 ./bin/gvos-core -listen :8080 -dsn "postgres://..." &
 curl -X POST -H "Authorization: Bearer dev-admin-token" \
   -d '{"username":"user1","credit":10}' :8080/v1/admin/accounts
+
+# 事件总线（-nats 或环境变量 GVOS_NATS_URL；不传即关闭）
+./bin/gvos-core -listen :8080 -dsn "postgres://..." -nats nats://127.0.0.1:4222 &
+# 订阅侧（compose 环境直接用 nats-box）：
+docker run --rm --network deploy_default natsio/nats-box \
+  nats sub -s nats://nats:4222 "gvos.>"
 ```
 
 ## 里程碑（对齐 docs/01-prd.md）
@@ -65,11 +72,53 @@ internal/rate/     # 费率引擎（前缀匹配 + 时段窗口）
 internal/billing/  # 计费器（步长方案 + 精度）
 internal/account/  # 账户树 + 余额锁定
 internal/callstate/# 通话状态 + 强制拆线 + CDR
+internal/events/   # NATS 事件总线（JetStream 优先，core 降级）
 migrations/        # PostgreSQL schema
-deploy/            # docker-compose + Kamailio cfg + Dockerfile
+deploy/            # docker-compose + Kamailio cfg + Dockerfile + Helm
 docs/              # PRD / 架构 / 定价 / 迁移方案
 research/          # 竞品与市场原始调研
 ```
+
+
+## 事件总线（NATS）
+
+`-nats <url>`（或 `GVOS_NATS_URL`）开启后，gv-core 把事件发布到 NATS：JetStream 可用时写入 stream `GVOS`（`gvos.>`），否则降级 core pub/sub（`/v1/stats` 的 `nats` 字段显示 off/core/jetstream）。发布严格非阻塞——broker 失联只记日志，计费路径零影响。
+
+**三种 NATS 机制，三种真实场景**（`internal/events`）：
+
+| 机制 | NATS 能力 | 场景 |
+|---|---|---|
+| 异步调用 | request/reply（`_INBOX` 异步等应答） | 拆线指令分发 `gvos.svc.teardown`：计费回调发出请求，执行器应答；生产期执行器移到 Kamailio 侧，gv-core 不变 |
+| MQ | JetStream durable pull consumer（竞争消费、at-least-once） | Webhook 分发器：`-webhook <url>`（或 `GVOS_WEBHOOK_URL`）开启，durable `WEBHOOKS` 消费 CDR 事件 POST 到目标；失败 NAK 1s 后重投，MaxDeliver=5 防毒丸；多副本共享 durable 自动负载均衡 |
+| 广播通知 | core pub/sub fan-out | 配置变更广播 `gvos.cfg.reload`：费率 upsert / 黑名单变更 → 所有 gv-core 副本即时从 PG 重建快照（"费率 60s 窗口"变即时生效） |
+
+| Subject | 触发 | Payload |
+|---|---|---|
+| `gvos.cdr.completed` | BYE 结算完成（内存/PG 双模式都发） | 完整 CDR（Go 字段名 JSON，与 `/v1/call/end` 响应同构） |
+| `gvos.call.teardown` | 余额耗尽强制拆线 / zombie 结算 | `{call_id, reason}` |
+| `gvos.risk.alert` | 风控规则命中告警（非阻断） | `{account, rule_id, reason, to}` |
+| `gvos.admin.changed` | 全部管理 API 变更 + 定时 rollup 完成 | `{action, entity, entity_id, before/after}` |
+| `gvos.cfg.reload` | 配置/状态变更广播（多副本即时同步） | `{entity: rate\|blocklist(op+entry)\|account\|credit\|recording\|risk\|package, ...}` |
+| `gvos.svc.teardown` | 拆线指令 req/reply | req `{call_id, reason}` → rep `{dispatched}` |
+| `gvos.svc.call.start/answer/end` | 通话生命周期 req/reply（与 HTTP 面同语义） | req 同 HTTP 请求体 → rep `{code, body}` |
+| `gvos.svc.stats` | 运维快照 req/reply | rep = `/v1/stats` 内容 |
+
+**多副本语义**：账户创建/充值（绝对余额，幂等）、费率、黑名单（op-payload，且 PG 模式写穿 `number_lists`）、录音开关、风控规则、套餐定义/指派全部经 `gvos.cfg.reload` 即时同步并持久化到 `settings` 表（`migrations/007_settings.sql`），重启/新副本启动时恢复。interim 扣减驱动器（10s）让"余额耗尽强制拆线"在长通话上真正生效（拆线指令走 `gvos.svc.teardown`）。
+
+```bash
+# Webhook 分发（durable 消费，重启不丢；接收端 2xx 即 Ack）
+docker run --rm -p 9090:9090 mcwebb/http-echo &        # 任意 2xx 接收端
+./bin/gvos-core -listen :8080 -dsn "postgres://..." \
+  -nats nats://127.0.0.1:4222 -webhook http://127.0.0.1:9090
+
+# 全 NATS 客户端：无需 HTTP 即可完成一通计费电话
+nats req -s nats://127.0.0.1:4222 gvos.svc.call.start '{"call_id":"c1","from_user":"1000","to_user":"8613800138000"}'
+nats req -s nats://127.0.0.1:4222 gvos.svc.call.end   '{"call_id":"c1","duration":66}'
+```
+
+**不换 NATS 的面**（各有硬理由）：Kamailio→gv-core 的 `/v1/call/start` 锁定（同步 403 门，Kamailio nats 模块无阻塞 req/reply）；媒体流 WS 与 gvos-asr（20ms 二进制流）；管理 API/UI、gvos-migrate、`/healthz`（API-first 产品面与探针）；Kamailio auth_db 直读 PG（凭据不进总线）。Kamailio 的 answer/end 事件切 `nats_publish` 需换 Debian 基础镜像（Alpine aports 无 `kamailio-nats` 包），服务端已由 `gvos.svc.call.*` 就绪，切换时零服务端改动。
+
+
 
 
 ## 录音 / 黑名单（P1 模块）

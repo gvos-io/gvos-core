@@ -1,6 +1,7 @@
 package callstate
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -121,4 +122,45 @@ func approxEqual(a, b, tol float64) bool {
 		return a-b <= tol
 	}
 	return b-a <= tol
+}
+
+// TestInterimDriverForcesTeardown: the driver's pass drives the
+// balance-exhausted teardown exactly once — a second pass over the
+// same (torn down, BYE-pending) call must not re-dispatch.
+func TestInterimDriverForcesTeardown(t *testing.T) {
+	var mu sync.Mutex
+	var torn []string
+	m, store := setup(t, func(id, reason string) {
+		mu.Lock()
+		torn = append(torn, id+"|"+reason)
+		mu.Unlock()
+	})
+
+	base := time.Unix(1_700_000_000, 0)
+	cur := base
+	m.SetClock(func() time.Time { return cur })
+
+	m.Start("call-1", "end1", "86", endToEndEntry(), 60, false)
+
+	// Drain end1 below the interim charge (same setup as the direct
+	// Interim test): 60s elapsed, balance left at 0.04 < one tick.
+	cur = base.Add(60 * time.Second)
+	store.Reserve("end1", 99.9)
+
+	m.driveInterim()
+	mu.Lock()
+	if len(torn) != 1 || torn[0] != "call-1|balance-exhausted" {
+		mu.Unlock()
+		t.Fatalf("teardowns = %v, want [call-1|balance-exhausted]", torn)
+	}
+	mu.Unlock()
+
+	// Second pass: the call is still live (BYE pending) but already
+	// marked — no duplicate teardown dispatch.
+	m.driveInterim()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(torn) != 1 {
+		t.Errorf("teardowns after second pass = %v, want exactly 1", torn)
+	}
 }

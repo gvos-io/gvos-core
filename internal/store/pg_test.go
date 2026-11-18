@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gvos/gvos-core/internal/account"
+	"github.com/gvos/gvos-core/internal/blocklist"
 	"github.com/gvos/gvos-core/internal/callstate"
 )
 
@@ -127,8 +128,14 @@ func TestInsertCDRAndLedger(t *testing.T) {
 		Price:      0.05,
 		Release:    "normal",
 	}
-	if err := pg.InsertCDR(ctx, cdr); err != nil {
-		t.Fatal(err)
+	inserted, err := pg.InsertCDR(ctx, cdr)
+	if err != nil || !inserted {
+		t.Fatalf("insert: inserted=%v err=%v", inserted, err)
+	}
+	// Idempotent under redelivery: the same CDR again finds the unique
+	// index (uq_cdr_call) and reports no new row.
+	if again, err := pg.InsertCDR(ctx, cdr); err != nil || again {
+		t.Fatalf("redelivery insert: again=%v err=%v (want false, nil)", again, err)
 	}
 	if err := pg.AppendLedger(ctx, cdr.AccountID, -cdr.Cost, 9.945, "call-settle", cdr.CallID); err != nil {
 		t.Fatal(err)
@@ -147,5 +154,58 @@ func TestInsertCDRAndLedger(t *testing.T) {
 	}
 	if cost != 0.055 {
 		t.Errorf("cdr cost roundtrip = %v, want 0.055", cost)
+	}
+}
+
+// TestNumberListWriteThrough: the admin add/remove path persists to
+// number_lists and the next LoadBlocklist sees the same ruleset —
+// the durability contract behind the op-payload broadcast.
+func TestNumberListWriteThrough(t *testing.T) {
+	dsn := testDSN()
+	if dsn == "" {
+		dsn = os.Getenv("GVOS_TEST_DSN")
+	}
+	if dsn == "" {
+		t.Skip("GVOS_TEST_DSN not set; skipping live-DB test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pg, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer pg.Close()
+
+	entry := blocklist.Entry{Kind: "black", Scope: "dest", Pattern: "86139000", IsRegex: false}
+	if err := pg.UpsertNumberList(ctx, entry); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := pg.UpsertNumberList(ctx, blocklist.Entry{Kind: "white", Scope: "src", Pattern: "95xx$", IsRegex: true}); err != nil {
+		t.Fatalf("upsert regex: %v", err)
+	}
+
+	lst := blocklist.New()
+	n, err := pg.LoadBlocklist(ctx, lst)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if n < 2 {
+		t.Fatalf("loaded %d rules, want >=2", n)
+	}
+	if ok, why := lst.CheckScreen("8613900012345", "dest"); ok {
+		t.Errorf("persisted black rule not active: %s", why)
+	}
+
+	removed, err := pg.RemoveNumberList(ctx, "", "black", "dest", "86139000")
+	if err != nil || removed != 1 {
+		t.Fatalf("remove: n=%d err=%v", removed, err)
+	}
+	if removed2, _ := pg.RemoveNumberList(ctx, "", "black", "dest", "86139000"); removed2 != 0 {
+		t.Errorf("second remove = %d, want 0", removed2)
+	}
+	// Cleanup the regex rule so repeat runs stay tidy.
+	if _, err := pg.RemoveNumberList(ctx, "", "white", "src", "95xx$"); err != nil {
+		t.Fatalf("cleanup: %v", err)
 	}
 }

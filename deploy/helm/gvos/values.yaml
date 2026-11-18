@@ -18,6 +18,11 @@ database:
   dsn: ""        # e.g. postgres://user:pass@patroni:5432/gvos
   existingSecret: ""  # k8s secret name holding 'dsn' key
 
+# Event bus: external NATS (JetStream recommended, subjects gvos.>).
+# Empty disables publishing. The chart does NOT ship a NATS cluster.
+nats:
+  url: ""        # e.g. nats://nats-client.gvos.svc:4222
+
 api:
   service:
     type: ClusterIP

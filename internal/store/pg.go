@@ -6,8 +6,10 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/gvos/gvos-core/internal/account"
@@ -92,12 +94,12 @@ func (p *PG) LoadRates(ctx context.Context, group string) (*rate.Table, error) {
 	var rates []rate.Rate
 	for rows.Next() {
 		var (
-			prefix            string
-			price, initPrice  float64
-			initDur, stepDur  int
-			minDur            int
-			days              []int16
-			winStart, winEnd  *string
+			prefix           string
+			price, initPrice float64
+			initDur, stepDur int
+			minDur           int
+			days             []int16
+			winStart, winEnd *string
 		)
 		if err := rows.Scan(&prefix, &price, &initDur, &initPrice, &stepDur, &minDur, &days, &winStart, &winEnd); err != nil {
 			return nil, fmt.Errorf("scan rate: %w", err)
@@ -123,21 +125,25 @@ func (p *PG) LoadRates(ctx context.Context, group string) (*rate.Table, error) {
 }
 
 // InsertCDR persists one billing record into the monthly-partitioned
-// cdr table.
-func (p *PG) InsertCDR(ctx context.Context, c *callstate.CDR) error {
-	_, err := p.pool.Exec(ctx, `
+// cdr table. Idempotent under redelivery (uq_cdr_call, migration 008):
+// returns inserted=false when the row already exists — the caller then
+// skips dependent writes (ledger) so at-least-once delivery produces
+// exactly-once effects.
+func (p *PG) InsertCDR(ctx context.Context, c *callstate.CDR) (bool, error) {
+	tag, err := p.pool.Exec(ctx, `
         INSERT INTO cdr (call_id, tenant_id, account_id, dest, dest_prefix,
                          start_time, end_time, duration, billed_secs,
                          price, cost, release, pdd_ms, sip_code, recorded)
         VALUES ($1, '00000000-0000-0000-0000-000000000001', $2::uuid, $3, $4,
                 $5::timestamptz, $5::timestamptz + ($6::int * interval '1 second'),
-                $6::int, $7::int, $8::numeric, $9::numeric, $10, $11::int, $12::int, $13::bool)`,
+                $6::int, $7::int, $8::numeric, $9::numeric, $10, $11::int, $12::int, $13::bool)
+        ON CONFLICT DO NOTHING`,
 		c.CallID, c.AccountID, c.Dest, c.RatePrefix,
 		c.StartTime, c.Duration, c.BilledSecs, c.Price, c.Cost, c.Release, c.PDDMs, c.SIPCode, c.Recorded)
 	if err != nil {
-		return fmt.Errorf("insert cdr: %w", err)
+		return false, fmt.Errorf("insert cdr: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() > 0, nil
 }
 
 // AppendLedger writes a balance movement row (append-only).
@@ -267,6 +273,73 @@ func nullIfEmpty(s string) any {
 	return s
 }
 
+// UpsertNumberList persists one screening rule (the admin add path).
+// The in-memory Add stays the fast path; this is the durability copy
+// so restarts and replicas load the same ruleset.
+func (p *PG) UpsertNumberList(ctx context.Context, e blocklist.Entry) error {
+	_, err := p.pool.Exec(ctx, `
+        INSERT INTO number_lists (tenant_id, kind, scope, pattern, is_regex)
+        VALUES ($1::uuid, $2, $3, $4, $5)`,
+		nullIfEmpty(e.TenantID), e.Kind, e.Scope, e.Pattern, e.IsRegex)
+	if err != nil {
+		return fmt.Errorf("insert number_lists: %w", err)
+	}
+	return nil
+}
+
+// RemoveNumberList deletes matching screening rules (admin remove
+// path); returns how many rows went away.
+func (p *PG) RemoveNumberList(ctx context.Context, tenant, kind, scope, pattern string) (int, error) {
+	tag, err := p.pool.Exec(ctx, `
+        DELETE FROM number_lists
+        WHERE ((tenant_id::text = $1) OR ($1 = '' AND tenant_id IS NULL))
+          AND kind = $2 AND scope = $3 AND pattern = $4`,
+		tenant, kind, scope, pattern)
+	if err != nil {
+		return 0, fmt.Errorf("delete number_lists: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// PutSetting stores one global runtime setting (recording toggle, risk
+// rules, package snapshot) as JSONB. The broadcast notifies peers
+// instantly; this row is what restarts load back.
+func (p *PG) PutSetting(ctx context.Context, key string, value any) error {
+	v, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("marshal setting %s: %w", key, err)
+	}
+	_, err = p.pool.Exec(ctx, `
+        INSERT INTO settings (key, value, updated_at)
+        VALUES ($1, $2::jsonb, now())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+		key, string(v))
+	if err != nil {
+		return fmt.Errorf("upsert setting %s: %w", key, err)
+	}
+	return nil
+}
+
+// GetSetting reads a setting back into dest (json.Unmarshal target).
+// Returns os.ErrNotExist-equivalent: (nil, ErrSettingNotFound) when
+// the key was never set — callers treat that as "use the default".
+var ErrSettingNotFound = errors.New("setting not found")
+
+func (p *PG) GetSetting(ctx context.Context, key string, dest any) error {
+	var raw []byte
+	err := p.pool.QueryRow(ctx, `SELECT value FROM settings WHERE key = $1`, key).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrSettingNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("query setting %s: %w", key, err)
+	}
+	if err := json.Unmarshal(raw, dest); err != nil {
+		return fmt.Errorf("unmarshal setting %s: %w", key, err)
+	}
+	return nil
+}
+
 func marshalOrNull(v any) (any, error) {
 	if v == nil {
 		return nil, nil
@@ -355,7 +428,7 @@ type GatewayReportRow struct {
 	Cost      float64 `json:"cost"`
 }
 
-// QueryGatewayDaily reads live CDR aggregates per gateway (day '' = all).
+// QueryGatewayDaily reads live CDR aggregates per gateway (day ” = all).
 func (p *PG) QueryGatewayDaily(ctx context.Context, day string) ([]GatewayReportRow, error) {
 	rows, err := p.pool.Query(ctx, `
         SELECT d.day::text,
@@ -398,11 +471,11 @@ func (p *PG) QueryGatewayDaily(ctx context.Context, day string) ([]GatewayReport
 // BlindZoneRow is one blind-zone finding: destinations you are blind
 // to - either unrated (no price matched) or unroutable (never answers).
 type BlindZoneRow struct {
-	Prefix   string `json:"prefix"`
-	Calls    int    `json:"calls"`
-	Answered int    `json:"answered"`
+	Prefix   string  `json:"prefix"`
+	Calls    int     `json:"calls"`
+	Answered int     `json:"answered"`
 	ASR      float64 `json:"asr"`
-	Reason   string `json:"reason"` // unrated | dead-route
+	Reason   string  `json:"reason"` // unrated | dead-route
 }
 
 // QueryBlindZones finds destinations that cost money to dial but
@@ -452,12 +525,12 @@ func (p *PG) QueryBlindZones(ctx context.Context, minCalls int) ([]BlindZoneRow,
 // which accounts dial which destination clusters, and how healthy
 // each lane is).
 type CrossRow struct {
-	AccountID string  `json:"account_id"`
-	DestCluster string `json:"dest_cluster"` // first 2-3 digits of the destination
-	Calls     int     `json:"calls"`
-	Answered  int     `json:"answered"`
-	ASR       float64 `json:"asr"`
-	Cost      float64 `json:"cost"`
+	AccountID   string  `json:"account_id"`
+	DestCluster string  `json:"dest_cluster"` // first 2-3 digits of the destination
+	Calls       int     `json:"calls"`
+	Answered    int     `json:"answered"`
+	ASR         float64 `json:"asr"`
+	Cost        float64 `json:"cost"`
 }
 
 // QueryCrossAnalysis returns the account x destination matrix.

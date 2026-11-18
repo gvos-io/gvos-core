@@ -50,6 +50,14 @@ services:
       timeout: 3s
       retries: 10
 
+  # Event bus: single node for now. The production HA path is a NATS
+  # cluster (3 nodes, same JetStream stream) — gv-core tolerates the
+  # broker being down either way (publishes log-and-continue), so no
+  # health gate.
+  nats:
+    image: nats:2-alpine
+    command: ["-js", "-m", "8222"]
+
   gv-core:
     build:
       context: ..
@@ -57,8 +65,11 @@ services:
     depends_on:
       pg-primary:
         condition: service_healthy
+      nats:
+        condition: service_started
     environment:
       GVOS_DB_DSN: "postgres://gvos:gvos_dev@pg-primary:5432/gvos?sslmode=disable"
+      GVOS_NATS_URL: "nats://nats:4222"
       GVOS_LISTEN: ":8080"
 
   # Signaling pair: two stateless Kamailio nodes. Real deployments

@@ -1,6 +1,7 @@
 # G-VOS one-command deployment (spike stage).
 # Brings up: gv-core (billing control plane), Kamailio (signaling),
-# RTPengine (media), a demo SIP gateway, and PostgreSQL.
+# RTPengine (media), a demo SIP gateway, PostgreSQL, and NATS (event
+# bus: gvos.> subjects, JetStream enabled).
 #
 # Usage:
 #   docker compose -f deploy/docker-compose.yml up -d --build
@@ -27,6 +28,17 @@ services:
       timeout: 3s
       retries: 10
 
+  nats:
+    # Event bus (JetStream): CDR stream, teardown/risk alerts, admin
+    # change feed — see internal/events for the subject scheme.
+    # gv-core does NOT gate on NATS health: it tolerates the broker
+    # being down (RetryOnFailedConnect) and starts before NATS.
+    image: nats:2-alpine
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222" # monitoring endpoint
+
   gv-core:
     build:
       context: ..
@@ -34,8 +46,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      nats:
+        condition: service_started
     environment:
       GVOS_DB_DSN: "postgres://gvos:gvos_dev@postgres:5432/gvos?sslmode=disable"
+      GVOS_NATS_URL: "nats://nats:4222"
       GVOS_LISTEN: ":8080"
     volumes:
       - ./tls:/etc/gvos/tls:ro

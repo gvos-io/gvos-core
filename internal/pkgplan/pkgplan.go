@@ -49,10 +49,10 @@ type Engine struct {
 }
 
 type assigned struct {
-	pkg           Package
-	freeUsedSecs  float64
-	spend         float64
-	cycleKey      string // "2026-10-07" or "2026-10" - reset on change
+	pkg          Package
+	freeUsedSecs float64
+	spend        float64
+	cycleKey     string // "2026-10-07" or "2026-10" - reset on change
 }
 
 func New() *Engine {
@@ -93,6 +93,45 @@ func (e *Engine) Unassign(accountID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.accounts, accountID)
+}
+
+// Snapshot exports definitions and bindings — the configuration part
+// of the engine (usage counters stay per-replica: runtime state, not
+// config). Used for settings persistence and cfg-reload rebuilds.
+type Snapshot struct {
+	Packages    []Package         `json:"packages"`
+	Assignments map[string]string `json:"assignments"` // accountID -> pkgID
+}
+
+func (e *Engine) Snapshot() Snapshot {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	s := Snapshot{Assignments: map[string]string{}}
+	for _, p := range e.plans {
+		s.Packages = append(s.Packages, p)
+	}
+	for acc, a := range e.accounts {
+		s.Assignments[acc] = a.pkg.ID
+	}
+	return s
+}
+
+// Restore rebuilds definitions and bindings from a snapshot. Usage
+// counters start fresh — correct: usage is runtime state.
+func (e *Engine) Restore(s Snapshot) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, p := range s.Packages {
+		if p.Discount <= 0 {
+			p.Discount = 1
+		}
+		e.plans[p.ID] = p
+	}
+	for acc, id := range s.Assignments {
+		if p, ok := e.plans[id]; ok {
+			e.accounts[acc] = assigned{pkg: p, cycleKey: e.cycleKeyOf(p.Cycle)}
+		}
+	}
 }
 
 // RateResult is the outcome of one call's package application.

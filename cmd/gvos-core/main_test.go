@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
