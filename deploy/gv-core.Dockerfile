@@ -1,7 +1,7 @@
 # Multi-stage build for gv-core. Dependencies are vendored so the
 # image builds fully offline (no module proxy inside docker).
 
-FROM golang:1.21-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY vendor/ vendor/
