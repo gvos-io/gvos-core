@@ -183,13 +183,16 @@ func (p *PG) InsertCDR(ctx context.Context, c *callcore.CDR) (bool, error) {
 	tag, err := p.pool.Exec(ctx, `
         INSERT INTO cdr (call_id, tenant_id, account_id, dest, dest_prefix,
                          start_time, end_time, duration, billed_secs,
-                         price, cost, release, pdd_ms, sip_code, recorded)
+                         price, cost, release, pdd_ms, sip_code, recorded,
+                         mos, jitter_ms, packet_loss)
         VALUES ($1, '00000000-0000-0000-0000-000000000001', $2::uuid, $3, $4,
                 $5::timestamptz, $5::timestamptz + ($6::int * interval '1 second'),
-                $6::int, $7::int, $8::numeric, $9::numeric, $10, $11::int, $12::int, $13::bool)
+                $6::int, $7::int, $8::numeric, $9::numeric, $10, $11::int, $12::int, $13::bool,
+                $14::real, $15::real, $16::real)
         ON CONFLICT DO NOTHING`,
 		c.CallID, c.AccountID, c.Dest, c.RatePrefix,
-		c.StartTime, c.Duration, c.BilledSecs, c.Price, c.Cost, c.Release, c.PDDMs, c.SIPCode, c.Recorded)
+		c.StartTime, c.Duration, c.BilledSecs, c.Price, c.Cost, c.Release, c.PDDMs, c.SIPCode, c.Recorded,
+		c.Mos, c.JitterMs, c.PacketLoss)
 	if err != nil {
 		return false, fmt.Errorf("insert cdr: %w", err)
 	}

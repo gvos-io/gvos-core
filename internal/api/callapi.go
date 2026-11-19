@@ -112,6 +112,7 @@ type callEndReq struct {
 	PDDMs   int    `json:"pdd_ms"`   // post-dial delay measured by Kamailio
 	SIPCode int    `json:"sip_code"`
 	Release string `json:"release"` // normal | balance-exhausted | ...
+	QoS     string `json:"qos"`     // rtpengine $rtpstat text (U6)
 }
 
 // callEnd finalizes billing and returns the CDR. ctx drives the
@@ -161,6 +162,9 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 	}
 	if req.Release != "" {
 		cdr.Release = req.Release
+	}
+	if req.QoS != "" {
+		cdr.Mos, cdr.JitterMs, cdr.PacketLoss = callcore.ParseRTPStat(req.QoS)
 	}
 	s.cdrs = append(s.cdrs, cdr)
 	// Event bus: the fully-stamped CDR fans out in both modes (the

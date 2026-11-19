@@ -6,6 +6,8 @@ package callcore
 
 import (
 	"context"
+	"strings"
+	"strconv"
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"sync"
@@ -543,6 +545,44 @@ type CDR struct {
 	SIPCode    int     // final SIP response on the release path
 	Recorded   bool    // rtpengine recording was engaged (file named by call-id)
 	FreeSecs   int     // package allowance seconds applied at settlement
+	// QoS from rtpengine's $rtpstat (U6: parsed at the CDRR consumer,
+	// columns already exist in the cdr table).
+	Mos        float64
+	JitterMs   float64
+	PacketLoss float64
+}
+
+// ParseRTPStat extracts MOS/jitter/packet-loss from rtpengine's
+// $rtpstat text (comma/space-separated key=value pairs, e.g.
+// "packet loss=1.2%, jitter=3 ms, round trip time=15 ms, MOS=4.2").
+// Unknown/absent keys parse to 0.
+func ParseRTPStat(text string) (mos, jitterMs, packetLoss float64) {
+	for _, kv := range strings.FieldsFunc(text, func(r rune) bool { return r == ',' || r == ';' || r == '|' }) {
+		kv = strings.TrimSpace(kv)
+		eq := strings.Index(kv, "=")
+		if eq < 0 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(kv[:eq]))
+		val := strings.TrimSpace(kv[eq+1:])
+		numEnd := 0
+		for numEnd < len(val) && (val[numEnd] >= '0' && val[numEnd] <= '9' || val[numEnd] == '.') {
+			numEnd++
+		}
+		f, err := strconv.ParseFloat(val[:numEnd], 64)
+		if err != nil {
+			continue
+		}
+		switch {
+		case strings.Contains(key, "mos"):
+			mos = f
+		case strings.Contains(key, "jitter"):
+			jitterMs = f
+		case strings.Contains(key, "loss"):
+			packetLoss = f
+		}
+	}
+	return
 }
 
 // Live returns the count of live calls (monitoring hook).
