@@ -233,14 +233,14 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 	if m.adm != nil {
 		chain, _ := m.store.Chain(accountID)
 		caps := map[string]int{}
+		ids := []string{accountID} // own key first; chain adds ancestors
 		for _, a := range append(chain, acc) {
 			if a.Concurrent > 0 {
 				caps[a.ID] = a.Concurrent
 			}
-		}
-		ids := []string{accountID}
-		for _, a := range chain {
-			ids = append(ids, a.ID)
+			if a.ID != accountID {
+				ids = append(ids, a.ID) // dedup: Chain includes the account itself
+			}
 		}
 		if err := m.adm.AdmitConcurrent(context.Background(), ids, accountID, caps); err != nil {
 			m.mu.Unlock()
@@ -411,8 +411,11 @@ func (m *Manager) Interim(callID string) (bool, error) {
 		return true, err
 	}
 
-	// Cost so far vs already deducted: reconcile the difference.
+	// Cost so far vs already deducted: reconcile the difference. The
+	// accrued fold-in happens under the lock (End races this loop).
+	m.mu.Lock()
 	delta := cost.Sub(c.Accrued)
+	m.mu.Unlock()
 	if delta > 0 {
 		if err := m.reserve(context.Background(), c.AccountID, delta); err != nil {
 			// Cannot afford the next interval: forced teardown.
@@ -425,24 +428,35 @@ func (m *Manager) Interim(callID string) (bool, error) {
 		// Reserve succeeded: fold the delta into accrued (release trick:
 		// commit the reservation immediately at actual cost delta).
 		_ = m.commit(c.AccountID, delta, delta)
+		m.mu.Lock()
 		c.Accrued = c.Accrued.Add(delta)
+		m.mu.Unlock()
 	} else if delta < 0 {
 		_ = m.commit(c.AccountID, -delta, 0) // refund excess
+		m.mu.Lock()
 		c.Accrued = c.Accrued.Add(delta)
+		m.mu.Unlock()
 	}
 
-	// Pre-check: can the account still afford one more tick?
+	// Pre-check: can the account still afford one more tick? The
+	// accrued read and the balance check both go under the lock (End
+	// races this loop on Accrued).
+	m.mu.Lock()
 	nextSecs := elapsed + int(m.interval.Seconds())
 	_, nextCost, err := m.charger.ChargeFor(entry, nextSecs)
-	if err == nil {
-		bal, _ := account.Balance(m.store, c.AccountID)
-		if bal < nextCost.Sub(c.Accrued) {
-			m.markRelease(callID, "balance-exhausted")
-			if m.teardown != nil {
-				m.teardown(callID, "balance-exhausted")
-			}
-			return false, nil
+	if err != nil {
+		m.mu.Unlock()
+		return true, nil
+	}
+	bal, _ := account.Balance(m.store, c.AccountID)
+	exhausted := bal < nextCost.Sub(c.Accrued)
+	m.mu.Unlock()
+	if exhausted {
+		m.markRelease(callID, "balance-exhausted")
+		if m.teardown != nil {
+			m.teardown(callID, "balance-exhausted")
 		}
+		return false, nil
 	}
 	return true, nil
 }

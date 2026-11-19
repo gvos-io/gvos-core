@@ -464,7 +464,12 @@ func httpErrorC(w http.ResponseWriter, status int, code, msg string) {
 
 func MuxFor(s *Server) http.Handler {
 	mux := http.NewServeMux()
+	// Per-request logging: on only when GVOS_LOG_HTTP=1 (300 CPS x 2
+	// requests is 600 log lines/s otherwise — a hot-path IO stall).
 	logWrap := func(next http.Handler) http.Handler {
+		if os.Getenv("GVOS_LOG_HTTP") != "1" {
+			return next
+		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			log.Printf("HTTP-IN %s %s len=%d", r.Method, r.URL.RequestURI(), r.ContentLength)
 			next.ServeHTTP(w, r)

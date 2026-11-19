@@ -30,30 +30,50 @@ type callStartReq struct {
 // risk, rate, and reserve. Status: 200 locked, 403 blocked/broke,
 // 404 unratable/unknown, 429 limits (Retry-After on the HTTP face).
 func (s *Server) callStart(req callStartReq) (int, any) {
-	// Number screening happens before rating: a blacklisted (or
-	// non-whitelisted) destination never reaches billing.
-	if ok, why := s.blocklist.CheckScreen(req.To, "dest"); !ok {
-		return 403, map[string]string{"error": "destination blocked: " + why}
-	}
 	// Caller resolution first: the risk engine and billing both need
 	// the final account ID.
 	accID := req.From
 	if accID == "" {
 		accID = "1000" // spike default caller
 	}
-	// Spike compatibility: unknown callers resolve by SIP username
-	// (Kamailio sends $fU which is the auth username), then fall back
-	// to the demo account. Production rejects with 401/404 after auth.
+	// Unknown callers resolve by SIP username (Kamailio sends $fU,
+	// the auth username). The "fall back to the demo account" spike
+	// shortcut is memory-mode only: in PG mode an unknown caller is a
+	// hard 404 — billing must never silently land on another
+	// account's balance.
 	if _, err := s.store.Get(accID); err != nil {
 		if id, ok := s.userIndex[accID]; ok {
 			accID = id
-		} else if _, err2 := s.store.Get("1000"); err2 == nil {
-			accID = "1000"
+		} else if s.pg == nil {
+			if _, err2 := s.store.Get("1000"); err2 == nil {
+				accID = "1000"
+			}
 		}
 	}
-	// Fraud engine: frequency/cost/prefix rules, block or alert.
+	// AXB privacy resolution: dialing a virtual X number rewrites the
+	// destination to the bound B number (billing + routing follow B;
+	// the edge rewrites the R-URI from the rewrite_dest instruction).
+	actualDest := req.To
+	if s.axb != nil {
+		if bd, ok := s.axb.Resolve(req.To); ok {
+			actualDest = bd.BNumber
+		}
+	}
+	// Number screening AFTER the AXB resolve: the blacklist semantics
+	// is "this destination is forbidden" — screening only the dialed
+	// X would let a banned B number be reached through any binding.
+	// Both the dialed number and the real destination are screened.
+	for _, screened := range []string{req.To, actualDest} {
+		if ok, why := s.blocklist.CheckScreen(screened, "dest"); !ok {
+			return 403, map[string]string{"error": "destination blocked: " + why}
+		}
+	}
+
+	// Fraud engine: frequency/cost/prefix rules, block or alert —
+	// evaluated against the REAL destination (post-AXB resolve; a
+	// dest_prefix rule for B must fire even when the caller dialed X).
 	// Estimated cost for the cost-cap check uses the 60s lock basis.
-	if h := s.risk.CheckCall(accID, req.To, money.MustFromYuan(0.05)); h.Blocked {
+	if h := s.risk.CheckCall(accID, actualDest, money.MustFromYuan(0.05)); h.Blocked {
 		return 403, map[string]string{"error": "risk-blocked [" + h.RuleID + "]: " + h.Reason}
 	} else if h.Alerted {
 		log.Printf("RISK-ALERT account=%s rule=%s: %s", accID, h.RuleID, h.Reason)
@@ -64,18 +84,8 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 			username = a.Username
 		}
 		s.emit(events.SubjectRiskAlert, map[string]string{
-			"account": accID, "username": username, "rule_id": h.RuleID, "reason": h.Reason, "to": req.To,
+			"account": accID, "username": username, "rule_id": h.RuleID, "reason": h.Reason, "to": actualDest,
 		})
-	}
-
-	// AXB privacy resolution: dialing a virtual X number rewrites the
-	// destination to the bound B number (billing + routing follow B;
-	// the edge rewrites the R-URI from the rewrite_dest instruction).
-	actualDest := req.To
-	if s.axb != nil {
-		if bd, ok := s.axb.Resolve(req.To); ok {
-			actualDest = bd.BNumber
-		}
 	}
 
 	now := time.Now()
@@ -193,10 +203,15 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 		if _, err := s.pg.InsertCDR(ctx, cdr); err != nil {
 			log.Printf("CDR persist failed (call %s): %v", cdr.CallID, err)
 		}
-		if bal, err := account.Balance(s.store, cdr.AccountID); err == nil {
-			if err := s.pg.AppendLedger(ctx, cdr.AccountID, -cdr.Cost, bal, "call-settle", cdr.CallID); err != nil {
-				log.Printf("ledger persist failed (call %s): %v", cdr.CallID, err)
-			}
+		// Ledger snapshot reads the authority (Redis when wired).
+		var bal money.Amount
+		if s.bal != nil {
+			bal, _ = s.bal.Get(context.Background(), cdr.AccountID)
+		} else if b, err := account.Balance(s.store, cdr.AccountID); err == nil {
+			bal = b
+		}
+		if err := s.pg.AppendLedger(ctx, cdr.AccountID, -cdr.Cost, bal, "call-settle", cdr.CallID); err != nil {
+			log.Printf("ledger persist failed (call %s): %v", cdr.CallID, err)
 		}
 	}
 	return 200, cdr

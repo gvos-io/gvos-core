@@ -105,9 +105,10 @@ func dispatchTeardown(callID, reason string) {
 		log.Printf("TEARDOWN dispatch call=%s reason=%s (no GVOS_KAMAILIO_RPC: bus path only)", callID, reason)
 		return
 	}
+	// dlg.terminate_dlg takes positional params (Kamailio jsonrpcs).
 	body, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "method": "dlg.terminate_dlg",
-		"params": map[string]any{"callid": callID}, "id": 1,
+		"params": []any{callID}, "id": 1,
 	})
 	client := &http.Client{Timeout: 2 * time.Second}
 	req, err := http.NewRequest(http.MethodPost, teardownTarget, bytes.NewReader(body))
@@ -161,10 +162,16 @@ func (s *Server) cdrPersistHandler(data []byte) error {
 	if !inserted {
 		return nil // duplicate delivery: row and ledger already stored
 	}
-	if bal, err := account.Balance(s.store, cdr.AccountID); err == nil {
-		if err := s.pg.AppendLedger(ctx, cdr.AccountID, -cdr.Cost, bal, "call-settle", cdr.CallID); err != nil {
-			return err
-		}
+	// Ledger balance snapshot reads the AUTHORITY (Redis when wired;
+	// the memory map lags under a multi-replica topology).
+	var bal money.Amount
+	if s.bal != nil {
+		bal, _ = s.bal.Get(ctx, cdr.AccountID)
+	} else if b, err := account.Balance(s.store, cdr.AccountID); err == nil {
+		bal = b
+	}
+	if err := s.pg.AppendLedger(ctx, cdr.AccountID, -cdr.Cost, bal, "call-settle", cdr.CallID); err != nil {
+		return err
 	}
 	return nil
 }
