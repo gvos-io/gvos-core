@@ -50,6 +50,7 @@ type Server struct {
 	acl           *acl.Store           // API-key registry (Phase B; nil = keys off, legacy fallback)
 	idem          *idemStore           // Idempotency-Key registry for money routes
 	rds           *rds.Client          // Redis runtime-state authority (nil = off, memory authoritative)
+	redisLocks    bool                 // single-runner locks active (rollup/rebroadcast dedup)
 	bal           *account.BalanceR   // redis balance face (nil = in-memory authority)
 	events        *events.Publisher    // NATS event bus (nil = publishing off)
 	webhookURL    string               // webhook dispatcher target ("" = off)
@@ -455,8 +456,9 @@ func MuxFor(s *Server) *http.ServeMux {
 	// Test hook; x-internal, stays out of the public OpenAPI.
 	mux.HandleFunc("POST /v1/admin/stream-push", s.handleStreamPush)
 
-	// Internal control plane (SIP edge pollers).
+	// Internal control plane (SIP edge pollers + ADR-0002 fallback).
 	mux.HandleFunc("GET /v1/internal/ipallow-snapshot", s.handleIPAllowSnapshot)
+	mux.HandleFunc("GET /v1/internal/reg-lookup", s.handleRegLookup)
 
 	// Media stream (WebSocket).
 	mux.HandleFunc("/v1/stream/", s.handleMediaStream)
@@ -657,4 +659,9 @@ func AttachRedis(s *Server, c *rds.Client) {
 	// Phase 4: shared package-usage counters (free allowance + cycle
 	// spend) — fail-open.
 	s.pkg.SetPkgRedis(pkgplan.NewPkgR(c))
+	// Phase 5: persistent registration mirror + the single-runner locks
+	// on the periodic tasks (rollup, config rebroadcast) so N replicas
+	// run each exactly once.
+	s.regs.SetRegRedis(regtable.NewRegR(c))
+	s.redisLocks = true
 }

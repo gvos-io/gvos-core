@@ -21,6 +21,7 @@ import (
 
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+	"github.com/lixuanqun/gvos-core/internal/shared/rds"
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/pkgplan"
 	"github.com/lixuanqun/gvos-core/internal/callcore"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
@@ -360,6 +361,16 @@ func StartCfgRebroadcaster(s *Server) {
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for range t.C {
+			if s.redisLocks {
+				// Single-runner: one replica replays the snapshots
+				// (idempotent either way; this dedups the bus noise).
+				ctx, cancel := context.WithTimeout(context.Background(), rds.CallTimeout)
+				ok, err := s.rds.Acquire(ctx, "lock:rebroadcast", 55*time.Second)
+				cancel()
+				if err != nil || !ok {
+					continue
+				}
+			}
 			s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": s.gws.Gateways()})
 			// ip_allowlist: pre-joined CIDR lists (ipAllowPayload) —
 			// the edge cannot rebuild them from the rules array.
@@ -674,4 +685,32 @@ func (s *Server) handleIPAllowSnapshot(w http.ResponseWriter, r *http.Request) {
 		"allow_cidrs": allows,
 		"deny_cidrs":  denies,
 	})
+}
+
+// handleRegLookup serves GET /v1/internal/reg-lookup?user= — the
+// ADR-0002 fallback: after a signaling node loses its local usrloc
+// (restart/drift), it asks here before 404-ing the caller. Local
+// mirror first, the Redis persistence bridges a restarted control
+// plane. Guarded like the snapshot endpoint (internal token).
+func (s *Server) handleRegLookup(w http.ResponseWriter, r *http.Request) {
+	want := os.Getenv("GVOS_INTERNAL_TOKEN")
+	if want == "" {
+		httpError(w, 503, "internal endpoints disabled (GVOS_INTERNAL_TOKEN unset)")
+		return
+	}
+	if r.Header.Get("X-GVOS-Internal") != want {
+		httpError(w, 401, "bad internal token")
+		return
+	}
+	user := r.URL.Query().Get("user")
+	if user == "" {
+		httpError(w, 400, "user required")
+		return
+	}
+	e, ok := s.regs.LookupUser(r.Context(), user)
+	if !ok {
+		httpError(w, 404, "no registration for "+user)
+		return
+	}
+	writeJSON(w, 200, e)
 }

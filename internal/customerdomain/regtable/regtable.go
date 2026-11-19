@@ -10,6 +10,7 @@
 package regtable
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -29,10 +30,15 @@ type Entry struct {
 type Table struct {
 	mu   sync.RWMutex
 	byUser map[string]*Entry
+	rr   *RegR // redis mirror (nil = memory only)
 }
 
 // New returns an empty table.
 func New() *Table { return &Table{byUser: map[string]*Entry{}} }
+
+// SetRegRedis wires the persistent mirror (Phase 5): restarts keep
+// the table, and the fallback lookup (ADR-0002) reads it.
+func (t *Table) SetRegRedis(r *RegR) { t.rr = r }
 
 // Apply folds one registration event. op is "reg" (a successful
 // REGISTER) or "expire" (usrloc expiry hook); unknown ops count as
@@ -58,6 +64,25 @@ func (t *Table) Apply(user, op string, expires int64, srcIP string, at time.Time
 	} else {
 		e.Online = false
 	}
+	if t.rr != nil {
+		t.rr.Apply(context.Background(), user, op, expires, srcIP, at.Unix())
+	}
+}
+
+// LookupUser is the ADR-0002 fallback face: local mirror first, the
+// redis persistence second (a restarted replica's local map is empty
+// until events flow again — the redis hash bridges that window).
+func (t *Table) LookupUser(ctx context.Context, user string) (Entry, bool) {
+	t.mu.RLock()
+	e, ok := t.byUser[user]
+	t.mu.RUnlock()
+	if ok {
+		return *e, true
+	}
+	if t.rr != nil {
+		return t.rr.Lookup(ctx, user)
+	}
+	return Entry{}, false
 }
 
 // Entries returns a snapshot sorted is NOT guaranteed (callers sort

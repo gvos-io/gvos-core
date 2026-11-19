@@ -17,6 +17,13 @@ func (s *Server) startReportWorker() {
 	run := func() {
 		ctx, cancel := contextWithTimeoutDuration(context.Background(), 30*time.Second)
 		defer cancel()
+		if s.redisLocks {
+			// Single-runner lock: exactly one replica rolls up per round
+			// (others skip; the lock TTL survives a crashed holder).
+			if ok, err := s.rds.Acquire(ctx, "lock:rollup", 55*time.Minute); err != nil || !ok {
+				return
+			}
+		}
 		s.snapshotRedisBalances(ctx)
 		for _, day := range []string{todayStr(-1), todayStr(0)} {
 			if n, err := s.pg.RollupDaily(ctx, day); err != nil {
