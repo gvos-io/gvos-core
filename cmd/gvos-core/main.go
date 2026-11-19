@@ -53,6 +53,9 @@ func main() {
 	} else {
 		s = api.NewServer()
 	}
+	// First admin API key (Phase B): derived from GVOS_ADMIN_TOKEN or
+	// generated + printed once. Runs before the HTTP server starts.
+	api.BootstrapKey(s)
 	// Event bus is auxiliary, not authority: a missing/unreachable
 	// broker must not take the control plane down (it reconnects on
 	// its own; publishes just log until the broker appears).

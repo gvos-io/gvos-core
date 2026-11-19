@@ -3,28 +3,91 @@ package api
 
 import (
 	"context"
+	"log"
+	"strings"
 	"crypto/md5"
 	"encoding/hex"
 	"math/rand"
 	"net/http"
 	"time"
 
+	"github.com/lixuanqun/gvos-core/internal/shared/acl"
 	"github.com/lixuanqun/gvos-core/internal/shared/events"
 )
 
+// identity is the authenticated caller bound into the request
+// context (Phase B: the API-key face). TenantID is the audit
+// dimension; Prefix is the display handle recorded in audit rows.
+type identity struct {
+	TenantID string
+	Role     acl.Role
+	Prefix   string
+}
+
+type ctxKey int
+
+const identityKey ctxKey = 1
+
+// whoAmI returns the request identity, or the legacy fallback.
+func whoAmI(r *http.Request) identity {
+	if id, ok := r.Context().Value(identityKey).(identity); ok {
+		return id
+	}
+	return identity{TenantID: demoTenant, Role: acl.RoleAdmin, Prefix: "legacy"}
+}
+
+// requireAdmin enforces the admin-plane credential: an API key
+// (Bearer gvos_...) resolved through the acl registry, falling back
+// to the Phase A constant token only in the no-key demo mode (a
+// warning logs once). Fail-closed: no registry and no fallback
+// configured means 401, never open.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
-	if r.Header.Get("Authorization") != "Bearer "+adminToken {
-		httpError(w, 401, "admin token required")
+	h := r.Header.Get("Authorization")
+	const bearer = "Bearer "
+	if !strings.HasPrefix(h, bearer) {
+		httpErrorC(w, 401, "UNAUTHORIZED", "admin token required")
 		return false
 	}
-	return true
+	presented := strings.TrimPrefix(h, bearer)
+	if strings.HasPrefix(presented, "gvos_") {
+		if s.acl != nil {
+			if k, ok := s.acl.Lookup(presented); ok {
+				if k.Role != acl.RoleAdmin && k.Role != acl.RoleOperator {
+					httpErrorC(w, 403, "FORBIDDEN", "key role "+string(k.Role)+" cannot use the admin plane")
+					return false
+				}
+				ctx := context.WithValue(r.Context(), identityKey, identity{
+					TenantID: k.TenantID, Role: k.Role, Prefix: k.Prefix,
+				})
+				*r = *r.Clone(ctx)
+				return true
+			}
+		}
+		httpErrorC(w, 401, "UNAUTHORIZED", "unknown or revoked API key")
+		return false
+	}
+	// Legacy fallback: constant token only while no key is registered.
+	if s.acl == nil || s.acl.Count() == 0 {
+		if presented == adminToken {
+			log.Printf("WARN admin auth via legacy constant token (no API keys registered; Phase B deprecation)")
+			ctx := context.WithValue(r.Context(), identityKey, identity{
+				TenantID: demoTenant, Role: acl.RoleAdmin, Prefix: "legacy",
+			})
+			*r = *r.Clone(ctx)
+			return true
+		}
+	}
+	httpErrorC(w, 401, "UNAUTHORIZED", "admin token required")
+	return false
 }
 
 // POST /v1/admin/accounts {"name","username","parent_id","rate_group","postpaid","credit"}
 
 func (s *Server) audit(r *http.Request, action, entity, entityID string, before, after any) {
+	id := whoAmI(r)
 	s.emit(events.SubjectAdminChanged, map[string]any{
 		"action": action, "entity": entity, "entity_id": entityID,
+		"operator": id.Prefix, "tenant_id": id.TenantID,
 		"before": before, "after": after,
 	})
 	if s.asyncAudit || s.pg == nil {
@@ -32,7 +95,7 @@ func (s *Server) audit(r *http.Request, action, entity, entityID string, before,
 	}
 	ctx, cancel := contextWithTimeout(r.Context())
 	defer cancel()
-	if err := s.pg.AppendAudit(ctx, demoTenant, "admin", action, entity, entityID, before, after); err != nil {
+	if err := s.pg.AppendAudit(ctx, whoAmI(r).TenantID, whoAmI(r).Prefix, action, entity, entityID, before, after); err != nil {
 		// Audit failure must never block the business answer, but it
 		// must be loud: append-only audit is a compliance feature.
 		logPrintf("AUDIT persist failed (%s %s %s): %v", action, entity, entityID, err)

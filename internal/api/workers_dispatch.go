@@ -175,6 +175,8 @@ func (s *Server) auditWriterHandler(data []byte) error {
 		Action   string          `json:"action"`
 		Entity   string          `json:"entity"`
 		EntityID string          `json:"entity_id"`
+		Operator string          `json:"operator"`
+		TenantID string          `json:"tenant_id"`
 		Before   json.RawMessage `json:"before"`
 		After    json.RawMessage `json:"after"`
 	}
@@ -193,7 +195,14 @@ func (s *Server) auditWriterHandler(data []byte) error {
 	if len(p.After) == 0 || string(p.After) == "null" {
 		after = nil
 	}
-	return s.pg.AppendAudit(ctx, demoTenant, "admin", p.Action, p.Entity, p.EntityID, before, after)
+	tenant, operator := p.TenantID, p.Operator
+	if tenant == "" {
+		tenant = demoTenant
+	}
+	if operator == "" {
+		operator = "admin" // legacy events without the operator field
+	}
+	return s.pg.AppendAudit(ctx, tenant, operator, p.Action, p.Entity, p.EntityID, before, after)
 }
 
 // startWebhookDispatcher consumes gvos.cdr.completed from the shared

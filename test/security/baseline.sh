@@ -5,10 +5,13 @@
 # third-party pentest remains the final step before charging money.
 #
 # Usage: bash test/security/baseline.sh [base_url] [token]
+# Phase B: the token must be a real API key (bootstrap-derived from
+# GVOS_ADMIN_TOKEN at startup, or created via POST /v1/admin/keys).
+# The legacy constant dev-admin-token only works while no key exists.
 set -uo pipefail
 
 BASE="${1:-http://127.0.0.1:8080}"
-TOKEN="${2:-dev-admin-token}"
+TOKEN="${2:-${GVOS_ADMIN_TOKEN:-dev-admin-token}}"
 FAILS=0
 PASSES=0
 

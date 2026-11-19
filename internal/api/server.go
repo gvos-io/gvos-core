@@ -23,6 +23,7 @@ import (
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/ipallow"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/regtable"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/riskctrl"
+	"github.com/lixuanqun/gvos-core/internal/shared/acl"
 	"github.com/lixuanqun/gvos-core/internal/mediamain/mediastream"
 	"github.com/lixuanqun/gvos-core/internal/shared/events"
 	"github.com/lixuanqun/gvos-core/internal/shared/store"
@@ -44,6 +45,8 @@ type Server struct {
 	pkg           *pkgplan.Engine      // subscription packages (allowance/discount/min-spend)
 	gws           *gateway.List        // outbound gateway directory (API-authoritative)
 	regs          *regtable.Table      // SIP registration mirror (fed by gvos.reg.event)
+	acl           *acl.Store           // API-key registry (Phase B; nil = keys off, legacy fallback)
+	idem          *idemStore           // Idempotency-Key registry for money routes
 	events        *events.Publisher    // NATS event bus (nil = publishing off)
 	webhookURL    string               // webhook dispatcher target ("" = off)
 	asyncCdr      bool                 // CDRW worker owns CDR persistence
@@ -93,7 +96,7 @@ func (s *Server) rebuildRates() {
 
 // NewServer builds the in-memory demo server (dev/test mode).
 func NewServer() *Server {
-	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), regs: regtable.New(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now()}
 	s.userIndex = map[string]string{}
 
 	// Demo seed: one tenant chain and a small rate table. The tenant
@@ -122,7 +125,7 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), regs: regtable.New(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now()}
 	n, err := pg.LoadAccounts(ctx, s.store)
 	if err != nil {
 		pg.Close()
@@ -410,9 +413,9 @@ func MuxFor(s *Server) *http.ServeMux {
 
 	// Admin plane: resource routes (Go 1.22 method patterns). The
 	// verb-dispatcher routes are gone; 405/404 come from net/http.
-	mux.HandleFunc("POST /v1/admin/accounts", s.handleAccountCreate)
+	mux.HandleFunc("POST /v1/admin/accounts", s.withIdempotency(s.handleAccountCreate))
 	mux.HandleFunc("GET /v1/admin/accounts", s.handleAccountList)
-	mux.HandleFunc("POST /v1/admin/accounts/{id}/topup", s.handleTopUp)
+	mux.HandleFunc("POST /v1/admin/accounts/{id}/topup", s.withIdempotency(s.handleTopUp))
 	mux.HandleFunc("GET /v1/admin/rates", s.handleRateList)
 	mux.HandleFunc("PUT /v1/admin/rates", s.handleRateUpsert)
 	mux.HandleFunc("GET /v1/admin/risk-rules", s.handleRiskRules)
@@ -436,6 +439,11 @@ func MuxFor(s *Server) *http.ServeMux {
 	mux.HandleFunc("POST /v1/admin/reports/rollup", s.handleReports)
 	mux.HandleFunc("GET /v1/admin/reports", s.handleReportList)
 	mux.HandleFunc("GET /v1/admin/reports/views", s.handleReportViews)
+	// API-key administration (Phase B).
+	mux.HandleFunc("POST /v1/admin/keys", s.handleKeyCreate)
+	mux.HandleFunc("GET /v1/admin/keys", s.handleKeyList)
+	mux.HandleFunc("DELETE /v1/admin/keys/{prefix}", s.handleKeyRevoke)
+
 	// Test hook; x-internal, stays out of the public OpenAPI.
 	mux.HandleFunc("POST /v1/admin/stream-push", s.handleStreamPush)
 
