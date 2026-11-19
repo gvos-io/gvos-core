@@ -15,6 +15,7 @@
 package pkgplan
 
 import (
+	"context"
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"sync"
@@ -45,6 +46,7 @@ type Engine struct {
 	mu       sync.Mutex
 	accounts map[string]assigned // accountID -> plan+usage
 	plans    map[string]Package
+	pr       *PkgR              // shared usage face (nil = local counters)
 	now      func() time.Time
 	cur      *time.Time // tests: shared clock handle
 }
@@ -66,6 +68,10 @@ func New() *Engine {
 
 // SetClock overrides the time source (tests).
 func (e *Engine) SetClock(f func() time.Time) { e.now = f }
+
+// SetPkgRedis wires the shared usage face (Phase 4). Local counters
+// stay the fail-open fallback.
+func (e *Engine) SetPkgRedis(p *PkgR) { e.pr = p }
 
 // Define registers/updates a package definition.
 func (e *Engine) Define(p Package) {
@@ -167,7 +173,17 @@ func (e *Engine) Apply(accountID string, billedSecs int, ratedCost money.Amount)
 		a.spend = 0
 	}
 
+	// Free-allowance headroom: the shared counter is authoritative when
+	// wired (Phase 4) — the free minutes then aggregate every
+	// replica's consumption. Fail-open to the local view on error.
 	freeLeft := float64(a.pkg.FreeMinutes)*60 - a.freeUsedSecs
+	if e.pr != nil {
+		if n, err := e.pr.GetUsed(context.Background(), accountID, key); err == nil {
+			freeLeft = float64(a.pkg.FreeMinutes)*60 - n
+		} else {
+			warn("used read", err)
+		}
+	}
 	if freeLeft < 0 {
 		freeLeft = 0
 	}
@@ -178,11 +194,21 @@ func (e *Engine) Apply(accountID string, billedSecs int, ratedCost money.Amount)
 	billable := float64(billedSecs) - free
 
 	a.freeUsedSecs += free
+	if e.pr != nil {
+		if _, err := e.pr.AddUsed(context.Background(), accountID, key, free); err != nil {
+			warn("used add", err)
+		}
+	}
 	// Spend accrues the discounted share of the rated cost. The
 	// ratio stays float (it is a proportion, not money); the product
 	// returns to fixed point via the scaled numerator.
 	share := int64(ratedCost) * int64(billable*1e9/float64(billedSecs)) / 1e9
 	a.spend = a.spend.Add(money.Amount(share))
+	if e.pr != nil {
+		if _, err := e.pr.AddSpend(context.Background(), accountID, key, money.Amount(share)); err != nil {
+			warn("spend add", err)
+		}
+	}
 	e.accounts[accountID] = a
 
 	return RateResult{FreeSecs: free, BillableSecs: billable, Discount: a.pkg.Discount}

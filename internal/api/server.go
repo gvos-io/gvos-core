@@ -654,4 +654,7 @@ func AttachRedis(s *Server, c *rds.Client) {
 	// accumulators) — fail-open, the fraud engine never gates the
 	// platform.
 	s.risk.SetRiskRedis(riskctrl.NewRiskR(c))
+	// Phase 4: shared package-usage counters (free allowance + cycle
+	// spend) — fail-open.
+	s.pkg.SetPkgRedis(pkgplan.NewPkgR(c))
 }
