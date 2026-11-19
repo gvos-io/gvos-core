@@ -4,6 +4,7 @@
 package rate
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"sort"
 )
@@ -19,11 +20,11 @@ type Interval struct {
 // Rate is one tariff entry.
 type Rate struct {
 	Prefix   string
-	Price    float64 // per-minute, 7 decimals, 8th rounded up
-	MinDur   int     // minimal billed seconds
-	InitDur  int     // first-step seconds (60+6: 60)
-	InitRate float64 // first-step price multiple of Price*InitDur/60 when zero
-	StepDur  int     // incremental step seconds (60+6: 6)
+	Price    money.Amount // per-minute (4-decimal fixed point, ADR-0003)
+	MinDur   int          // minimal billed seconds
+	InitDur  int          // first-step seconds (60+6: 60)
+	InitRate money.Amount // first-step price; zero = Price*InitDur/60
+	StepDur  int          // incremental step seconds (60+6: 6)
 	// InEffect overrides for time windows; empty means always.
 	Effective []Interval
 }
@@ -31,9 +32,9 @@ type Rate struct {
 // Entry is a resolved, windowed rate (price may differ per window).
 type Entry struct {
 	Prefix   string
-	Price    float64
+	Price    money.Amount
 	InitDur  int
-	InitRate float64
+	InitRate money.Amount
 	StepDur  int
 	MinDur   int
 }
@@ -107,9 +108,9 @@ func (t *Table) Lookup(number string, day int, minutes int) *Entry {
 func toEntry(v Rate) *Entry {
 	return &Entry{
 		Prefix:   v.Prefix,
-		Price:    roundUp7(v.Price),
+		Price:    v.Price,
 		InitDur:  v.InitDur,
-		InitRate: roundUp7(v.InitRate),
+		InitRate: v.InitRate,
 		StepDur:  v.StepDur,
 		MinDur:   v.MinDur,
 	}
@@ -155,15 +156,3 @@ func toMinutes(hhmm string) int {
 	return h*60 + m
 }
 
-// roundUp7 keeps 7 decimal places, rounding the 8th up (VOS semantics).
-func roundUp7(p float64) float64 {
-	if p <= 0 {
-		return p
-	}
-	scaled := p * 1e7
-	whole := float64(int64(scaled))
-	if scaled-whole > 1e-9 {
-		whole++
-	}
-	return whole / 1e7
-}

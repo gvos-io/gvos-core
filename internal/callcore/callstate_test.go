@@ -1,6 +1,7 @@
 package callcore
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"sync"
 	"testing"
 	"time"
@@ -12,14 +13,14 @@ import (
 func setup(t *testing.T, teardown TeardownFunc) (*Manager, *account.Store) {
 	t.Helper()
 	store := account.NewStore()
-	store.Put(&account.Account{ID: "agent1", Credit: 100, RateGroup: "g"})
-	store.Put(&account.Account{ID: "end1", ParentID: "agent1", Credit: 100, RateGroup: "g"})
+	store.Put(&account.Account{ID: "agent1", Credit: money.MustFromYuan(100), RateGroup: "g"})
+	store.Put(&account.Account{ID: "end1", ParentID: "agent1", Credit: money.MustFromYuan(100), RateGroup: "g"})
 	m := NewManager(store, teardown, time.Second)
 	return m, store
 }
 
 func endToEndEntry() *rate.Entry {
-	return &rate.Entry{Prefix: "86", Price: 0.06, InitDur: 60, StepDur: 6}
+	return &rate.Entry{Prefix: "86", Price: money.MustFromYuan(0.06), InitDur: 60, StepDur: 6}
 }
 
 func TestStartEndFullCycle(t *testing.T) {
@@ -38,16 +39,16 @@ func TestStartEndFullCycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cdr.Cost != 0.066 {
-		t.Errorf("CDR cost = %.7f, want 0.0660000", cdr.Cost)
+	if cdr.Cost != money.MustFromYuan(0.066) {
+		t.Errorf("CDR cost = %s, want 0.0660", cdr.Cost)
 	}
 	if cdr.BilledSecs != 66 {
 		t.Errorf("CDR billedSecs = %d, want 66", cdr.BilledSecs)
 	}
 	// Lock was 60s estimate (0.06), actual 0.066 -> end1 owes 0.066 net:
 	// taken 0.06, charged extra 0.006 at settle.
-	if bal, _ := account.Balance(store, "end1"); !approxEqual(bal, 100-0.066, 1e-7) {
-		t.Errorf("end balance = %.7f, want %.7f", bal, 100-0.066)
+	if bal, _ := account.Balance(store, "end1"); !approxEqual(bal.AsFloat(), 100-0.066, 1e-7) {
+		t.Errorf("end balance = %s, want %.7f", bal, 100-0.066)
 	}
 	if m.Live() != 0 {
 		t.Errorf("live after end = %d, want 0", m.Live())
@@ -93,7 +94,7 @@ func TestTeardownOnExhaustion(t *testing.T) {
 	// minus the 0.06 start lock = 99.94. Drain 99.9 so end1 is left with
 	// 0.04 — less than the 0.06 interim charge itself.
 	cur = base.Add(60 * time.Second)
-	store.Reserve("end1", 99.9)
+	store.Reserve("end1", money.MustFromYuan(99.9))
 
 	alive, err := m.Interim("call-1")
 	if err != nil {
@@ -145,7 +146,7 @@ func TestInterimDriverForcesTeardown(t *testing.T) {
 	// Drain end1 below the interim charge (same setup as the direct
 	// Interim test): 60s elapsed, balance left at 0.04 < one tick.
 	cur = base.Add(60 * time.Second)
-	store.Reserve("end1", 99.9)
+	store.Reserve("end1", money.MustFromYuan(99.9))
 
 	m.driveInterim()
 	mu.Lock()

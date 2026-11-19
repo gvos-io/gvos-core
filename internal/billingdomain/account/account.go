@@ -2,6 +2,7 @@
 package account
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"sync"
 	"time"
@@ -18,8 +19,8 @@ type Account struct {
 	RateGroup  string // which rate.Table applies
 	Currency   string
 	Postpaid   bool    // skip prepaid locks when true
-	Credit     float64 // prepaid balance
-	MaxDebt    float64 // allowed negative balance
+	Credit     money.Amount // prepaid balance (ADR-0003 fixed point)
+	MaxDebt    money.Amount // allowed negative balance
 	Concurrent int     // concurrent-call cap, 0 = unlimited
 	CPS        int     // calls-per-second cap, 0 = unlimited
 }
@@ -99,7 +100,7 @@ func (s *Store) Chain(id string) ([]*Account, error) {
 // invoice cycle instead. It is all-or-nothing: on any failure the whole
 // reservation is rolled back. Returns the reservation token used by
 // Commit/Release.
-func (s *Store) Reserve(id string, est float64) (string, error) {
+func (s *Store) Reserve(id string, est money.Amount) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	chain, err := s.chainLocked(id)
@@ -111,13 +112,13 @@ func (s *Store) Reserve(id string, est float64) (string, error) {
 		if a.Postpaid {
 			continue
 		}
-		if a.Credit-a.MaxDebt < est {
+		if a.Credit.Sub(a.MaxDebt) < est {
 			for _, c := range charged {
-				c.Credit += est
+				c.Credit = c.Credit.Add(est)
 			}
-			return "", fmt.Errorf("account %q insufficient balance %.7f < %.7f", a.ID, a.Credit, est)
+			return "", fmt.Errorf("account %q insufficient balance %s < %s", a.ID, a.Credit, est)
 		}
-		a.Credit -= est
+		a.Credit = a.Credit.Sub(est)
 		charged = append(charged, a)
 	}
 	return id + ":call:" + fmt.Sprintf("%d", now()), nil
@@ -125,22 +126,22 @@ func (s *Store) Reserve(id string, est float64) (string, error) {
 
 // Commit finalizes actual cost: returns deltas are applied so the
 // released remainder returns to balances (est >= actual normally).
-func (s *Store) Commit(token string, id string, est, actual float64) error {
+func (s *Store) Commit(token string, id string, est, actual money.Amount) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	chain, err := s.chainLocked(id)
 	if err != nil {
 		return err
 	}
-	diff := est - actual // positive: refund remainder
+	diff := est.Sub(actual) // positive: refund remainder
 	for _, a := range chain {
-		a.Credit += diff
+		a.Credit = a.Credit.Add(diff)
 	}
 	return nil
 }
 
 // Release cancels a reservation fully (call never connected).
-func (s *Store) Release(token string, id string, est float64) error {
+func (s *Store) Release(token string, id string, est money.Amount) error {
 	return s.Commit(token, id, est, 0)
 }
 
@@ -167,7 +168,7 @@ func (s *Store) chainLocked(id string) ([]*Account, error) {
 // now is stubbed in tests via package var.
 var now = func() int64 { return time.Now().UnixNano() }
 
-func Balance(s *Store, id string) (float64, error) {
+func Balance(s *Store, id string) (money.Amount, error) {
 	a, err := s.Get(id)
 	if err != nil {
 		return 0, err

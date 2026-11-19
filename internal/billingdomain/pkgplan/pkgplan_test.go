@@ -1,6 +1,7 @@
 package pkgplan
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"testing"
 	"time"
 )
@@ -22,12 +23,12 @@ func TestFreeMinutesFirst(t *testing.T) {
 	}
 
 	// First 10 minutes of billed seconds are free.
-	r := e.Apply("u1", 300, 0.3) // 5 min billed
+	r := e.Apply("u1", 300, money.MustFromYuan(0.3)) // 5 min billed
 	if r.FreeSecs != 300 || r.BillableSecs != 0 {
 		t.Fatalf("first call: %+v", r)
 	}
 	// Next call: 6 min billed, 5 free left -> 1 min billable.
-	r = e.Apply("u1", 360, 0.36)
+	r = e.Apply("u1", 360, money.MustFromYuan(0.36))
 	if r.FreeSecs != 300 || r.BillableSecs != 60 {
 		t.Fatalf("second call: %+v", r)
 	}
@@ -38,14 +39,14 @@ func TestDailyCycleResets(t *testing.T) {
 	e.Define(Package{ID: "day", Cycle: Daily, FreeMinutes: 5})
 	e.Assign("u1", "day")
 
-	e.Apply("u1", 300, 0.25) // uses all 5 free minutes
-	r := e.Apply("u1", 60, 0.05)
+	e.Apply("u1", 300, money.MustFromYuan(0.25)) // uses all 5 free minutes
+	r := e.Apply("u1", 60, money.MustFromYuan(0.05))
 	if r.FreeSecs != 0 {
 		t.Fatalf("allowance leaked: %+v", r)
 	}
 	// Next day: allowance back.
 	*e.cur = e.cur.Add(26 * time.Hour)
-	r = e.Apply("u1", 60, 0.05)
+	r = e.Apply("u1", 60, money.MustFromYuan(0.05))
 	if r.FreeSecs != 60 || r.BillableSecs != 0 {
 		t.Fatalf("after rollover: %+v", r)
 	}
@@ -55,17 +56,17 @@ func TestMonthlyCycleResets(t *testing.T) {
 	e := setup(t)
 	e.Define(Package{ID: "m", Cycle: Monthly, FreeMinutes: 5})
 	e.Assign("u1", "m")
-	e.Apply("u1", 300, 0.25)
+	e.Apply("u1", 300, money.MustFromYuan(0.25))
 
 	// Same month: no reset.
 	*e.cur = e.cur.Add(5 * 24 * time.Hour)
-	r := e.Apply("u1", 60, 0.05)
+	r := e.Apply("u1", 60, money.MustFromYuan(0.05))
 	if r.FreeSecs != 0 {
 		t.Fatalf("monthly allowance reset early: %+v", r)
 	}
 	// Next month: reset.
 	*e.cur = e.cur.Add(40 * 24 * time.Hour)
-	r = e.Apply("u1", 60, 0.05)
+	r = e.Apply("u1", 60, money.MustFromYuan(0.05))
 	if r.FreeSecs != 60 {
 		t.Fatalf("monthly rollover missed: %+v", r)
 	}
@@ -75,7 +76,7 @@ func TestDiscount(t *testing.T) {
 	e := setup(t)
 	e.Define(Package{ID: "vip", Discount: 0.8, FreeMinutes: 0})
 	e.Assign("u1", "vip")
-	r := e.Apply("u1", 60, 0.1)
+	r := e.Apply("u1", 60, money.MustFromYuan(0.1))
 	if r.Discount != 0.8 || r.BillableSecs != 60 {
 		t.Fatalf("discount: %+v", r)
 	}
@@ -101,7 +102,7 @@ func TestMinSpendShortfall(t *testing.T) {
 
 func TestNoPackagePassthrough(t *testing.T) {
 	e := setup(t)
-	r := e.Apply("ghost", 60, 0.1)
+	r := e.Apply("ghost", 60, money.MustFromYuan(0.1))
 	if r.FreeSecs != 0 || r.BillableSecs != 60 || r.Discount != 1 {
 		t.Fatalf("passthrough: %+v", r)
 	}

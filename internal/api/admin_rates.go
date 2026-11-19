@@ -2,6 +2,7 @@
 package api
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"encoding/json"
 	"net/http"
 
@@ -24,6 +25,11 @@ func (s *Server) handleRateUpsert(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "prefix and non-negative price required")
 		return
 	}
+	priceAmt, err := money.FromYuan(req.Price)
+	if err != nil {
+		httpErrorC(w, 400, "BAD_AMOUNT", err.Error())
+		return
+	}
 	if req.InitDur == 0 {
 		req.InitDur = 60
 	}
@@ -32,7 +38,7 @@ func (s *Server) handleRateUpsert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.pg != nil {
-		if err := s.pg.UpsertRate(r.Context(), demoRateGroup, req.Prefix, req.Price, req.InitDur, req.StepDur, req.MinDur); err != nil {
+		if err := s.pg.UpsertRate(r.Context(), demoRateGroup, req.Prefix, priceAmt, req.InitDur, req.StepDur, req.MinDur); err != nil {
 			httpError(w, 500, err.Error())
 			return
 		}
@@ -42,7 +48,7 @@ func (s *Server) handleRateUpsert(w http.ResponseWriter, r *http.Request) {
 		for i, rr := range s.rateList {
 			if rr.Prefix == req.Prefix {
 				s.rateList[i] = rate.Rate{
-					Prefix: req.Prefix, Price: req.Price,
+					Prefix: req.Prefix, Price: priceAmt,
 					InitDur: req.InitDur, StepDur: req.StepDur, MinDur: req.MinDur,
 				}
 				replaced = true
@@ -51,7 +57,7 @@ func (s *Server) handleRateUpsert(w http.ResponseWriter, r *http.Request) {
 		}
 		if !replaced {
 			s.rateList = append(s.rateList, rate.Rate{
-				Prefix: req.Prefix, Price: req.Price,
+				Prefix: req.Prefix, Price: priceAmt,
 				InitDur: req.InitDur, StepDur: req.StepDur, MinDur: req.MinDur,
 			})
 		}

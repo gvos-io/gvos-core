@@ -2,6 +2,7 @@
 package api
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"encoding/json"
 	"net/http"
 
@@ -26,13 +27,18 @@ func (s *Server) handlePackages(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "id required")
 		return
 	}
+	minSpendAmt, err := money.FromYuan(req.MinSpend)
+	if err != nil {
+		httpErrorC(w, 400, "BAD_AMOUNT", err.Error())
+		return
+	}
 	c := pkgplan.Daily
 	if req.Cycle == "monthly" {
 		c = pkgplan.Monthly
 	}
 	pkg := pkgplan.Package{
 		ID: req.ID, Name: firstNonEmpty(req.Name, req.ID), Cycle: c,
-		FreeMinutes: req.FreeMinutes, Discount: req.Discount, MinSpend: req.MinSpend,
+		FreeMinutes: req.FreeMinutes, Discount: req.Discount, MinSpend: minSpendAmt,
 	}
 	s.pkg.Define(pkg)
 	s.audit(r, "define", "package", req.ID, nil, req)

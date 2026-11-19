@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"github.com/lixuanqun/gvos-core/internal/shared/events"
 )
 
@@ -103,7 +104,7 @@ func TestEventBusCallAndAdminEvents(t *testing.T) {
 	if !ok {
 		t.Fatalf("no %s published; got %v", events.SubjectCDRCompleted, subjects)
 	}
-	if cdr["CallID"] != "ev-1" || cdr["BilledSecs"] != float64(66) || cdr["Cost"] != 0.055 {
+	if cdr["CallID"] != "ev-1" || cdr["BilledSecs"] != float64(66) || cdr["Cost"] != "0.0550" {
 		t.Errorf("cdr event = %v", cdr)
 	}
 	admin, ok := seen[events.SubjectAdminChanged]
@@ -132,7 +133,7 @@ func TestEventBusTeardown(t *testing.T) {
 
 	// Caller with barely-affordable balance: lock (0.05) succeeds,
 	// interim at 60s (0.05) fails after we drain the account.
-	s.store.Put(&account.Account{ID: "1001", ParentID: "agent1", Credit: 10.06, RateGroup: "demo"})
+	s.store.Put(&account.Account{ID: "1001", ParentID: "agent1", Credit: money.MustFromYuan(10.06), RateGroup: "demo"})
 
 	b, _ := json.Marshal(map[string]string{
 		"call_id": "ev-td", "from_user": "1001", "to_user": "8613800138000",
@@ -146,7 +147,7 @@ func TestEventBusTeardown(t *testing.T) {
 	resp.Body.Close()
 
 	cur = base.Add(60 * time.Second)
-	s.store.Reserve("1001", 10) // leave 0.01 < the 0.05 interim charge
+	s.store.Reserve("1001", money.MustFromYuan(10)) // leave 0.01 < the 0.05 interim charge
 	if alive, err := s.calls.Interim("ev-td"); err != nil || alive {
 		t.Fatalf("interim: alive=%v err=%v (teardown expected)", alive, err)
 	}

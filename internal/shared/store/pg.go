@@ -4,6 +4,7 @@
 package store
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"context"
 	"encoding/json"
 	"errors"
@@ -57,15 +58,23 @@ func (p *PG) LoadAccounts(ctx context.Context, dst *account.Store) (int, error) 
 		var (
 			id, parent, name, username, group string
 			postpaid                          bool
-			credit, maxDebt                   float64
+			credit, maxDebt                   string // NUMERIC scans as string; money.FromDecimal converts
 			maxConc, maxCPS                   int
 		)
 		if err := rows.Scan(&id, &parent, &name, &username, &group, &postpaid, &credit, &maxDebt, &maxConc, &maxCPS); err != nil {
 			return n, fmt.Errorf("scan account: %w", err)
 		}
+		creditAmt, err := money.FromDecimal(credit)
+		if err != nil {
+			return n, fmt.Errorf("account %s credit %q: %w", id, credit, err)
+		}
+		debtAmt, err := money.FromDecimal(maxDebt)
+		if err != nil {
+			return n, fmt.Errorf("account %s max_debt %q: %w", id, maxDebt, err)
+		}
 		if err := dst.Put(&account.Account{
 			ID: id, ParentID: parent, Name: name, Username: username,
-			RateGroup: group, Postpaid: postpaid, Credit: credit, MaxDebt: maxDebt,
+			RateGroup: group, Postpaid: postpaid, Credit: creditAmt, MaxDebt: debtAmt,
 			Concurrent: maxConc, CPS: maxCPS,
 		}); err != nil {
 			return n, err
@@ -96,7 +105,7 @@ func (p *PG) LoadRates(ctx context.Context, group string) (*rate.Table, error) {
 	for rows.Next() {
 		var (
 			prefix           string
-			price, initPrice float64
+			price, initPrice string
 			initDur, stepDur int
 			minDur           int
 			days             []int16
@@ -105,9 +114,17 @@ func (p *PG) LoadRates(ctx context.Context, group string) (*rate.Table, error) {
 		if err := rows.Scan(&prefix, &price, &initDur, &initPrice, &stepDur, &minDur, &days, &winStart, &winEnd); err != nil {
 			return nil, fmt.Errorf("scan rate: %w", err)
 		}
+		priceAmt, err := money.FromDecimal(price)
+		if err != nil {
+			return nil, fmt.Errorf("rate %s price %q: %w", prefix, price, err)
+		}
+		initAmt, err := money.FromDecimal(initPrice)
+		if err != nil {
+			return nil, fmt.Errorf("rate %s init_price %q: %w", prefix, initPrice, err)
+		}
 		r := rate.Rate{
-			Prefix: prefix, Price: price,
-			InitDur: initDur, InitRate: initPrice,
+			Prefix: prefix, Price: priceAmt,
+			InitDur: initDur, InitRate: initAmt,
 			StepDur: stepDur, MinDur: minDur,
 		}
 		if winStart != nil && winEnd != nil && *winStart != "" && *winEnd != "" {
@@ -180,10 +197,10 @@ func (p *PG) InsertCDR(ctx context.Context, c *callcore.CDR) (bool, error) {
 }
 
 // AppendLedger writes a balance movement row (append-only).
-func (p *PG) AppendLedger(ctx context.Context, accountID string, delta, balance float64, reason, callID string) error {
+func (p *PG) AppendLedger(ctx context.Context, accountID string, delta, balance money.Amount, reason, callID string) error {
 	_, err := p.pool.Exec(ctx, `
         INSERT INTO balance_ledger (account_id, delta, balance, reason, call_id)
-        VALUES ($1::uuid, $2, $3, $4, $5)`,
+        VALUES ($1::uuid, $2::numeric, $3::numeric, $4, $5)`,
 		accountID, delta, balance, reason, callID)
 	return err
 }
@@ -208,14 +225,14 @@ func (p *PG) AppendAudit(ctx context.Context, tenantID, operator, action, entity
 
 // CreateAccountWithHA1 inserts an account row with its SIP Digest
 // credential and returns the UUID.
-func (p *PG) CreateAccountWithHA1(ctx context.Context, tenantID, parentID, name, username, ha1, rateGroup string, postpaid bool, credit float64) (string, error) {
+func (p *PG) CreateAccountWithHA1(ctx context.Context, tenantID, parentID, name, username, ha1, rateGroup string, postpaid bool, credit money.Amount) (string, error) {
 	var id string
 	err := p.pool.QueryRow(ctx, `
         INSERT INTO accounts (tenant_id, parent_id, name, username, secret_hash,
                               ha1, rate_group, postpaid, credit)
-        VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9)
+        VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9::numeric)
         RETURNING id::text`,
-		tenantID, nullIfEmpty(parentID), name, username, "x", ha1, rateGroup, postpaid, credit).Scan(&id)
+		tenantID, nullIfEmpty(parentID), name, username, "x", ha1, rateGroup, postpaid, credit.String()).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create account: %w", err)
 	}
@@ -225,37 +242,41 @@ func (p *PG) CreateAccountWithHA1(ctx context.Context, tenantID, parentID, name,
 // TopUp adjusts an account balance (delta signed) and returns the new
 // balance; it also appends the ledger row so topup and adjustment stay
 // in the append-only history.
-func (p *PG) TopUp(ctx context.Context, accountID string, delta float64, reason, operator string) (float64, error) {
+func (p *PG) TopUp(ctx context.Context, accountID string, delta money.Amount, reason, operator string) (money.Amount, error) {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("topup begin: %w", err)
 	}
 	defer tx.Rollback(ctx) // safe no-op after commit
 
-	var balance float64
+	var balance string
 	if err := tx.QueryRow(ctx, `
-        UPDATE accounts SET credit = credit + $1
+        UPDATE accounts SET credit = credit + $1::numeric
         WHERE id = $2::uuid AND deleted_at IS NULL
-        RETURNING credit`, delta, accountID).Scan(&balance); err != nil {
+        RETURNING credit::text`, delta.String(), accountID).Scan(&balance); err != nil {
 		return 0, fmt.Errorf("topup update: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
         INSERT INTO balance_ledger (account_id, delta, balance, reason, operator)
-        VALUES ($1::uuid, $2, $3, $4, $5)`,
-		accountID, delta, balance, reason, operator); err != nil {
+        VALUES ($1::uuid, $2::numeric, $3::numeric, $4, $5)`,
+		accountID, delta.String(), balance, reason, operator); err != nil {
 		return 0, fmt.Errorf("topup ledger: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("topup commit: %w", err)
 	}
-	return balance, nil
+	bal, err := money.FromDecimal(balance)
+	if err != nil {
+		return 0, fmt.Errorf("topup balance %q: %w", balance, err)
+	}
+	return bal, nil
 }
 
 // UpsertRate replaces the current rate for a prefix: superseded rows
 // are marked ended_at (the loader reads only live rows), and a fresh
 // row carries the new price - so a price change is a version, not a
 // mutation (audit trail intact).
-func (p *PG) UpsertRate(ctx context.Context, groupID, prefix string, price float64, initDur, stepDur, minDur int) error {
+func (p *PG) UpsertRate(ctx context.Context, groupID, prefix string, price money.Amount, initDur, stepDur, minDur int) error {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("upsert rate begin: %w", err)
@@ -312,7 +333,7 @@ func nullIfEmpty(s string) any {
 func (p *PG) UpsertNumberList(ctx context.Context, e blocklist.Entry) error {
 	_, err := p.pool.Exec(ctx, `
         INSERT INTO number_lists (tenant_id, kind, scope, pattern, is_regex)
-        VALUES ($1::uuid, $2, $3, $4, $5)`,
+        VALUES ($1::uuid, $2::numeric, $3::numeric, $4, $5)`,
 		nullIfEmpty(e.TenantID), e.Kind, e.Scope, e.Pattern, e.IsRegex)
 	if err != nil {
 		return fmt.Errorf("insert number_lists: %w", err)

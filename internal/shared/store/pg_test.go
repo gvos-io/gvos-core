@@ -10,6 +10,7 @@ package store
 //     go test ./internal/store/ -v
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"context"
 	"os"
 	"testing"
@@ -87,17 +88,17 @@ func TestLoadRatesAndLookup(t *testing.T) {
 
 	// Longest prefix.
 	e := tbl.Lookup("8613800138000", 1, 600)
-	if e == nil || e.Prefix != "8613" || e.Price != 0.05 {
+	if e == nil || e.Prefix != "8613" || e.Price != money.MustFromYuan(0.05) {
 		t.Fatalf("CN mobile lookup = %+v", e)
 	}
 	// Night window on US: Monday 23:00.
 	e = tbl.Lookup("12125550123", 1, 23*60)
-	if e == nil || e.Price != 0.015 {
+	if e == nil || e.Price != money.MustFromYuan(0.015) {
 		t.Fatalf("US night lookup = %+v", e)
 	}
 	// US daytime: base.
 	e = tbl.Lookup("12125550123", 1, 600)
-	if e == nil || e.Price != 0.03 {
+	if e == nil || e.Price != money.MustFromYuan(0.03) {
 		t.Fatalf("US day lookup = %+v", e)
 	}
 }
@@ -123,9 +124,9 @@ func TestInsertCDRAndLedger(t *testing.T) {
 		StartTime:  time.Now(),
 		Duration:   66,
 		BilledSecs: 66,
-		Cost:       0.055,
+		Cost:       money.MustFromYuan(0.055),
 		RatePrefix: "8613",
-		Price:      0.05,
+		Price:      money.MustFromYuan(0.05),
 		Release:    "normal",
 	}
 	inserted, err := pg.InsertCDR(ctx, cdr)
@@ -137,7 +138,7 @@ func TestInsertCDRAndLedger(t *testing.T) {
 	if again, err := pg.InsertCDR(ctx, cdr); err != nil || again {
 		t.Fatalf("redelivery insert: again=%v err=%v (want false, nil)", again, err)
 	}
-	if err := pg.AppendLedger(ctx, cdr.AccountID, -cdr.Cost, 9.945, "call-settle", cdr.CallID); err != nil {
+	if err := pg.AppendLedger(ctx, cdr.AccountID, -cdr.Cost, money.MustFromYuan(9.945), "call-settle", cdr.CallID); err != nil {
 		t.Fatal(err)
 	}
 	if err := pg.AppendAudit(ctx, "00000000-0000-0000-0000-000000000001", "tester",

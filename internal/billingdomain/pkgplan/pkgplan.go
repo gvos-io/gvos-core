@@ -15,6 +15,7 @@
 package pkgplan
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"sync"
 	"time"
@@ -35,7 +36,7 @@ type Package struct {
 	Cycle        Cycle
 	FreeMinutes  int     // included zero-cost minutes per cycle
 	Discount     float64 // 1.0 = list price; 0.8 = 8折
-	MinSpend     float64 // minimum spend per cycle
+	MinSpend     money.Amount // minimum spend per cycle
 	GraceMinutes float64 // minutes allowed beyond balance (debt floor)
 }
 
@@ -51,7 +52,7 @@ type Engine struct {
 type assigned struct {
 	pkg          Package
 	freeUsedSecs float64
-	spend        float64
+	spend        money.Amount
 	cycleKey     string // "2026-10-07" or "2026-10" - reset on change
 }
 
@@ -150,7 +151,7 @@ type RateResult struct {
 // ratedCost (list). It advances the cycle counters and returns the
 // effective billing split. Calls on accounts without a package pass
 // through unchanged.
-func (e *Engine) Apply(accountID string, billedSecs int, ratedCost float64) RateResult {
+func (e *Engine) Apply(accountID string, billedSecs int, ratedCost money.Amount) RateResult {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -177,7 +178,11 @@ func (e *Engine) Apply(accountID string, billedSecs int, ratedCost float64) Rate
 	billable := float64(billedSecs) - free
 
 	a.freeUsedSecs += free
-	a.spend += ratedCost * billable / float64(billedSecs) * a.pkg.Discount
+	// Spend accrues the discounted share of the rated cost. The
+	// ratio stays float (it is a proportion, not money); the product
+	// returns to fixed point via the scaled numerator.
+	share := int64(ratedCost) * int64(billable*1e9/float64(billedSecs)) / 1e9
+	a.spend = a.spend.Add(money.Amount(share))
 	e.accounts[accountID] = a
 
 	return RateResult{FreeSecs: free, BillableSecs: billable, Discount: a.pkg.Discount}
@@ -186,7 +191,7 @@ func (e *Engine) Apply(accountID string, billedSecs int, ratedCost float64) Rate
 // MinSpendShortfall returns how much the account is below its
 // cycle minimum right now (0 when met; positive = top-up amount at
 // cycle close).
-func (e *Engine) MinSpendShortfall(accountID string) float64 {
+func (e *Engine) MinSpendShortfall(accountID string) money.Amount {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	a, ok := e.accounts[accountID]
@@ -197,14 +202,14 @@ func (e *Engine) MinSpendShortfall(accountID string) float64 {
 	if key != a.cycleKey {
 		return a.pkg.MinSpend // fresh cycle, nothing spent yet
 	}
-	if d := a.pkg.MinSpend - a.spend; d > 0 {
-		return roundUp7(d)
+	if d := a.pkg.MinSpend.Sub(a.spend); d > 0 {
+		return d
 	}
 	return 0
 }
 
 // Usage returns the cycle usage snapshot (monitoring).
-func (e *Engine) Usage(accountID string) (freeSecs, spend float64, ok bool) {
+func (e *Engine) Usage(accountID string) (freeSecs float64, spend money.Amount, ok bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	a, ok := e.accounts[accountID]

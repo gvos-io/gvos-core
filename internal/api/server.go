@@ -23,6 +23,7 @@ import (
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/ipallow"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/regtable"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/riskctrl"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"github.com/lixuanqun/gvos-core/internal/shared/acl"
 	"github.com/lixuanqun/gvos-core/internal/mediamain/mediastream"
 	"github.com/lixuanqun/gvos-core/internal/shared/events"
@@ -104,8 +105,8 @@ func NewServer() *Server {
 	// Demo seed: one tenant chain and a small rate table. The tenant
 	// root is postpaid (it invoices); agents and users are prepaid.
 	s.store.Put(&account.Account{ID: "tenant", Name: "Demo Tenant", RateGroup: "demo", Postpaid: true})
-	s.store.Put(&account.Account{ID: "agent1", ParentID: "tenant", Credit: 1000, RateGroup: "demo"})
-	s.store.Put(&account.Account{ID: "1000", ParentID: "agent1", Name: "Demo SIP user", Credit: 10, RateGroup: "demo"})
+	s.store.Put(&account.Account{ID: "agent1", ParentID: "tenant", Credit: money.MustFromYuan(1000), RateGroup: "demo"})
+	s.store.Put(&account.Account{ID: "1000", ParentID: "agent1", Name: "Demo SIP user", Credit: money.MustFromYuan(10), RateGroup: "demo"})
 
 	// Demo gateway set: mirrors migrations/004 seed so the signaling
 	// edge has a routable target out of the box (NATS broadcast from
@@ -239,10 +240,10 @@ func (s *Server) newCallManager() *callcore.Manager {
 
 func demoRates() []rate.Rate {
 	return []rate.Rate{
-		{Prefix: "86", Price: 0.06, InitDur: 60, StepDur: 6},
-		{Prefix: "8613", Price: 0.05, InitDur: 60, StepDur: 6},
-		{Prefix: "1", Price: 0.03, InitDur: 60, StepDur: 6},
-		{Prefix: "91", Price: 0.9, InitDur: 60, StepDur: 6},
+		{Prefix: "86", Price: money.MustFromYuan(0.06), InitDur: 60, StepDur: 6},
+		{Prefix: "8613", Price: money.MustFromYuan(0.05), InitDur: 60, StepDur: 6},
+		{Prefix: "1", Price: money.MustFromYuan(0.03), InitDur: 60, StepDur: 6},
+		{Prefix: "91", Price: money.MustFromYuan(0.9), InitDur: 60, StepDur: 6},
 	}
 }
 

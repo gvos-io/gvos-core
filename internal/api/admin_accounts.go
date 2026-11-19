@@ -2,6 +2,7 @@
 package api
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -37,6 +38,13 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Money edge conversion (ADR-0003): the wire still speaks decimal
+	// yuan; the domain runs fixed-point from here on.
+	creditAmt, err := money.FromYuan(req.Credit)
+	if err != nil {
+		httpErrorC(w, 400, "BAD_AMOUNT", err.Error())
+		return
+	}
 	// SIP credential: random password, HA1 = MD5(user:realm:pass).
 	// Returned once in the response; never retrievable again.
 	sipPass := genSIPPassword(12)
@@ -46,7 +54,7 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 	if s.pg != nil {
 		var err error
 		id, err = s.pg.CreateAccountWithHA1(r.Context(), demoTenant, req.ParentID,
-			req.Name, req.Username, ha1, req.RateGroup, req.Postpaid, req.Credit)
+			req.Name, req.Username, ha1, req.RateGroup, req.Postpaid, creditAmt)
 		if err != nil {
 			httpError(w, 500, err.Error())
 			return
@@ -54,7 +62,7 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.Put(&account.Account{
 		ID: id, ParentID: req.ParentID, Name: req.Name, Username: req.Username,
-		RateGroup: req.RateGroup, Postpaid: req.Postpaid, Credit: req.Credit,
+		RateGroup: req.RateGroup, Postpaid: req.Postpaid, Credit: creditAmt,
 	}); err != nil {
 		httpError(w, 500, err.Error())
 		return
@@ -101,13 +109,17 @@ func (s *Server) handleTopUp(w http.ResponseWriter, r *http.Request) {
 	if req.Reason == "" {
 		req.Reason = "topup"
 	}
+	deltaAmt, err := money.FromYuan(req.Delta)
+	if err != nil {
+		httpErrorC(w, 400, "BAD_AMOUNT", err.Error())
+		return
+	}
 
 	before, _ := account.Balance(s.store, req.AccountID)
 
-	balance := before + req.Delta
+	balance := before.Add(deltaAmt)
 	if s.pg != nil {
-		var err error
-		balance, err = s.pg.TopUp(r.Context(), req.AccountID, req.Delta, req.Reason, "admin")
+		balance, err = s.pg.TopUp(r.Context(), req.AccountID, deltaAmt, req.Reason, whoAmI(r).Prefix)
 		if err != nil {
 			httpError(w, 500, err.Error())
 			return

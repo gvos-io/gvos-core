@@ -1,6 +1,7 @@
 package callcore
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"errors"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func limitSetup(t *testing.T) (*Manager, *account.Store) {
 }
 
 func entry2() *rate.Entry {
-	return &rate.Entry{Prefix: "86", Price: 0.01, InitDur: 60, StepDur: 6}
+	return &rate.Entry{Prefix: "86", Price: money.MustFromYuan(0.01), InitDur: 60, StepDur: 6}
 }
 
 // Concurrent cap on the account itself.

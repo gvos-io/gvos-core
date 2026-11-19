@@ -10,6 +10,7 @@
 package riskctrl
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"strings"
 	"sync"
@@ -41,7 +42,7 @@ type Engine struct {
 	// per-account rolling call timestamps (freq windows)
 	calls map[string][]int64 // account -> unix seconds
 	// per-account daily cost accumulation (day -> account -> cost)
-	dayCost map[int64]map[string]float64
+	dayCost map[int64]map[string]money.Amount
 	// per-user rolling registration timestamps (reg_freq windows),
 	// fed by the gvos.reg.event consumer on the bus
 	regs map[string][]int64 // user -> unix seconds
@@ -52,7 +53,7 @@ type Engine struct {
 func New() *Engine {
 	return &Engine{
 		calls:   map[string][]int64{},
-		dayCost: map[int64]map[string]float64{},
+		dayCost: map[int64]map[string]money.Amount{},
 		regs:    map[string][]int64{},
 		now:     time.Now,
 	}
@@ -90,7 +91,7 @@ type Hit struct {
 // CheckCall runs the rules for a prospective call. It also advances
 // the freq counter and day-cost reservation only when the call is
 // admitted (blocked calls do not count toward frequency).
-func (e *Engine) CheckCall(account, dest string, estCost float64) Hit {
+func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -123,8 +124,8 @@ func (e *Engine) CheckCall(account, dest string, estCost float64) Hit {
 		case "cost_day":
 			day := dayKey(now)
 			spent := e.dayCost[day][account]
-			if spent+estCost > r.CostLimit {
-				hit = decide(hit, r, fmt.Sprintf("daily cost %.7f+%.7f exceeds %.7f", spent, estCost, r.CostLimit))
+			if spent.Add(estCost) > money.MustFromYuan(r.CostLimit) {
+				hit = decide(hit, r, fmt.Sprintf("daily cost %s+%s exceeds %.2f", spent, estCost, r.CostLimit))
 			}
 		case "dest_prefix":
 			// Admission list: the call destination must match one of
@@ -147,7 +148,7 @@ func (e *Engine) CheckCall(account, dest string, estCost float64) Hit {
 		e.calls[account] = append(e.calls[account], now.Unix())
 		day := dayKey(now)
 		if e.dayCost[day] == nil {
-			e.dayCost[day] = map[string]float64{}
+			e.dayCost[day] = map[string]money.Amount{}
 		}
 		e.dayCost[day][account] += estCost
 	}
@@ -156,7 +157,7 @@ func (e *Engine) CheckCall(account, dest string, estCost float64) Hit {
 
 // SettleCost adjusts the daily accumulation when the actual cost
 // differs from the estimate (call end reconciliation).
-func (e *Engine) SettleCost(account string, estCost, actualCost float64) {
+func (e *Engine) SettleCost(account string, estCost, actualCost money.Amount) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	day := dayKey(e.now())

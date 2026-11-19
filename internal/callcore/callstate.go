@@ -5,6 +5,7 @@
 package callcore
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"sync"
 	"time"
@@ -25,8 +26,8 @@ type Call struct {
 	Destination string
 	Rate        *rate.Entry
 	Start       time.Time
-	Lock        float64 // pre-answer reservation
-	Accrued     float64 // deducted so far
+	Lock        money.Amount // pre-answer reservation
+	Accrued     money.Amount // deducted so far
 	Tick        int     // interim deduction rounds completed
 	Recorded    bool    // rtpengine recording engaged for this call
 }
@@ -328,7 +329,7 @@ func (m *Manager) Interim(callID string) (bool, error) {
 	}
 
 	// Cost so far vs already deducted: reconcile the difference.
-	delta := cost - c.Accrued
+	delta := cost.Sub(c.Accrued)
 	if delta > 0 {
 		if _, err := m.store.Reserve(c.AccountID, delta); err != nil {
 			// Cannot afford the next interval: forced teardown.
@@ -341,10 +342,10 @@ func (m *Manager) Interim(callID string) (bool, error) {
 		// Reserve succeeded: fold the delta into accrued (release trick:
 		// commit the reservation immediately at actual cost delta).
 		_ = m.store.Commit("", c.AccountID, delta, delta)
-		c.Accrued += delta
+		c.Accrued = c.Accrued.Add(delta)
 	} else if delta < 0 {
 		_ = m.store.Commit("", c.AccountID, -delta, 0) // refund excess
-		c.Accrued += delta
+		c.Accrued = c.Accrued.Add(delta)
 	}
 
 	// Pre-check: can the account still afford one more tick?
@@ -352,7 +353,7 @@ func (m *Manager) Interim(callID string) (bool, error) {
 	_, nextCost, err := m.charger.ChargeFor(entry, nextSecs)
 	if err == nil {
 		bal, _ := account.Balance(m.store, c.AccountID)
-		if bal < nextCost-c.Accrued {
+		if bal < nextCost.Sub(c.Accrued) {
 			m.markRelease(callID, "balance-exhausted")
 			if m.teardown != nil {
 				m.teardown(callID, "balance-exhausted")
@@ -395,7 +396,7 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 		billedSecs, cost, release = seconds, 0, "unratable"
 		err = nil
 	}
-	price := 0.0
+	var price money.Amount
 	if entry != nil {
 		price = entry.Price
 	}
@@ -408,15 +409,15 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 	// interim accruals): top up when the call cost more, refund when it
 	// cost less. Delta is signed; Commit applies +delta as a refund and
 	// a negative est means extra charge via Reserve.
-	taken := lock + accrued
+	taken := lock.Add(accrued)
 	if taken > cost {
-		_ = m.store.Commit("", c.AccountID, taken-cost, 0)
+		_ = m.store.Commit("", c.AccountID, taken.Sub(cost), 0)
 	} else if taken < cost {
 		// Under-collection (call ran longer than locked): charge the
 		// gap. Exhausted prepaid accounts still get the CDR at full
 		// cost — the debt shows in the next call's 403.
-		if _, err := m.store.Reserve(c.AccountID, cost-taken); err == nil {
-			_ = m.store.Commit("", c.AccountID, cost-taken, cost-taken)
+		if _, err := m.store.Reserve(c.AccountID, cost.Sub(taken)); err == nil {
+			_ = m.store.Commit("", c.AccountID, cost.Sub(taken), cost.Sub(taken))
 		}
 	}
 
@@ -443,9 +444,9 @@ type CDR struct {
 	StartTime  time.Time
 	Duration   int // connected seconds
 	BilledSecs int // billed seconds
-	Cost       float64
+	Cost       money.Amount
 	RatePrefix string
-	Price      float64 // per-minute price applied
+	Price      money.Amount // per-minute price applied
 	Release    string  // normal | balance-exhausted | unratable
 	PDDMs      int     // post-dial delay (INVITE -> first 200), Kamailio-measured
 	SIPCode    int     // final SIP response on the release path

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 )
 
 // TestEndToEndCallFlow simulates the exact Kamailio event sequence for
@@ -58,14 +59,14 @@ func TestEndToEndCallFlow(t *testing.T) {
 	if cdr["BilledSecs"] != float64(66) {
 		t.Errorf("billedSecs = %v, want 66", cdr["BilledSecs"])
 	}
-	if cdr["Cost"] != 0.055 {
-		t.Errorf("cost = %v, want 0.055", cdr["Cost"])
+	if cdr["Cost"] != "0.0550" {
+		t.Errorf("cost = %v, want 0.0550", cdr["Cost"])
 	}
 
 	// Balance invariant: start lock 0.05 (60s estimate), final cost 0.055.
 	bal, _ := account.Balance(s.store, "1000")
-	if !approxEqual(bal, 10-0.055, 1e-7) {
-		t.Errorf("balance after call = %.7f, want %.7f", bal, 10-0.055)
+	if !approxEqual(bal.AsFloat(), 10-0.055, 1e-7) {
+		t.Errorf("balance after call = %s, want %.7f", bal, 10-0.055)
 	}
 
 	// Stats reflect the CDR.
@@ -83,7 +84,7 @@ func TestInsufficientBalance403(t *testing.T) {
 	defer srv.Close()
 
 	// Drain the caller: overwrite with a near-empty balance.
-	s.store.Put(&account.Account{ID: "1000", ParentID: "agent1", Credit: 0.001, RateGroup: "demo"})
+	s.store.Put(&account.Account{ID: "1000", ParentID: "agent1", Credit: money.MustFromYuan(0.001), RateGroup: "demo"})
 
 	b, _ := json.Marshal(map[string]string{
 		"call_id": "call-x", "from_user": "1000", "to_user": "8613800138000",

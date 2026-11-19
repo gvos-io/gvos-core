@@ -2,8 +2,8 @@ package billing
 
 import (
 	"fmt"
-	"math"
 
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/rate"
 )
 
@@ -18,7 +18,11 @@ type Charger struct{}
 // (StepDur seconds each). MinDur lifts billedSecs before pricing.
 // zero-rated calls still produce a step-charged duration so CDRs stay
 // consistent.
-func (c *Charger) ChargeFor(e *rate.Entry, seconds int) (billedSecs int, cost float64, err error) {
+//
+// All money is money.Amount (ADR-0003 fixed point): per-second prices
+// round UP at the 4th decimal (the legacy 8th-decimal-up rule at the
+// new scale), keeping the VOS "never undercharge" contract.
+func (c *Charger) ChargeFor(e *rate.Entry, seconds int) (billedSecs int, cost money.Amount, err error) {
 	if e == nil {
 		return 0, 0, fmt.Errorf("no rate entry")
 	}
@@ -52,25 +56,24 @@ func (c *Charger) ChargeFor(e *rate.Entry, seconds int) (billedSecs int, cost fl
 	}
 
 	// Price the full billed duration: first step at InitRate (or
-	// price*initDur/60), remainder per second at Price/60.
+	// Price*initDur/60), remainder per second at Price/60 (ceil'd).
 	initPrice := e.InitRate
 	if initPrice == 0 {
-		initPrice = e.Price * float64(initDur) / 60
+		initPrice = e.Price.MulFrac(int64(initDur), 60)
 	}
-	initPrice = roundUp7(initPrice)
 
 	if billedSecs <= initDur {
 		return billedSecs, initPrice, nil
 	}
-	incSecs := billedSecs - initDur
-	incPrice := roundUp7(e.Price * float64(incSecs) / 60)
-	return billedSecs, roundUp7(initPrice + incPrice), nil
+	incSecs := int64(billedSecs - initDur)
+	incPrice := e.Price.MulFrac(incSecs, 60)
+	return billedSecs, initPrice.Add(incPrice), nil
 }
 
 // EstimatedCost is the pre-answer lock amount: what a call of the given
 // duration would cost, used before the call starts (PRD: lock estimate
 // then reconcile at BYE).
-func (c *Charger) EstimatedCost(e *rate.Entry, expectedSecs int) float64 {
+func (c *Charger) EstimatedCost(e *rate.Entry, expectedSecs int) money.Amount {
 	if e == nil || expectedSecs <= 0 {
 		return 0
 	}
@@ -79,17 +82,4 @@ func (c *Charger) EstimatedCost(e *rate.Entry, expectedSecs int) float64 {
 		return 0
 	}
 	return cost
-}
-
-// roundUp7 mirrors VOS precision: 7 decimals, 8th rounds up.
-func roundUp7(p float64) float64 {
-	if p <= 0 {
-		return p
-	}
-	scaled := p * 1e7
-	whole := math.Floor(scaled)
-	if scaled-whole > 1e-9 {
-		whole++
-	}
-	return whole / 1e7
 }

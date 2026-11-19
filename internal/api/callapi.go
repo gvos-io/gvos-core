@@ -7,6 +7,8 @@
 package api
 
 import (
+	"math"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"context"
 	"errors"
 	"log"
@@ -51,7 +53,7 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	}
 	// Fraud engine: frequency/cost/prefix rules, block or alert.
 	// Estimated cost for the cost-cap check uses the 60s lock basis.
-	if h := s.risk.CheckCall(accID, req.To, 0.05); h.Blocked {
+	if h := s.risk.CheckCall(accID, req.To, money.MustFromYuan(0.05)); h.Blocked {
 		return 403, map[string]string{"error": "risk-blocked [" + h.RuleID + "]: " + h.Reason}
 	} else if h.Alerted {
 		log.Printf("RISK-ALERT account=%s rule=%s: %s", accID, h.RuleID, h.Reason)
@@ -134,15 +136,17 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 	// seconds are recorded in the record for the bill view.
 	if pr := s.pkg.Apply(cdr.AccountID, cdr.BilledSecs, cdr.Cost); pr.BillableSecs < float64(cdr.BilledSecs) || pr.Discount != 1 {
 		if float64(cdr.BilledSecs) > 0 {
-			ratio := pr.BillableSecs / float64(cdr.BilledSecs)
-			cdr.Cost = roundUp7f(cdr.Cost * ratio * pr.Discount)
+			// Ratio math stays float (proportion); the product returns
+			// to fixed point, ceil'd (never undercharge).
+			ratio := pr.BillableSecs / float64(cdr.BilledSecs) * pr.Discount
+			cdr.Cost = money.Amount(int64(math.Ceil(float64(cdr.Cost) * ratio)))
 			cdr.FreeSecs = int(pr.FreeSecs)
 		}
 	}
 
 	// Fraud engine settlement: reconcile the daily cost accumulation
 	// with the actual CDR cost (estimate was 0.05 basis at start).
-	s.risk.SettleCost(cdr.AccountID, 0.05, cdr.Cost)
+	s.risk.SettleCost(cdr.AccountID, money.MustFromYuan(0.05), cdr.Cost)
 	// Media plane: close the call's stream (subscribers drop, final
 	// stats reported for the RTT budget audit).
 	if st, ok := s.media.Close(req.CallID); ok && st.UplinkChunks+st.DownlinkChunks > 0 {

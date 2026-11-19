@@ -89,7 +89,7 @@ func TestAdminAccountLifecycle(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("topup: code=%d body=%v", code, m)
 	}
-	if m["balance"].(float64) != 6.0 {
+	if got := mustParseBal(t, m["balance"]); got != 6.0 {
 		t.Errorf("balance after topup = %v, want 6", m["balance"])
 	}
 
@@ -109,8 +109,8 @@ func TestAdminAccountLifecycle(t *testing.T) {
 	}
 	// 6.00 - 0.055 (66s at 0.05/min 60+6)
 	bal, _ := account.Balance(s.store, newID)
-	if !approxEqual(bal, 6-0.055, 1e-7) {
-		t.Errorf("post-call balance = %.7f, want %.7f", bal, 6-0.055)
+	if !approxEqual(bal.AsFloat(), 6-0.055, 1e-7) {
+		t.Errorf("post-call balance = %s, want %.7f", bal, 6-0.055)
 	}
 }
 
@@ -152,8 +152,8 @@ func TestAdminRateUpsertLiveEffect(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("start: code=%d body=%v", code, m)
 	}
-	if m["price"].(float64) != 0.025 {
-		t.Errorf("new price not applied: %v", m["price"])
+	if m["price"] != "0.0250" {
+		t.Errorf("new price not applied: %v (want decimal 0.0250)", m["price"])
 	}
 	code, m = authedPost("/v1/call/end", map[string]any{
 		"call_id": "rate-e2e-1", "duration": 66,
@@ -161,7 +161,7 @@ func TestAdminRateUpsertLiveEffect(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("end: code=%d", code)
 	}
-	if m["Cost"].(float64) != 0.0275 {
+	if m["Cost"] != "0.0275" {
 		t.Errorf("cost after rate change = %v, want 0.0275", m["Cost"])
 	}
 }

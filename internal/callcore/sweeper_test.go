@@ -1,6 +1,8 @@
 package callcore
 
 import (
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+
 	"testing"
 	"time"
 
@@ -12,8 +14,8 @@ import (
 // zombie-timeout release reason.
 func TestSweeperSettlesZombies(t *testing.T) {
 	store := account.NewStore()
-	store.Put(&account.Account{ID: "agent", Credit: 1000, RateGroup: "g"})
-	store.Put(&account.Account{ID: "u1", ParentID: "agent", Credit: 100, RateGroup: "g"})
+	store.Put(&account.Account{ID: "agent", Credit: money.MustFromYuan(1000), RateGroup: "g"})
+	store.Put(&account.Account{ID: "u1", ParentID: "agent", Credit: money.MustFromYuan(100), RateGroup: "g"})
 
 	m := NewManager(store, nil, time.Second)
 	base := time.Unix(1_700_000_000, 0)
@@ -38,15 +40,15 @@ func TestSweeperSettlesZombies(t *testing.T) {
 	// Lock was 60s estimate (0.01/min -> 0.01). Zombie duration 660s
 	// bills at 60+6: 660s = 0.11.
 	bal, _ := account.Balance(store, "u1")
-	if !approxEqual(bal, 100-0.11, 1e-7) {
-		t.Errorf("post-sweep balance = %.7f, want %.7f (lock released, elapsed billed)", bal, 100-0.11)
+	if !approxEqual(bal.AsFloat(), 100-0.11, 1e-7) {
+		t.Errorf("post-sweep balance = %s, want %.7f (lock released, elapsed billed)", bal, 100-0.11)
 	}
 }
 
 // TestSweeperIgnoresFreshCalls: in-progress calls are untouched.
 func TestSweeperIgnoresFreshCalls(t *testing.T) {
 	store := account.NewStore()
-	store.Put(&account.Account{ID: "u1", Credit: 100, RateGroup: "g"})
+	store.Put(&account.Account{ID: "u1", Credit: money.MustFromYuan(100), RateGroup: "g"})
 	m := NewManager(store, nil, time.Second)
 
 	base := time.Unix(1_700_000_000, 0)
@@ -66,7 +68,7 @@ func TestSweeperIgnoresFreshCalls(t *testing.T) {
 // sweep calls, and stop() halts it.
 func TestSweeperLoop(t *testing.T) {
 	store := account.NewStore()
-	store.Put(&account.Account{ID: "u1", Credit: 100, RateGroup: "g"})
+	store.Put(&account.Account{ID: "u1", Credit: money.MustFromYuan(100), RateGroup: "g"})
 	m := NewManager(store, nil, 10*time.Millisecond)
 
 	base := time.Unix(1_700_000_000, 0)
@@ -93,7 +95,7 @@ func TestSweeperLoop(t *testing.T) {
 func TestZombieCDRReleaseReason(t *testing.T) {
 	var cdrs []*CDR
 	store := account.NewStore()
-	store.Put(&account.Account{ID: "u1", Credit: 100, RateGroup: "g"})
+	store.Put(&account.Account{ID: "u1", Credit: money.MustFromYuan(100), RateGroup: "g"})
 
 	// Capture CDRs via a wrapping approach: we can't intercept End's
 	// return from sweep, so assert via a settle hook - use the manager

@@ -1,11 +1,15 @@
 package rate
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+)
 
 func BenchmarkLookupFast(b *testing.B) {
 	var rs []Rate
 	for i := 0; i < 100000; i++ {
-		rs = append(rs, Rate{Prefix: prefixFor(i), Price: 0.01, InitDur: 60, StepDur: 6})
+		rs = append(rs, Rate{Prefix: prefixFor(i), Price: money.MustFromYuan(0.01), InitDur: 60, StepDur: 6})
 	}
 	tbl := NewTable(rs)
 	b.ResetTimer()

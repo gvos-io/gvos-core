@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 )
 
 // TestMain pins the internal token for the signaling face (Phase A
@@ -152,15 +153,33 @@ func TestIdempotentTopup(t *testing.T) {
 		t.Fatalf("replay: %d %v", c2, m2)
 	}
 	bal, _ := account.Balance(s.store, "1000")
-	if bal != m1["balance"].(float64) {
+	if bal.AsFloat() != mustParseBal(t, m1["balance"]) {
 		t.Errorf("balance moved twice: now %v, first response %v", bal, m1["balance"])
 	}
-	if m2["balance"].(float64) != m1["balance"].(float64) {
+	if mustParseBal(t, m2["balance"]) != mustParseBal(t, m1["balance"]) {
 		t.Errorf("replay response differs: %v vs %v", m2["balance"], m1["balance"])
 	}
 	// A different key is a different request.
 	c3, m3 := call("idem-2")
-	if c3 != 200 || m3["balance"].(float64) != bal+5 {
+	if c3 != 200 || mustParseBal(t, m3["balance"]) != bal.AsFloat()+5 {
 		t.Errorf("distinct key should top up again: %d %v", c3, m3)
 	}
+}
+
+// mustParseBal decodes a JSON balance value (decimal string post
+// ADR-0003, or legacy number).
+func mustParseBal(t *testing.T, v any) float64 {
+	t.Helper()
+	switch x := v.(type) {
+	case string:
+		a, err := money.FromDecimal(x)
+		if err != nil {
+			t.Fatalf("bad balance %q: %v", x, err)
+		}
+		return a.AsFloat()
+	case float64:
+		return x
+	}
+	t.Fatalf("balance type %T", v)
+	return 0
 }

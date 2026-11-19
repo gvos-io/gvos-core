@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/pkgplan"
 	"github.com/lixuanqun/gvos-core/internal/callcore"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
@@ -521,7 +522,7 @@ func StartCfgReloadSubscriber(s *Server) {
 					ParentID  string  `json:"parent_id"`
 					RateGroup string  `json:"rate_group"`
 					Postpaid  bool    `json:"postpaid"`
-					Credit    float64 `json:"credit"`
+					Credit    money.Amount `json:"credit"`
 				} `json:"account"`
 			}
 			if err := json.Unmarshal(data, &op); err != nil || op.Account.ID == "" {
@@ -544,8 +545,8 @@ func StartCfgReloadSubscriber(s *Server) {
 		case "credit":
 			// Absolute balance (idempotent on replay), not the delta.
 			var op struct {
-				AccountID string  `json:"account_id"`
-				Credit    float64 `json:"credit"`
+				AccountID string       `json:"account_id"`
+				Credit    money.Amount `json:"credit"`
 			}
 			if err := json.Unmarshal(data, &op); err != nil || op.AccountID == "" {
 				log.Printf("CFG-RELOAD credit bad payload: %v", err)
@@ -556,7 +557,7 @@ func StartCfgReloadSubscriber(s *Server) {
 			} else {
 				a.Credit = op.Credit
 				_ = s.store.Put(a)
-				log.Printf("CFG-RELOAD credit applied via bus (%s -> %.7f)", op.AccountID, op.Credit)
+				log.Printf("CFG-RELOAD credit applied via bus (%s -> %s)", op.AccountID, op.Credit)
 			}
 		case "recording":
 			var op struct {
