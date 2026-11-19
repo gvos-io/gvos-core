@@ -69,8 +69,27 @@ cursor 式:`?cursor=&limit=`(默认 50,上限 500),响应带 `next_cursor`(空=�
 3. 约束来源:边缘别名载荷字节一致、JetStream durable 消费者重放旧消息、Kamailio jansson 点路径解析(陷阱清单 nats-event-driven-upgrade §2.4)。
 4. 契约测试(Phase D 时引入):golden payload fixture 防静默漂移。
 
-## 7. 变更记录
+## 7. 事件目录(subject 清单 + payload 字段表)
+
+发布侧契约由 `internal/shared/events/testdata/contract/` 的 golden fixture 机器守护(改 payload 必须显式更新 fixture 并过消费者评审)。
+
+| Subject | 载荷字段 | 消费者 |
+|---|---|---|
+| `gvos.cdr.completed` | CallID, AccountID, Dest, Duration, BilledSecs, Cost(dec), RatePrefix, Price(dec), Release, PDDMs, SIPCode, Recorded, FreeSecs, Mos/JitterMs/PacketLoss | CDRW worker(PG)、Webhook(Phase D) |
+| `gvos.cdr.raw` | call_id, event=end, duration, pdd_ms, sip_code, release, qos(rtpstat 文本) | CDRR worker(callEnd 终结+落库) |
+| `gvos.call.teardown` | call_id, reason | 边缘 dlg 终结、TEARDOWN durable |
+| `gvos.risk.alert` | account, username, rule_id, reason, to | 边缘 banned htable、告警面 |
+| `gvos.reg.event` | user, op(reg/expire), expires, src_ip | regtable 镜像 + reg_freq 规则 |
+| `gvos.admin.changed` | action, entity, entity_id, operator(key prefix), tenant_id, before, after | AUDIT worker(append-only 表) |
+| `gvos.cfg.reload` | entity(gateway/ip_allowlist/blocklist/rate/account/credit/recording/risk/package) + 全量快照 | gv-core 副本 + 边缘 htable(GW_SYNC/IPALLOW_APPLY/BL_APPLY) |
+| `gvos.recording.completed` | call_id, track(agent/user), object_key, backend, size_bytes, format | 上传下游、Webhook(Phase D) |
+| `gvos.svc.call.start/.answer/.end`、`gvos.svc.stats` | req/reply 服务面(与 HTTP 面镜像) | Kamailio(RPC 档)、运维工具 |
+
+边缘无点别名(gvos-edge-cfg/-risk/-tear)载荷与正名字节一致,不入 JetStream。
+
+## 8. 变更记录
 
 | 日期 | 变更 |
 |---|---|
 | 2026-11-19 | v1:错误包络、资源化路由表、fail-closed 内部鉴权、cursor 分页、事件演进规则 |
+| 2026-11-20 | v1.1:事件目录表(golden fixture 守护);query-token 内部鉴权形式;403 细分 code 落地实录 |
