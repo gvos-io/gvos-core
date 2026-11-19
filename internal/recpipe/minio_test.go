@@ -41,6 +41,9 @@ func s3Stub(t *testing.T) (*httptest.Server, *sync.Map) {
 				return
 			}
 			w.WriteHeader(404)
+		case "DELETE":
+			objects.Delete(key)
+			w.WriteHeader(204)
 		}
 	})
 	return httptest.NewServer(mux), objects
@@ -77,7 +80,7 @@ func TestMinIOBackendRoundTrip(t *testing.T) {
 		t.Errorf("bytes mismatch: got %q", string(v.([]byte))[:30])
 	}
 	if err := m.Delete(context.Background(), key); err != nil {
-		t.Fatal(err)
+		t.Fatalf("delete: %v", err)
 	}
 	if _, ok := objects.Load("recordings/" + key); ok {
 		t.Error("delete did not remove")
