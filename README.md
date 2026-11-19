@@ -94,7 +94,7 @@ Windows 开发机（i7-13700H，双副本 + 真 PG/NATS），方法与原始数�
 ## 已知限制（诚实声明）
 
 - SIP 数据面配置（Kamailio cfg / rtpengine）为 spike 级：单节点可用，生产级调优与大规模验证在进行中
-- 余额权威当前在各副本内存（预锁定语义正确），生产部署按路线图换 Redis 收口
+- 多副本运行时状态（余额/并发/CPS/风控滑窗/套餐用量/注册镜像）已收口 Redis（配置 `GVOS_REDIS_URL`，未配置 = 单副本内存语义）；计费门 fail-closed，其余 fail-open
 - 管理令牌默认 `dev-admin-token`、DB 密码 `gvos_dev`——均为演示默认值，**生产部署必须更换**（见 [operations manual](docs/operations-manual.md)）
 - IP 白名单空表 = 默认拒绝（Kamailio 首个快照加载前短暂 fail-open）；演示环境内部令牌 `dev-internal-token`，生产必须更换 `GVOS_INTERNAL_TOKEN`
 - TLS 证书未随仓库分发，部署时自签：`openssl req -x509 -newkey rsa:2048 -nodes -keyout kamailio-key.pem -out kamailio-cert.pem -days 365 -subj "/CN=gvos.local"`

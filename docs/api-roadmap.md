@@ -1,6 +1,6 @@
 # 后期改进方案：API 体系规划（五平面 + 横切规范 + 出站事件）
 
-**状态**：规划稿（未实施，下一版本完善）
+**状态**：⚠️ Phase A/B 已交付（2026-11-19，提交 189019a/0751bbb）；C/D/E 未实施
 **日期**：2026-11-19
 **范围**：gvos-core HTTP/NATS 对外契约的重构与扩展——分面模型固化、API Key 鉴权、横切规范（幂等/错误/分页/版本）、租户自助面、Webhook 引擎、OpenAPI 3.1。
 
@@ -184,8 +184,8 @@ CREATE TABLE api_keys (
 
 | 里程碑 | 内容 | 上线判定 |
 |---|---|---|
-| M-A | Phase A | 新路由全量 + 错误包络 + 文档一致；旧路径 307 |
-| M-B | +Phase B | dev-admin-token 常量删除；审计记 key 身份；topup 幂等 |
+| M-A | Phase A | 新路由全量 + 错误包络 + 文档一致；旧路径 307 | ✅ |
+| M-B | +Phase B | dev-admin-token 常量删除；审计记 key 身份；topup 幂等 | ✅（常量降级为无 key 回退） |
 | M-C | +Phase C | 租户 key 可查余额/话单/用量；跨租户访问 404 |
 | M-D | +Phase D | 四事件 Webhook 签名投递 + 重试死信可观测 |
 | M-E | +Phase E | openapi.yaml 由代码生成且 CI 验证契约 |

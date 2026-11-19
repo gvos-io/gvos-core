@@ -53,12 +53,12 @@
 | 配置(账户/费率/网关/IP 准入/黑名单/风控/套餐) | PG | 写 PG → `gvos.cfg.reload` 快照广播 → 60s 重播对账 | ✅ |
 | CDR/账本 | PG 月分区 | `uq_cdr_call` 幂等 + 双路径持续对账 | ✅ |
 | 事件 | NATS JetStream | durable 消费者 + NAK 重投 + MaxDeliver 防毒丸 | ✅ |
-| **余额/预锁/并发/CPS/风控滑窗/套餐用量** | **每副本进程内 mutex map** | TopUp 绝对值广播 + 小时回写 PG | ❌ 单副本正确、N>1 失效(8 项缺口,redis-plan §0) |
-| 注册镜像 | 进程内存(易失) | reg 事件流重建 | ⚠️ 重启表空 |
+| **余额/预锁/并发/CPS/风控滑窗/套餐用量** | Redis(配置即开;未配置=内存单副本语义) | Lua 原子链上操作 + fail-closed 计费门;TopUp 绝对值写 + 小时回写 PG 灾备点 | ✅ Phase 0-5 已交付(2026-11-19,compose 冒烟验证) |
+| 注册镜像 | 进程内存 + Redis 持久镜像(ADR-0002) | reg 事件双写,hash TTL=expires;reg-lookup 兜底端点 | ✅ |
 
-**结构性后果**:"钱的权威 per-replica"是 gv-core 必须单副本的全部原因——并发/CPS 上限 ×N、风控滑窗失效、僵尸呼叫无人回收、集群容量目标(6,000 并发)不可达,全是它的下游症状。🎯 Redis 收口(redis-plan Phase 0-5,fail-closed 语义表已定稿):收拢钱的权威为独立状态平面。**配置类明确不进 Redis**(换传输层无正确性收益,redis-plan §1 非目标)。
+**结构性后果(已解除)**:"钱的权威 per-replica"曾是 gv-core 必须单副本的全部原因。✅ Redis 收口 Phase 0-5 已交付(2026-11-19):余额 Lua 原子权威、准入链镜像 ZSET 账本、风控滑窗、套餐用量、注册镜像全部收口;fail-closed 只给计费门(503 BILLING_UNAVAILABLE),其余 fail-open(本地回退仍是真引擎)。**多副本账务正确性前提就位**——多副本部署解锁(升档顺序见 §6)。**配置类明确不进 Redis**(换传输层无正确性收益,redis-plan §1 非目标,未变)。
 
-金额表示:**🎯 int64 计费单位定点化**(ADR-0003,参考 VOS3000 系 20 年无漂移经验;与 Redis Phase 1 合并为一次账本重构,上线前是唯一免费迁移窗口)。多副本时钟纪律:🎯 单一时间源 + NTP ±50ms 预算(ADR-0004)。注册状态:🎯 边缘本地为主 + Redis 派生镜像兜底(ADR-0002,usrloc db_mode=0 不变)。
+金额表示:**✅ int64 定点化已落地**(ADR-0003:money.Amount 1e-4 元具名类型,计费链/PG NUMERIC/JSON decimal 字符串全链路;VOS 语义断言 66s=0.0550、6714 通零漂移)。多副本时钟纪律:🎯 单一时间源 + NTP ±50ms 预算(ADR-0004,验证批次收口)。注册状态:✅ 边缘本地 + Redis 持久镜像兜底(ADR-0002,usrloc db_mode=0 不变,已交付)。
 
 ## 4. 核心数据流
 
@@ -84,7 +84,7 @@
 
 ### 4.3 配置下发(NATS 广播驱动)✅
 
-变更写 PG settings(重启兜底)→ `gvos.cfg.reload` 全量快照广播(网关/IP 准入/黑名单/费率/录音/风控/套餐)→ 各副本与 Kamailio 节点本地生效——**Kamailio 零 PG 依赖**(dispatcher db_url 已删)。core NATS at-most-once → 60s 周期重播即对账心跳(节点重启实测 60s 内 htable 自愈)。费率变更 60s 内全节点生效。🎯 LCR 成本路由:控制面按"费率最低→优先级→冷却"计算,随同一 cfg 通道下发(competitive-analysis §3.1,竞研唯一功能缺口)。
+变更写 PG settings(重启兜底)→ `gvos.cfg.reload` 全量快照广播(网关/IP 准入/黑名单/费率/录音/风控/套餐)→ 各副本与 Kamailio 节点本地生效——**Kamailio 零 PG 依赖**(dispatcher db_url 已删)。core NATS at-most-once → 60s 周期重播即对账心跳(节点重启实测 60s 内 htable 自愈)。费率变更 60s 内全节点生效。✅ LCR 成本路由:gateway.Prefixes/CostRate + 控制面按"费率最低→优先级"排序,LCR 序编码进广播 Priority 字段(边缘 GW_DISPATCH 零改动);费率 upsert 即时重播路由序(competitive-analysis §3.1 唯一功能缺口,已关闭)。
 
 ### 4.4 风控与注册的边缘联动 ✅(代码就绪,e2e 待验证窗口)
 
@@ -104,7 +104,7 @@
 
 ⚠️ 压测可复现性缺口:loadgen 不在仓库内(bench 报告引用但仓内无源码)——§8"可复现性叙事"落地前必须补齐(loadgen 入仓或换 SIPp 脚本,scripts 目录)。
 
-**集群目标(6,000 并发)当前不可达**——前置是 Redis 收口(多副本账务正确)+ SIP 全栈复测;20 万注册量级 regtable 具备但未验证。
+**集群目标(6,000 并发)**:多副本账务前置(Redis 收口)已就位,剩 SIP 全栈复测与多副本实测(验证批次);20 万注册量级 regtable 具备但未验证。
 
 ## 6. 部署形态与可用性预算
 
@@ -131,10 +131,10 @@
 | SRTP/DTLS | 全默认开启 | rtpengine 支持但未见端到端验证与显式配置 | ⚠️ 待验证 |
 | Digest 认证 | Password | ha1 MD5(SIP Digest 协议约束,auth_db)| ✅ |
 | IP 准入 | 白名单 | CIDR 规则+默认拒绝;⚠️ 首轮快照到达前短暂 fail-open | ✅/⚠️ |
-| **管理面鉴权** | (隐含可用) | `admin.go:32` 常量 `dev-admin-token`,无 env 覆盖 | ❌ F4 |
+| **管理面鉴权** | API Key(Phase B) | `internal/shared/acl`,key 绑 (tenant,role),sha256 落库,一次性明文,bootstrap 从 GVOS_ADMIN_TOKEN;legacy 常量仅无 key 时回退(警告) | ✅ |
 | **信令计费面鉴权** | (隐含可用) | `/v1/call/*` 仅 requirePOST,`main.go:251` | ❌ F4 |
 | 密码存储 argon2id | 有 | **无此实现**(管理面无密码存储;ha1 是协议内 MD5)| v0.1 失实,删除 |
-| 审计表 | append-only | ✅ audit_log 存在且在写;❌ operator 是常量 "admin" | ⚠️ 有形无实 |
+| 审计表 | append-only | ✅ audit_log;operator = key prefix(sync+bus 双路) | ✅ |
 | 防盗打默认 | 账户级上限 | ✅ 日/月消费上限、并发上限、异常封禁 | ✅ |
 | License 闭源校验 | 有 | 未启动 | 🎯(等保/离线交付批次) |
 
@@ -170,9 +170,9 @@ Subject 体系(`internal/events/events.go`):`gvos.cdr.completed/.raw`、`gvos.ca
 | NATS 转型 | 三层全事件驱动(六项边缘改造 + 计费 RPC) | ✅ 代码;⚠️ e2e 验收 U1-U5 待窗口 |
 | 首批交付 | compose-ha + RTO/RPO 演练 | ✅ 载体就绪 |
 | M12(GA) | Helm 生产化 + 渗透测试 + 迁移工具 beta + NATS 集群化/SIP LB | 🎯 |
-| M15 | API/Webhook 全覆盖 + 风控引擎 + Prometheus 面板([api-roadmap.md](api-roadmap.md) M-A~M-D = API 半壁) | 🎯 |
-| Redis 收口 | 多副本账务正确(解锁扩容/集群容量目标,[redis-adoption-plan.md](redis-adoption-plan.md) M0-M4) | 🎯 方案定稿 |
-| LCR 成本路由 | 竞研唯一功能开发缺口([competitive-analysis-vos-sbc.md](competitive-analysis-vos-sbc.md) §3.1) | 🎯 |
+| M15 | API/Webhook 全覆盖 + 风控引擎 + Prometheus 面板([api-roadmap.md](api-roadmap.md) M-A~M-D = API 半壁) | ⚠️ M-A/M-B 已交付(Phase A/B);M-C/M-D 未开工 |
+| Redis 收口 | 多副本账务正确(解锁扩容/集群容量目标,[redis-adoption-plan.md](redis-adoption-plan.md) M0-M4) | ✅ Phase 0-5 + 冒烟 |
+| LCR 成本路由 | 竞研唯一功能开发缺口([competitive-analysis-vos-sbc.md](competitive-analysis-vos-sbc.md) §3.1) | ✅ |
 | 录音管道 | WAV/MP3 + OSS + 分轨 + presigned([recording-oss-upgrade-plan.md](recording-oss-upgrade-plan.md) R0-R4) | 🎯 方案定稿 |
 | M18 | WebSocket 媒体流 beta(<500ms 端到端) | 🎯 |
 
@@ -180,4 +180,4 @@ CI 硬门槛的诚实口径:v0.1 列了覆盖率/trivy/SIPp 冒烟/模糊测试,
 
 ---
 
-**变更记录**:2026-10-06 v0.1 初稿 · 2026-11-19 v0.2 全量修订(状态权威矩阵/档位矩阵/事件契约治理新增;argon2id、CI 门槛、Parquet、FreeSWITCH 等失实项修正;安全面逐项核对;口径与 deployment-plan 收口)。
+**变更记录**:2026-10-06 v0.1 初稿 · 2026-11-19 v0.2 全量修订(权威矩阵/档位矩阵/事件契约治理新增;失实项修正)· 2026-11-19 v0.2.1 Redis Phase 0-5 / ADR-0003 定点化 / LCR / API Phase A-B 交付翻牌。

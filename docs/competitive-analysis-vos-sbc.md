@@ -66,12 +66,12 @@ VOS 核心能力域（官网归纳）：电信级计费、智能路由、多级�
 | 电信级计费 | ✅ | `internal/billing/charger.go`（步长计费）；`rate.roundUp7` 7 位小数第 8 位进一；容量报告 6,714 行 CDR vs 账本逐分零漂移 |
 | 多级代理/账户 | ✅ | `internal/account/account.go`：`tenant → agent* → account` 树、`Chain()`、`Reserve/Commit/Release` 全链路原子预锁定 |
 | 费率/套餐 | ✅ | `internal/rate/rate.go` 前缀最长匹配 + 时段窗口；`internal/pkgplan` 日/月免费额度、折扣、最低消费 |
-| 智能路由 | ⚠️ | Kamailio htable `gw:prio:<id>` 优先级选择 + 故障冷却 failover（`deploy/kamailio/kamailio.cfg`）；**无 LCR 成本路由** |
+| 智能路由 | ✅ | LCR 成本路由已交付（gateway.Prefixes/CostRate + 控制面最便宜序编码进广播 Priority,边缘零改动）+ 故障冷却 failover |
 | CDR/报表 | ✅ | `internal/store/pg.go` CDR 幂等落库（`uq_cdr_call`）+ `usage_daily` 日聚合 + Webhook 外推 |
 | 强制拆线 | ✅ | `gvos.call.teardown` JetStream 队列 + TEARDOWN durable worker（`cmd/gvos-core/dispatch.go:101`） |
 | 余额实时锁定 | ✅ | `account.Store.Reserve` 预锁定 → Commit/Release；余额耗尽触发拆线 |
 
-**小计 6/7，唯一缺口 LCR。**
+**小计 7/7（LCR 已交付 2026-11-19，VOS 功能面对齐完毕）。**
 
 ### 2.2 媒体旁路
 
@@ -122,8 +122,8 @@ RTPengine spike → 生产级调优（转码策略、媒体锚定策略、资源
 
 | 优先级 | 事项 | 性质 | 预估规模 | 前置 |
 |---|---|---|---|---|
-| P0 | LCR 成本路由 | 新功能 | 中 | 无（费率表已就位） |
-| P1 | 容量验证 20 万注册 / 2 万并发 | 验证 | 大 | Redis 收口方案 |
+| P0 | LCR 成本路由 | 新功能 | 中 | 无（费率表已就位） | ✅ 已交付 2026-11-19 |
+| P1 | 容量验证 20 万注册 / 2 万并发 | 验证 | 大 | Redis 收口 ✅(已交付) |
 | P1 | 媒体面生产化 | 调优 | 中-大 | 无 |
 | — | 反超项叙事 | 文案 | 小 | 无 |
 
