@@ -30,6 +30,7 @@ import (
 	"github.com/lixuanqun/gvos-core/internal/recpipe"
 	"github.com/lixuanqun/gvos-core/internal/shared/events"
 	"github.com/lixuanqun/gvos-core/internal/shared/rds"
+	"github.com/lixuanqun/gvos-core/internal/webhook"
 	"github.com/lixuanqun/gvos-core/internal/shared/store"
 )
 
@@ -54,6 +55,8 @@ type Server struct {
 	idem          *idemStore           // Idempotency-Key registry for money routes
 	rds           *rds.Client          // Redis runtime-state authority (nil = off, memory authoritative)
 	recpipe       *recpipe.Uploader   // recording pipeline (nil = off)
+	whDispatch    *webhook.Dispatcher // outbound webhook fan-out (nil = off)
+	whStore       WebhookStore        // subscription storage (nil = memory-local)
 	redisLocks    bool                 // single-runner locks active (rollup/rebroadcast dedup)
 	bal           *account.BalanceR   // redis balance face (nil = in-memory authority)
 	events        *events.Publisher    // NATS event bus (nil = publishing off)
@@ -74,6 +77,12 @@ type Server struct {
 // alias. Payloads are identical — aliases are transport copies, not
 // semantic forks.
 func (s *Server) emit(subject string, payload any) {
+	if s.whDispatch != nil {
+		// Phase D fan-out: customer endpoints subscribed to this
+		// subject receive the same payload (signed; retries in the
+		// dispatcher). Non-blocking, observability tier.
+		s.whDispatch.Publish(subject, payload)
+	}
 	if s.events == nil {
 		return
 	}
@@ -506,6 +515,11 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("DELETE /v1/admin/axb/bindings/{x}", s.handleAXBDel)
 	mux.HandleFunc("GET /v1/admin/axb/stats", s.handleAXBStats)
 
+	// Outbound webhooks (Phase D).
+	mux.HandleFunc("POST /v1/admin/webhooks", s.handleWebhookCreate)
+	mux.HandleFunc("GET /v1/admin/webhooks", s.handleWebhookList)
+	mux.HandleFunc("DELETE /v1/admin/webhooks/{id}", s.handleWebhookDelete)
+
 	// Recording pipeline (R2/R3).
 	mux.HandleFunc("GET /v1/recording/{call_id}", s.handleRecordingList)
 	mux.HandleFunc("GET /v1/recording/{call_id}/{track}", s.handleRecordingPlay)
@@ -773,6 +787,22 @@ func distinctPrefixes(gws []gateway.Gateway) []string {
 		out = []string{""} // no prefixes declared: base order only
 	}
 	return out
+}
+
+// StartWebhookFanout wires the multi-subscription fan-out (Phase D:
+// subscriptions in PG 011, signed delivery, retry schedule) and
+// loads the active set; returns false when nothing is subscribed.
+// The legacy single-URL dispatcher (GVOS_WEBHOOK_URL) stays for
+// backward compatibility.
+func StartWebhookFanout(s *Server) bool {
+	if s.pg == nil {
+		return false
+	}
+	s.whStore = s.pg
+	dsp := webhook.NewDispatcher(context.Background(), webhook.NewDeliverer())
+	s.whDispatch = dsp
+	s.refreshWebhookDispatcher()
+	return len(dsp.SubscriptionCount()) > 0
 }
 
 // AttachBlocklistFeeds starts the dynamic feed loop for the

@@ -76,6 +76,14 @@ func main() {
 	// Dynamic blocklist feeds (VOS multi-source blacklist equivalent):
 	// GVOS_BLOCKLIST_SOURCES="tag@url,..." re-fetches on an interval
 	// and applies TTL'd entries over the static API-owned set.
+	// Outbound webhooks (Phase D): GVOS_WEBHOOK_EVENTS toggles the
+	// dispatcher (subscriptions live in PG 011; delivery signs with
+	// the stored HMAC secret and retries on the backoff schedule).
+	if os.Getenv("GVOS_WEBHOOK_EVENTS") == "1" {
+		if api.StartWebhookFanout(s) {
+			log.Printf("webhook fanout on (subscriptions from PG)")
+		}
+	}
 	if spec := os.Getenv("GVOS_BLOCKLIST_SOURCES"); spec != "" {
 		feedCtx, feedCancel := context.WithCancel(context.Background())
 		defer feedCancel()
