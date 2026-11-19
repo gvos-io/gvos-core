@@ -775,6 +775,19 @@ func distinctPrefixes(gws []gateway.Gateway) []string {
 	return out
 }
 
+// AttachBlocklistFeeds starts the dynamic feed loop for the
+// blocklist (GVOS_BLOCKLIST_SOURCES form tag@url,...). Empty spec =
+// feeds off. The static API-owned set survives every refresh.
+func AttachBlocklistFeeds(s *Server, spec string, ctx context.Context) (stop func()) {
+	feeds := blocklist.ParseFeedSpec(spec)
+	if len(feeds) == 0 {
+		return func() {}
+	}
+	blocklist.RunFeedLoop(ctx, s.blocklist, feeds, s.blocklist.Snapshot(), 5*time.Minute, 15*time.Minute)
+	log.Printf("blocklist feeds on: %d sources", len(feeds))
+	return func() {}
+}
+
 // AttachRedis wires the Redis runtime-state authority: the balance
 // authority swaps to the Redis face (Phase 1), balances are seeded
 // SETNX-style, and the call manager routes money through it
