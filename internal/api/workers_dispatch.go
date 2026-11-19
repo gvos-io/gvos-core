@@ -371,7 +371,7 @@ func StartCfgRebroadcaster(s *Server) {
 					continue
 				}
 			}
-			s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": s.gws.Gateways()})
+			s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": s.lcrGateways()})
 			// ip_allowlist: pre-joined CIDR lists (ipAllowPayload) —
 			// the edge cannot rebuild them from the rules array.
 			s.emit(events.SubjectCfgReload, ipAllowPayload(s.ipallow.Rules()))

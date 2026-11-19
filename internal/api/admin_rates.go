@@ -69,6 +69,9 @@ func (s *Server) handleRateUpsert(w http.ResponseWriter, r *http.Request) {
 	// Broadcast to peer replicas: they rebuild their snapshot from the
 	// authoritative store too ("60s fee window" is now instant).
 	s.emit(events.SubjectCfgReload, map[string]string{"entity": "rate"})
+	// Rate changes re-price the gateways: re-broadcast the LCR order
+	// (cheapest-first may have flipped) alongside the rate event.
+	s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": s.lcrGateways()})
 	writeJSON(w, 200, map[string]any{"prefix": req.Prefix, "price": req.Price})
 }
 

@@ -21,13 +21,19 @@ import (
 // (lower value = tried first); Enabled=false removes it from
 // selection without deleting the entry.
 type Gateway struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	SipAddr  string `json:"sip_addr"`
-	Protocol string `json:"protocol"` // udp | tcp | tls (informational; routing is by SipAddr)
-	Priority int    `json:"priority"` // lower = preferred
-	Weight   int    `json:"weight"`   // future ratio balancing (ignored by priority selection)
-	Enabled  bool   `json:"enabled"`
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	SipAddr  string   `json:"sip_addr"`
+	Protocol string   `json:"protocol"`  // udp | tcp | tls (informational; routing is by SipAddr)
+	Priority int      `json:"priority"`  // base priority (lower = preferred)
+	Weight   int      `json:"weight"`    // future ratio balancing (ignored by priority selection)
+	Enabled  bool     `json:"enabled"`
+	// LCR (competitive-analysis §3.1): the prefixes this gateway
+	// serves and the rate group that prices its *outbound cost*. The
+	// control plane reorders per-prefix (cheapest first) before the
+	// broadcast; the edge keeps its plain priority selection.
+	Prefixes []string `json:"prefixes"` // served destination prefixes, longest-match wins
+	CostRate string   `json:"cost_rate"` // rate group pricing this gateway's cost
 }
 
 // Validate checks one gateway: non-empty ID/name, host:port-shaped

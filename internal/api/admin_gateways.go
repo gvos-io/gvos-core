@@ -49,7 +49,7 @@ func (s *Server) handleGatewaySet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.audit(r, "remove", "gateway", req.RemoveID, current, kept)
-		s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": kept})
+		s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": s.lcrGateways()})
 		writeJSON(w, 200, map[string]any{"removed": req.RemoveID, "gateways": len(kept)})
 		return
 	}
@@ -72,7 +72,7 @@ func (s *Server) handleGatewaySet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "replace", "gateway", "", current, req.Gateways)
-	s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": req.Gateways})
+	s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": s.lcrGateways()})
 	writeJSON(w, 200, map[string]any{"gateways": len(req.Gateways)})
 }
 
@@ -125,7 +125,7 @@ func (s *Server) handleGatewayDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.gws.Reload(kept)
 	s.audit(r, "remove", "gateway", id, map[string]any{"removed": 1}, nil)
-	s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": kept})
+	s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": s.lcrGateways()})
 	writeJSON(w, 200, map[string]any{"removed": id})
 }
 

@@ -84,6 +84,40 @@ func (s *Server) emit(subject string, payload any) {
 	}
 }
 
+// lcrRater adapts the per-group rate tables to the gateway.Rater
+// face (LCR). Tables load lazily per CostRate group and cache.
+type lcrRater struct {
+	s     *Server
+	cache map[string]*rate.Table
+}
+
+func (r *lcrRater) BestRate(group, dest string) *money.Amount {
+	tbl, ok := r.cache[group]
+	if !ok {
+		if r.s.pg != nil {
+			ctx, cancel := contextWithTimeoutDuration(context.Background(), 5*time.Second)
+			defer cancel()
+			if t, err := r.s.pg.LoadRates(ctx, group); err == nil {
+				tbl = t
+			}
+		} else {
+			// Memory mode: filter rateList by group membership (the
+			// demo list is single-group; rateList entries carry no
+			// group so all serve the demo group).
+			tbl = rate.NewTable(r.s.rateList)
+		}
+		r.cache[group] = tbl
+	}
+	if tbl == nil {
+		return nil
+	}
+	now := time.Now()
+	if e := tbl.Lookup(dest, int(now.Weekday()), now.Hour()*60+now.Minute()); e != nil {
+		return &e.Price
+	}
+	return nil
+}
+
 // rebuildRates recomputes the lookup table. PG mode reloads from the
 // database (authoritative); memory mode rebuilds from rateList.
 func (s *Server) rebuildRates() {
@@ -635,6 +669,54 @@ func (s *Server) routeRiskLegacy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/v1/admin/risk-rules", http.StatusTemporaryRedirect)
+}
+
+// lcrGateways returns the broadcast gateway array with the LCR order
+// encoded into Priority (competitive-analysis §3.1: cheapest first per
+// destination prefix; the edge's lowest-priority-wins selection then
+// reproduces the order with zero edge changes).
+func (s *Server) lcrGateways() []gateway.Gateway {
+	gws := s.gws.Gateways()
+	r := &lcrRater{s: s, cache: map[string]*rate.Table{}}
+	// Reorder per served-prefix family: the longest common destination
+	// shape here is the union of prefixes; a single global order per
+	// gateway set keeps the htable contract (one prio per id). We
+	// order by the gateway's own best-prefix cheapest rate.
+	ordered := gateway.LCR(gws, "0", r) // placeholder dest; refined below
+	// Refine: order against each distinct prefix and take the best
+	// (lowest) resulting index per gateway.
+	pos := map[string]int{}
+	for _, p := range distinctPrefixes(gws) {
+		for i, g := range gateway.LCR(gws, p, r) {
+			if cur, ok := pos[g.ID]; !ok || i < cur {
+				pos[g.ID] = i
+			}
+		}
+	}
+	out := make([]gateway.Gateway, 0, len(ordered))
+	for _, g := range gws {
+		g.Priority = pos[g.ID]
+		out = append(out, g)
+	}
+	return out
+}
+
+// distinctPrefixes lists every prefix any gateway serves.
+func distinctPrefixes(gws []gateway.Gateway) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, g := range gws {
+		for _, p := range g.Prefixes {
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	if len(out) == 0 {
+		out = []string{""} // no prefixes declared: base order only
+	}
+	return out
 }
 
 // AttachRedis wires the Redis runtime-state authority: the balance
