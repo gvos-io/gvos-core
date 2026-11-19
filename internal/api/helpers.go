@@ -1,6 +1,6 @@
 // Shared helpers for the admin/event handlers. Kept tiny on purpose:
 // these exist so admin.go stays declarative.
-package main
+package api
 
 import (
 	"context"

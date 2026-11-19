@@ -1,7 +1,7 @@
 // Embedded single-file admin console. Zero build step, zero frontend
 // dependencies - fetch() + vanilla JS only, so the binary stays
 // self-contained (spike tradeoff: production moves to a proper SPA).
-package main
+package api
 
 const adminHTML = `<!DOCTYPE html>
 <html lang="zh">

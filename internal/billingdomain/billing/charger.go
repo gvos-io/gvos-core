@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/lixuanqun/gvos-core/internal/rate"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/rate"
 )
 
 // Charger applies a rate.Entry to call durations. It implements the

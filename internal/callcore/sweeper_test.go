@@ -1,10 +1,10 @@
-package callstate
+package callcore
 
 import (
 	"testing"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/account"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
 )
 
 // TestSweeperSettlesZombies: a call that never gets a BYE is force

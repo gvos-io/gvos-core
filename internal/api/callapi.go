@@ -4,7 +4,7 @@
 // (gvos.svc.call.start|answer|end). HTTP wrappers stay thin: parse,
 // call core, write response. Status codes are HTTP codes; the NATS
 // responder carries them in the reply envelope.
-package main
+package api
 
 import (
 	"context"
@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/account"
-	"github.com/lixuanqun/gvos-core/internal/callstate"
-	"github.com/lixuanqun/gvos-core/internal/events"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/callcore"
+	"github.com/lixuanqun/gvos-core/internal/shared/events"
 )
 
 type callStartReq struct {
@@ -74,7 +74,7 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	if err := s.calls.Start(req.CallID, accID, req.To, entry, 60, s.recordEnabled); err != nil {
 		// Insufficient balance is a 403 for the caller; account limits
 		// are a 429 (retry later); unknown account a 404.
-		var limit *callstate.ErrLimit
+		var limit *callcore.ErrLimit
 		if errors.As(err, &limit) {
 			return 429, map[string]string{"error": err.Error()}
 		}

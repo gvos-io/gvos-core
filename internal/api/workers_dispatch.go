@@ -5,7 +5,7 @@
 // (bus off / URL unset / core-mode degradation) and none of them may
 // block or fail the billing path — the bus is observability and async
 // plumbing, not authority.
-package main
+package api
 
 import (
 	"bytes"
@@ -19,14 +19,14 @@ import (
 	"os"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/account"
-	"github.com/lixuanqun/gvos-core/internal/blocklist"
-	"github.com/lixuanqun/gvos-core/internal/callstate"
-	"github.com/lixuanqun/gvos-core/internal/events"
-	"github.com/lixuanqun/gvos-core/internal/gateway"
-	"github.com/lixuanqun/gvos-core/internal/ipallow"
-	"github.com/lixuanqun/gvos-core/internal/pkgplan"
-	"github.com/lixuanqun/gvos-core/internal/riskctrl"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
+	"github.com/lixuanqun/gvos-core/internal/callcore"
+	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/gateway"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/ipallow"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/pkgplan"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/riskctrl"
 )
 
 // startAsyncWorkers launches the durable write/exec workers. Each
@@ -34,7 +34,7 @@ import (
 // asyncAudit) and records itself for /v1/stats. Consumers compete
 // across replicas (shared durable names) and NAK-redeliver failures,
 // so a crashed worker's backlog drains on restart.
-func startAsyncWorkers(s *Server) {
+func StartAsyncWorkers(s *Server) {
 	// Persistence workers need PG: memory mode publishes events but
 	// keeps no durable state, so the handlers must not run there.
 	if s.pg == nil {
@@ -146,7 +146,7 @@ func (s *Server) teardownDispatchHandler(data []byte) error {
 // balance snapshot is taken at consume time: the delta is exact, the
 // balance column is a best-effort view of a live number.
 func (s *Server) cdrPersistHandler(data []byte) error {
-	var cdr callstate.CDR
+	var cdr callcore.CDR
 	if err := json.Unmarshal(data, &cdr); err != nil {
 		return fmt.Errorf("bad CDR payload: %w", err)
 	}
@@ -200,7 +200,7 @@ func (s *Server) auditWriterHandler(data []byte) error {
 // WEBHOOKS durable: competing replicas load-balance deliveries, a
 // failed POST NAKs with a 1s redelivery delay (at-least-once), and
 // MaxDeliver=5 quarantines poison payloads for operations.
-func startWebhookDispatcher(s *Server) *events.Consumer {
+func StartWebhookDispatcher(s *Server) *events.Consumer {
 	consumer, err := s.events.NewDurableConsumer("WEBHOOKS", events.SubjectCDRCompleted,
 		func(data []byte) error { return postWebhook(s.webhookURL, data) }, 2)
 	if err != nil {
@@ -271,7 +271,7 @@ func payloadOf(data []byte) map[string]any {
 // so the Kamailio banned htable (and any webhook) sees it exactly
 // like a call-path alert. Plain subscribe: every replica maintains a
 // full mirror; the table is observability, not work distribution.
-func startRegConsumer(s *Server) {
+func StartRegConsumer(s *Server) {
 	if err := s.events.Subscribe(events.SubjectRegEvent, func(data []byte) {
 		var ev struct {
 			User    string `json:"user"`
@@ -320,7 +320,7 @@ func cdrRawHandler(s *Server) func(data []byte) error {
 // (at-least-once) in JetStream mode — uq_cdr_call collapses
 // redeliveries; plain subscribe in core mode (degraded single-node
 // shape, same as the teardown fallback).
-func startCdrRawConsumer(s *Server) {
+func StartCdrRawConsumer(s *Server) {
 	handler := cdrRawHandler(s)
 	if c, err := s.events.NewDurableConsumer("CDRR", events.SubjectCDRRaw, handler, 1); err != nil {
 		if err2 := s.events.Subscribe(events.SubjectCDRRaw, func(data []byte) {
@@ -345,7 +345,7 @@ func startCdrRawConsumer(s *Server) {
 // heals the gap — at most one minute of drift on the edge. All
 // payloads are full-array and idempotent, so replicas and the edge
 // can apply them any number of times.
-func startCfgRebroadcaster(s *Server) {
+func StartCfgRebroadcaster(s *Server) {
 	go func() {
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
@@ -380,7 +380,7 @@ func startCfgRebroadcaster(s *Server) {
 // the request carries tindex/tlabel; the reply envelope echoes them
 // plus the call_id so the signaling node can t_continue the suspended
 // INVITE from its node-unique reply subject).
-func startCallSvc(s *Server) {
+func StartCallSvc(s *Server) {
 	callReply := func(code int, body any) []byte {
 		b, _ := json.Marshal(map[string]any{"code": code, "body": body})
 		return b
@@ -441,7 +441,7 @@ func startCallSvc(s *Server) {
 
 // startStatsSvc serves /v1/stats-equivalent snapshots over req/reply
 // for ops tooling that lives on the bus.
-func startStatsSvc(s *Server) {
+func StartStatsSvc(s *Server) {
 	if err := s.events.Respond(events.SubjectStats, func(req []byte) []byte {
 		b, _ := json.Marshal(s.statsBody())
 		return b
@@ -455,7 +455,7 @@ func startStatsSvc(s *Server) {
 // rebuilds are idempotent and cheap) reloads from PostgreSQL, which is
 // the authoritative source. Memory-mode peers can only honor rate
 // rebuilds from their own list; blocklist reloads require PG.
-func startCfgReloadSubscriber(s *Server) {
+func StartCfgReloadSubscriber(s *Server) {
 	if err := s.events.Subscribe(events.SubjectCfgReload, func(data []byte) {
 		var r struct {
 			Entity string `json:"entity"`

@@ -1,12 +1,12 @@
-package callstate
+package callcore
 
 import (
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/account"
-	"github.com/lixuanqun/gvos-core/internal/rate"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/rate"
 )
 
 func setup(t *testing.T, teardown TeardownFunc) (*Manager, *account.Store) {

@@ -2,7 +2,7 @@
 // (full-set replace / single removal), every change emits a
 // gvos.cfg.reload broadcast carrying the complete array (idempotent
 // replay for replicas and the Kamailio htable mirror).
-package main
+package api
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/lixuanqun/gvos-core/internal/events"
+	"github.com/lixuanqun/gvos-core/internal/shared/events"
 )
 
 // TestGatewayAdminAPI: replace, list, remove — each mutation
@@ -20,7 +20,7 @@ func TestGatewayAdminAPI(t *testing.T) {
 	s := NewServer()
 	cap := &capturePoster{}
 	s.events = events.NewWithPoster(cap)
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 	defer flush(s)
 

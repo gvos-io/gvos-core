@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/migrate"
+	"github.com/lixuanqun/gvos-core/internal/shared/migrate"
 )
 
 func main() {

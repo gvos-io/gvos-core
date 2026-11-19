@@ -12,11 +12,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/lixuanqun/gvos-core/internal/account"
-	"github.com/lixuanqun/gvos-core/internal/blocklist"
-	"github.com/lixuanqun/gvos-core/internal/callstate"
-	"github.com/lixuanqun/gvos-core/internal/gateway"
-	"github.com/lixuanqun/gvos-core/internal/rate"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
+	"github.com/lixuanqun/gvos-core/internal/callcore"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/gateway"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/rate"
 )
 
 // PG wraps the connection pool.
@@ -162,7 +162,7 @@ func (p *PG) LoadGateways(ctx context.Context) ([]gateway.Gateway, error) {
 // returns inserted=false when the row already exists — the caller then
 // skips dependent writes (ledger) so at-least-once delivery produces
 // exactly-once effects.
-func (p *PG) InsertCDR(ctx context.Context, c *callstate.CDR) (bool, error) {
+func (p *PG) InsertCDR(ctx context.Context, c *callcore.CDR) (bool, error) {
 	tag, err := p.pool.Exec(ctx, `
         INSERT INTO cdr (call_id, tenant_id, account_id, dest, dest_prefix,
                          start_time, end_time, duration, billed_secs,

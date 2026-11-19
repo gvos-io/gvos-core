@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"bufio"
@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/mediastream"
+	"github.com/lixuanqun/gvos-core/internal/mediamain/mediastream"
 )
 
 // TestMediaStreamEndToEnd: a raw TCP client upgrades to WebSocket,
@@ -21,7 +21,7 @@ import (
 // (visible to uplink subscribers), and reads the echo RTT telemetry.
 func TestMediaStreamEndToEnd(t *testing.T) {
 	s := NewServer()
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	// The call goes live (billing path creates it implicitly - the
@@ -149,7 +149,7 @@ func TestMediaStreamEndToEnd(t *testing.T) {
 // TestMediaStreamClosesWithCall: the call end event tears the stream.
 func TestMediaStreamClosesWithCall(t *testing.T) {
 	s := NewServer()
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	postStart(t, srv, "media-e2e-2", "8613800138000")

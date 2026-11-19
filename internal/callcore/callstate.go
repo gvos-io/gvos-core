@@ -2,16 +2,16 @@
 // locking plus interim deduction every interval, with forced teardown
 // when the balance runs dry (the VOS "real-time billing, forced
 // release" guarantee).
-package callstate
+package callcore
 
 import (
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/account"
-	"github.com/lixuanqun/gvos-core/internal/billing"
-	"github.com/lixuanqun/gvos-core/internal/rate"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/billing"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/rate"
 )
 
 // TeardownFunc is invoked when a live call must be torn down (balance

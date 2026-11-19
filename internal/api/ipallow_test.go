@@ -1,5 +1,5 @@
 // IP-allowlist admin API + snapshot endpoint + broadcast assertions.
-package main
+package api
 
 import (
 	"bytes"
@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/lixuanqun/gvos-core/internal/events"
-	"github.com/lixuanqun/gvos-core/internal/ipallow"
+	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/ipallow"
 )
 
 func TestIPAllowAdminAPI(t *testing.T) {
@@ -17,7 +17,7 @@ func TestIPAllowAdminAPI(t *testing.T) {
 	cap := &capturePoster{}
 	s.events = events.NewWithPoster(cap)
 
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	post := func(path string, body any, auth bool) (int, map[string]any) {
@@ -125,7 +125,7 @@ func TestIPAllowSnapshotEndpoint(t *testing.T) {
 		{ID: "a", CIDR: "10.0.0.0/8", Action: "allow"},
 	})
 
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	// Token unset -> endpoint disabled (503), never open.

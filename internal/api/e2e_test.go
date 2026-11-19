@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"bytes"
@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/account"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
 )
 
 // TestEndToEndCallFlow simulates the exact Kamailio event sequence for
@@ -20,9 +20,9 @@ func TestEndToEndCallFlow(t *testing.T) {
 	// Deterministic clock.
 	base := time.Unix(1_700_000_000, 0)
 	cur := base
-	s.calls.SetClock(func() time.Time { return cur })
+	SetClock(s, func() time.Time { return cur })
 
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	post := func(path string, body any) (int, map[string]any) {
@@ -85,7 +85,7 @@ func TestEndToEndCallFlow(t *testing.T) {
 // that cannot afford the estimate gets a 403 on INVITE.
 func TestInsufficientBalance403(t *testing.T) {
 	s := NewServer()
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	// Drain the caller: overwrite with a near-empty balance.
@@ -107,7 +107,7 @@ func TestInsufficientBalance403(t *testing.T) {
 // TestUnknownDestination404: unratable numbers are rejected cleanly.
 func TestUnknownDestination404(t *testing.T) {
 	s := NewServer()
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	b, _ := json.Marshal(map[string]string{
@@ -147,7 +147,7 @@ func approxEqual(a, b, tol float64) bool {
 // before rating/billing; removing the rule restores the call.
 func TestBlocklistRejectsCall(t *testing.T) {
 	s := NewServer()
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	call := func(dest string) int {
@@ -205,7 +205,7 @@ func TestBlocklistRejectsCall(t *testing.T) {
 // the burst caller mid-stream while a normal-rate caller continues.
 func TestRiskEngineBlocksBurst(t *testing.T) {
 	s := NewServer()
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	// Install a 3/min frequency block rule.

@@ -1,12 +1,12 @@
-package callstate
+package callcore
 
 import (
 	"errors"
 	"testing"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/account"
-	"github.com/lixuanqun/gvos-core/internal/rate"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/rate"
 )
 
 func limitSetup(t *testing.T) (*Manager, *account.Store) {

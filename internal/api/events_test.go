@@ -1,7 +1,7 @@
 // Event-bus integration: with a bus attached, the call lifecycle and
 // admin mutations publish events — including in memory mode (demo
 // deployments are a valid publisher target).
-package main
+package api
 
 import (
 	"bytes"
@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/account"
-	"github.com/lixuanqun/gvos-core/internal/events"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/shared/events"
 )
 
 // capturePoster records every published event (subject + decoded
@@ -60,7 +60,7 @@ func TestEventBusCallAndAdminEvents(t *testing.T) {
 	cur := base
 	s.calls.SetClock(func() time.Time { return cur })
 
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	post := func(path string, body any, auth bool) int {
@@ -125,7 +125,7 @@ func TestEventBusTeardown(t *testing.T) {
 	cur := base
 	s.calls.SetClock(func() time.Time { return cur })
 
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	// Caller with barely-affordable balance: lock (0.05) succeeds,
@@ -188,7 +188,7 @@ func TestEventBusCfgReloadBroadcast(t *testing.T) {
 	cap := &capturePoster{}
 	s.events = events.NewWithPoster(cap)
 
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	admin := func(path string, body any) int {
@@ -241,7 +241,7 @@ func TestEventBusCfgReloadBroadcast(t *testing.T) {
 // can monitor it alongside mode.
 func TestStatsNatsOff(t *testing.T) {
 	s := NewServer()
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 	code, stats := get(t, srv.URL+"/v1/stats")
 	if code != 200 || stats["nats"] != "off" {

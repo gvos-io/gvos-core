@@ -34,7 +34,7 @@ import (
 // (CDR, teardown reason, audit diff) — no envelope: each payload is
 // already self-describing and versioned through the stream itself.
 const (
-	SubjectCDRCompleted = "gvos.cdr.completed" // payload: callstate.CDR
+	SubjectCDRCompleted = "gvos.cdr.completed" // payload: callcore.CDR
 	SubjectCDRRaw       = "gvos.cdr.raw"       // payload: callEndReq (Kamailio-measured; CDRR consumer finalizes billing)
 	SubjectCallTeardown = "gvos.call.teardown" // payload: {call_id, reason}
 	SubjectRiskAlert    = "gvos.risk.alert"    // payload: {account, username, rule_id, reason, to}

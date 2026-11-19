@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"bytes"
@@ -7,13 +7,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/lixuanqun/gvos-core/internal/account"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
 )
 
 // TestAdminAuth guards all admin routes.
 func TestAdminAuth(t *testing.T) {
 	s := NewServer()
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/v1/admin/accounts")
@@ -41,7 +41,7 @@ func TestAdminAuth(t *testing.T) {
 // balance is used by the call path (memory mode).
 func TestAdminAccountLifecycle(t *testing.T) {
 	s := NewServer()
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	authed := func(method, path string, body any) (int, map[string]any) {
@@ -116,7 +116,7 @@ func TestAdminAccountLifecycle(t *testing.T) {
 // call without restart (memory mode).
 func TestAdminRateUpsertLiveEffect(t *testing.T) {
 	s := NewServer()
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	authedPost := func(path string, body any) (int, map[string]any) {
@@ -166,7 +166,7 @@ func TestAdminRateUpsertLiveEffect(t *testing.T) {
 // TestAdminValidation: bad inputs get clean 400s.
 func TestAdminValidation(t *testing.T) {
 	s := NewServer()
-	srv := httptest.NewServer(muxFor(s))
+	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
 	authedPost := func(path string, body any) int {

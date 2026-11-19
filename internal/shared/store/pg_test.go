@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/account"
-	"github.com/lixuanqun/gvos-core/internal/blocklist"
-	"github.com/lixuanqun/gvos-core/internal/callstate"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
+	"github.com/lixuanqun/gvos-core/internal/callcore"
 )
 
 func testDSN() string {
@@ -116,7 +116,7 @@ func TestInsertCDRAndLedger(t *testing.T) {
 	}
 	defer pg.Close()
 
-	cdr := &callstate.CDR{
+	cdr := &callcore.CDR{
 		CallID:     "test-cdr-1",
 		AccountID:  "00000000-0000-0000-0000-0000000000a3",
 		Dest:       "8613800138000",

@@ -9,7 +9,7 @@
 //	    header[0] == 0 -> uplink chunk   (caller audio, ASR input)
 //	    header[0] == 1 -> downlink chunk (network audio, what caller hears)
 //	client->server text frame "echo" -> RTT sample against the budget
-package main
+package api
 
 import (
 	"bufio"
@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/mediastream"
+	"github.com/lixuanqun/gvos-core/internal/mediamain/mediastream"
 )
 
 // handleMediaStream upgrades and runs the media loop.

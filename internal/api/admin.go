@@ -1,7 +1,7 @@
 // Admin API: management endpoints for accounts and rates. Every
 // mutating call writes an audit row (PG mode) and updates the live
 // in-memory snapshot so Kamailio-facing behavior changes immediately.
-package main
+package api
 
 import (
 	"context"
@@ -13,15 +13,15 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/account"
-	"github.com/lixuanqun/gvos-core/internal/blocklist"
-	"github.com/lixuanqun/gvos-core/internal/events"
-	"github.com/lixuanqun/gvos-core/internal/gateway"
-	"github.com/lixuanqun/gvos-core/internal/ipallow"
-	"github.com/lixuanqun/gvos-core/internal/mediastream"
-	"github.com/lixuanqun/gvos-core/internal/pkgplan"
-	"github.com/lixuanqun/gvos-core/internal/rate"
-	"github.com/lixuanqun/gvos-core/internal/riskctrl"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
+	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/gateway"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/ipallow"
+	"github.com/lixuanqun/gvos-core/internal/mediamain/mediastream"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/pkgplan"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/rate"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/riskctrl"
 )
 
 const demoTenant = "00000000-0000-0000-0000-000000000001"
