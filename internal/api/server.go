@@ -650,4 +650,8 @@ func AttachRedis(s *Server, c *rds.Client) {
 	// Phase 2: the shared admission ledger (chain-mirrored ZSETs +
 	// per-second CPS counters) closes the ×N concurrent/CPS oversell.
 	s.calls.SetAdmissionLedger(callcore.NewAdmissionR(c))
+	// Phase 3: shared risk windows (freq/reg sliding ZSETs, day-cost
+	// accumulators) — fail-open, the fraud engine never gates the
+	// platform.
+	s.risk.SetRiskRedis(riskctrl.NewRiskR(c))
 }

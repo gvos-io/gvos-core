@@ -10,6 +10,7 @@
 package riskctrl
 
 import (
+	"context"
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"strings"
@@ -46,6 +47,7 @@ type Engine struct {
 	// per-user rolling registration timestamps (reg_freq windows),
 	// fed by the gvos.reg.event consumer on the bus
 	regs map[string][]int64 // user -> unix seconds
+	rr   *RiskR             // redis aggregate face (nil = local windows)
 	now  func() time.Time
 	cur  *time.Time // tests: shared clock handle
 }
@@ -61,6 +63,10 @@ func New() *Engine {
 
 // SetClock overrides the time source (tests).
 func (e *Engine) SetClock(f func() time.Time) { e.now = f }
+
+// SetRiskRedis wires the shared aggregate face (Phase 3). Local
+// windows stay as the fail-open fallback and single-replica truth.
+func (e *Engine) SetRiskRedis(r *RiskR) { e.rr = r }
 
 // SetRules atomically replaces the rule set (admin plane).
 func (e *Engine) SetRules(rules []Rule) {
@@ -107,6 +113,19 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 		}
 		switch r.Kind {
 		case "freq":
+			// Redis face: the shared sliding window counts every
+			// replica's calls (Phase 3). Fail-open to local on error.
+			if e.rr != nil {
+				n, err := e.rr.SlidingCount(context.Background(), rfreqKey(account), now)
+				if err == nil {
+					if n > r.Limit {
+						hit = decide(hit, r, fmt.Sprintf("%d calls/min exceeds %d (shared)", n, r.Limit))
+						continue
+					}
+					continue
+				}
+				warn("freq window", err)
+			}
 			// calls in the trailing minute (inclusive of this attempt)
 			cutoff := now.Unix() - 60
 			ts := e.calls[account]
@@ -123,6 +142,16 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 			}
 		case "cost_day":
 			day := dayKey(now)
+			if e.rr != nil {
+				spent, err := e.rr.CostDayGet(ctx0(), day, account)
+				if err == nil {
+					if spent.Add(estCost) > money.MustFromYuan(r.CostLimit) {
+						hit = decide(hit, r, fmt.Sprintf("daily cost %s+%s exceeds %.2f (shared)", spent, estCost, r.CostLimit))
+					}
+					continue
+				}
+				warn("cost_day get", err)
+			}
 			spent := e.dayCost[day][account]
 			if spent.Add(estCost) > money.MustFromYuan(r.CostLimit) {
 				hit = decide(hit, r, fmt.Sprintf("daily cost %s+%s exceeds %.2f", spent, estCost, r.CostLimit))
@@ -144,13 +173,21 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 	}
 
 	if !hit.Blocked {
-		// Admitted: advance counters.
+		// Admitted: advance counters (both faces: redis is the shared
+		// truth, local keeps the fail-open fallback warm).
 		e.calls[account] = append(e.calls[account], now.Unix())
 		day := dayKey(now)
 		if e.dayCost[day] == nil {
 			e.dayCost[day] = map[string]money.Amount{}
 		}
 		e.dayCost[day][account] += estCost
+		if e.rr != nil {
+			// freq window already advanced inside SlidingCount; the day
+			// accumulator is advanced here (evaluate read, admit writes).
+			if _, err := e.rr.CostDayAdd(ctx0(), day, account, estCost); err != nil {
+				warn("cost_day add", err)
+			}
+		}
 	}
 	return hit
 }
@@ -158,6 +195,12 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 // SettleCost adjusts the daily accumulation when the actual cost
 // differs from the estimate (call end reconciliation).
 func (e *Engine) SettleCost(account string, estCost, actualCost money.Amount) {
+	if e.rr != nil {
+		day := dayKey(e.now())
+		if err := e.rr.CostDaySub(ctx0(), day, account, estCost.Sub(actualCost)); err != nil {
+			warn("cost_day settle", err)
+		}
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	day := dayKey(e.now())
@@ -179,6 +222,25 @@ func (e *Engine) CheckReg(user string) Hit {
 	now := e.now()
 	var hit Hit
 
+	// Redis face: shared registration-storm window (Phase 3).
+	if e.rr != nil {
+		n, rerr := e.rr.SlidingCount(ctx0(), gfreqKey(user), now)
+		if rerr == nil {
+			for _, r := range e.rules {
+				if r.Disabled || r.Kind != "reg_freq" {
+					continue
+				}
+				if r.Account != "" && r.Account != user {
+					continue
+				}
+				if n > r.Limit {
+					hit = decide(hit, r, fmt.Sprintf("%d registrations/min exceeds %d (shared)", n, r.Limit))
+				}
+			}
+			return hit // window already advanced inside SlidingCount
+		}
+		warn("reg window", rerr)
+	}
 	ts := e.regs[user]
 	cutoff := now.Unix() - 60
 	recent := ts[:0]
