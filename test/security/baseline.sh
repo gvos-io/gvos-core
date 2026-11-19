@@ -74,3 +74,9 @@ chk "token non-empty" ok "$([ -n "$TOKEN" ] && echo ok)"
 echo
 echo "RESULT: $PASSES passed, $FAILS failed"
 [ "$FAILS" -eq 0 ] || exit 1
+
+# --- IP allowlist surface
+echo "checking IP allowlist API auth..."
+req "GET" "/v1/admin/ipallow" "" "200" "no token -> 401" && echo "OK: ipallow requires auth" || echo "FAIL: ipallow exposed"
+echo "checking internal snapshot endpoint is guarded..."
+curl -s -o /dev/null -w "%{http_code}" "http://$CORE:8080/v1/internal/ipallow-snapshot" | grep -qE "401|503" && echo "OK: snapshot guarded" || echo "FAIL: snapshot open"

@@ -124,3 +124,29 @@ docker exec -i gvos-postgres-1 psql -U gvos < migrations/00N_xxx.sql
 - 工单/邮件：support@gvos.example
 - 安全漏洞：security@gvos.example（PGP 可用，72h 响应）
 - 升级窗口建议：话务低谷期（本地时间 03:00-05:00），提前 24h 备份
+
+## IP 白名单（源 IP 准入）
+
+管理入口（Bearer admin token）：
+
+```bash
+# 全量替换规则（空表 = 默认拒绝所有 SIP 源）
+curl -X POST -H "Authorization: Bearer <token>"   -d '{"rules":[{"id":"office","cidr":"203.0.113.0/24","action":"allow"},
+                {"id":"quarantine","cidr":"203.0.113.66/32","action":"deny"}]}'   http://<gv-core>:8080/v1/admin/ipallow
+
+# 查看当前规则
+curl -H "Authorization: Bearer <token>" http://<gv-core>:8080/v1/admin/ipallow
+
+# 删除单条
+curl -X POST -H "Authorization: Bearer <token>"   -d '{"remove_id":"quarantine"}' http://<gv-core>:8080/v1/admin/ipallow
+```
+
+语义与传播路径：
+
+- **默认拒绝**：未命中任何 allow 规则的源一律 403；deny 规则优先于 allow（例外语义）
+- 变更即时广播到所有 gv-core 副本（`gvos.cfg.reload`）；Kamailio 信令节点每 30s 经
+  `/v1/internal/ipallow-snapshot` 拉取版本化快照到内存 htable，快照未加载前 fail-open（日志可见）
+- 规则持久化在 `settings` 表（`ip_allowlist` key），重启恢复
+- Kamailio 侧需设置环境变量：`GVOS_CORE_HOST`（gv-core 地址）与 `GVOS_INTERNAL_TOKEN`
+  （内部快照令牌，必须与 gv-core 一致；生产环境更换默认值）
+- Digest HA1 认证走 authcache htable（24h TTL）——稳态下每通呼叫 0 次 PG 查询

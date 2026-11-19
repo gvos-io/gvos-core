@@ -28,6 +28,7 @@
 | **计费引擎** | 前缀最长匹配（10 万条费率 133ns/次）、时段窗口（节假日/夜间）、步长 60+6 / 6+6 / 1+1 / N+M、首步价/增量价 |
 | **账户体系** | 租户→多级代理→账户树、全链路原子预锁定（all-or-nothing 回滚）、后付账户、并发/CPS 限额 |
 | **实时风控** | 频次/日成本/地区准入规则（block/alert）、黑白名单（前缀索引 220ns/次）、余额耗尽强制拆线 |
+| **IP 准入** | 源 IP 白名单（CIDR、默认拒绝、deny 例外）：HTTP API 管理 → NATS 广播同步 → Kamailio htable 内存匹配（信令边缘零 DB 查询）；Digest HA1 同样走 htable 缓存 |
 | **事件总线** | NATS JetStream：CDR 流、审计流、拆线指令队列、Webhook 分发（NAK 重投 + MaxDeliver 防毒丸）、多副本配置广播 |
 | **套餐引擎** | 日/月免费额度、折扣、最低消费，按周期计数 |
 | **AI 语音** | 通话媒体流 WebSocket 出站 + DashScope ASR 桥接（实时转写） |
@@ -95,12 +96,15 @@ Windows 开发机（i7-13700H，双副本 + 真 PG/NATS），方法与原始数�
 - SIP 数据面配置（Kamailio cfg / rtpengine）为 spike 级：单节点可用，生产级调优与大规模验证在进行中
 - 余额权威当前在各副本内存（预锁定语义正确），生产部署按路线图换 Redis 收口
 - 管理令牌默认 `dev-admin-token`、DB 密码 `gvos_dev`——均为演示默认值，**生产部署必须更换**（见 [operations manual](docs/operations-manual.md)）
+- IP 白名单空表 = 默认拒绝（Kamailio 首个快照加载前短暂 fail-open）；演示环境内部令牌 `dev-internal-token`，生产必须更换 `GVOS_INTERNAL_TOKEN`
 - TLS 证书未随仓库分发，部署时自签：`openssl req -x509 -newkey rsa:2048 -nodes -keyout kamailio-key.pem -out kamailio-cert.pem -days 365 -subj "/CN=gvos.local"`
 - PRD 中 20 万注册、媒体面大规模压测为进行中目标
 
 ## 文档
 
-- [架构设计](docs/02-architecture.md) · [运维手册](docs/operations-manual.md)
+- [架构设计](docs/02-architecture.md) · [部署规划](docs/deployment-plan.md) · [运维手册](docs/operations-manual.md)
+- [竞品对标（昆石 VOS/SBC）](docs/competitive-analysis-vos-sbc.md)（功能差距 + 排期输入）
+- [Redis 收口方案](docs/redis-adoption-plan.md)（规划稿）
 - [自测报告（130 项）](docs/bench/selftest-report-2026-11-19.md) · [容量报告 v0.4](docs/bench/capacity-report-2026-11-19.md) · [验收报告 v0.3](docs/bench/acceptance-report-2026-10-07.md)
 
 ## 参与
