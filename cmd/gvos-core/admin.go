@@ -16,6 +16,8 @@ import (
 	"github.com/lixuanqun/gvos-core/internal/account"
 	"github.com/lixuanqun/gvos-core/internal/blocklist"
 	"github.com/lixuanqun/gvos-core/internal/events"
+	"github.com/lixuanqun/gvos-core/internal/gateway"
+	"github.com/lixuanqun/gvos-core/internal/ipallow"
 	"github.com/lixuanqun/gvos-core/internal/mediastream"
 	"github.com/lixuanqun/gvos-core/internal/pkgplan"
 	"github.com/lixuanqun/gvos-core/internal/rate"
@@ -412,6 +414,170 @@ func (s *Server) handleRiskRules(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"rules": len(req.Rules)})
 }
 
+// POST /v1/admin/ipallow {"rules":[{"id","cidr","action","note"}]}
+// replaces the source-IP allowlist (full-set semantics, same as risk
+// rules); {"remove_id":"x"} removes one rule instead. GET lists the
+// current set. Empty set = default-deny (no SIP source is admitted).
+func (s *Server) handleIPAllow(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		var req struct {
+			Rules    []ipallow.Rule `json:"rules"`
+			RemoveID string         `json:"remove_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, 400, "body required")
+			return
+		}
+		if req.RemoveID != "" {
+			current := s.ipallow.Rules()
+			kept := current[:0:0]
+			removed := false
+			for _, ru := range current {
+				if ru.ID == req.RemoveID {
+					removed = true
+					continue
+				}
+				kept = append(kept, ru)
+			}
+			if !removed {
+				httpError(w, 404, "rule not found: "+req.RemoveID)
+				return
+			}
+			before := current
+			if s.pg != nil {
+				if err := s.pg.PutSetting(r.Context(), "ip_allowlist", kept); err != nil {
+					httpError(w, 500, err.Error())
+					return
+				}
+			}
+			s.ipallow.Reload(kept)
+			s.audit(r, "remove", "ip_allowlist", req.RemoveID, before, kept)
+			s.emit(events.SubjectCfgReload, ipAllowPayload(kept))
+			writeJSON(w, 200, map[string]any{"removed": req.RemoveID, "rules": len(kept)})
+			return
+		}
+		// Full-set replace: validate every rule before touching state.
+		for _, ru := range req.Rules {
+			if err := ipallow.Validate(ru); err != nil {
+				httpError(w, 400, err.Error())
+				return
+			}
+		}
+		before := s.ipallow.Rules()
+		if s.pg != nil {
+			if err := s.pg.PutSetting(r.Context(), "ip_allowlist", req.Rules); err != nil {
+				httpError(w, 500, err.Error())
+				return
+			}
+		}
+		s.ipallow.Reload(req.Rules)
+		s.audit(r, "replace", "ip_allowlist", "", before, req.Rules)
+		s.emit(events.SubjectCfgReload, ipAllowPayload(req.Rules))
+		writeJSON(w, 200, map[string]any{"rules": len(req.Rules)})
+	case http.MethodGet:
+		writeJSON(w, 200, map[string]any{"rules": s.ipallow.Rules(), "count": s.ipallow.Count()})
+	default:
+		httpError(w, 405, "POST or GET")
+	}
+}
+
+// POST /v1/admin/gateways — full-set replace or single removal.
+//   {"gateways": [{id,name,sip_addr,protocol,priority,weight,enabled}]}
+//   {"remove_id": "<gateway id>"}
+// The set is API-authoritative: PG settings persist it for restart,
+// the NATS broadcast (entity "gateway", full array payload) drives
+// peer replicas and the Kamailio htable mirror. Full-array payloads
+// make replay idempotent.
+func (s *Server) handleGatewaySet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) || !requirePOST(w, r) {
+		return
+	}
+	var req struct {
+		Gateways []gateway.Gateway `json:"gateways"`
+		RemoveID string            `json:"remove_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, 400, err.Error())
+		return
+	}
+
+	current := s.gws.Gateways()
+
+	if req.RemoveID != "" {
+		kept := make([]gateway.Gateway, 0, len(current))
+		removed := false
+		for _, g := range current {
+			if g.ID == req.RemoveID {
+				removed = true
+				continue
+			}
+			kept = append(kept, g)
+		}
+		if !removed {
+			httpError(w, 404, "gateway not found: "+req.RemoveID)
+			return
+		}
+		if s.pg != nil {
+			if err := s.pg.PutSetting(r.Context(), "gateways", kept); err != nil {
+				httpError(w, 500, err.Error())
+				return
+			}
+		}
+		if _, err := s.gws.Reload(kept); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		s.audit(r, "remove", "gateway", req.RemoveID, current, kept)
+		s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": kept})
+		writeJSON(w, 200, map[string]any{"removed": req.RemoveID, "gateways": len(kept)})
+		return
+	}
+
+	// Full-set replace: validate every entry before touching state.
+	for _, g := range req.Gateways {
+		if err := gateway.Validate(g); err != nil {
+			httpError(w, 400, err.Error())
+			return
+		}
+	}
+	if s.pg != nil {
+		if err := s.pg.PutSetting(r.Context(), "gateways", req.Gateways); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+	}
+	if _, err := s.gws.Reload(req.Gateways); err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	s.audit(r, "replace", "gateway", "", current, req.Gateways)
+	s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": req.Gateways})
+	writeJSON(w, 200, map[string]any{"gateways": len(req.Gateways)})
+}
+
+// GET /v1/admin/gateways
+func (s *Server) handleGatewayList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	writeJSON(w, 200, map[string]any{"gateways": s.gws.Gateways(), "count": s.gws.Count()})
+}
+
+// GET /v1/admin/registrations — the network-wide SIP registration
+// mirror (fed by gvos.reg.event from the signaling nodes).
+func (s *Server) handleRegList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"registrations": s.regs.Entries(), "count": s.regs.Count(), "online": s.regs.Online(),
+	})
+}
+
 // POST /v1/admin/stream-push {"call_id","direction":"uplink|downlink","audio":<base64 or raw>}
 // Test hook: pushes telephony-side audio into a live call's media
 // stream (drives ASR bridges without a real caller). Audio is base64
@@ -690,4 +856,24 @@ func requireGET(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+
+// ipAllowPayload builds the ip_allowlist broadcast: the rule array for
+// audit/replicas plus the pre-joined CIDR lists the Kamailio edge
+// consumes directly (its jansson path notation cannot index arrays
+// with dynamic variables).
+func ipAllowPayload(rules []ipallow.Rule) map[string]any {
+	var allows, denies string
+	for _, ru := range rules {
+		if ru.Action == ipallow.Deny {
+			denies += ru.CIDR + ","
+		} else {
+			allows += ru.CIDR + ","
+		}
+	}
+	return map[string]any{
+		"entity": "ip_allowlist", "rules": rules,
+		"allow_cidrs": allows, "deny_cidrs": denies,
+	}
 }

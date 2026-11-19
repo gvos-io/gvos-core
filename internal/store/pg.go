@@ -15,6 +15,7 @@ import (
 	"github.com/lixuanqun/gvos-core/internal/account"
 	"github.com/lixuanqun/gvos-core/internal/blocklist"
 	"github.com/lixuanqun/gvos-core/internal/callstate"
+	"github.com/lixuanqun/gvos-core/internal/gateway"
 	"github.com/lixuanqun/gvos-core/internal/rate"
 )
 
@@ -122,6 +123,38 @@ func (p *PG) LoadRates(ctx context.Context, group string) (*rate.Table, error) {
 		return nil, err
 	}
 	return rate.NewTable(rates), nil
+}
+
+// LoadGateways reads the legacy gateways table as the restart
+// fallback (used once, when no "gateways" setting exists — the
+// admin API owns the live set from then on and never writes here).
+// Priority maps onto the dispatcher-compatible dspriority column;
+// missing columns default to 0 = first choice.
+func (p *PG) LoadGateways(ctx context.Context) ([]gateway.Gateway, error) {
+	rows, err := p.pool.Query(ctx, `
+        SELECT id::text, name, sip_addr, coalesce(protocol, 'udp'),
+               coalesce(dspriority, 0), coalesce(weight, 100),
+               (locked_until IS NULL OR locked_until < now())
+        FROM gateways
+        WHERE deleted_at IS NULL
+        ORDER BY coalesce(dspriority, 0), name`)
+	if err != nil {
+		return nil, fmt.Errorf("query gateways: %w", err)
+	}
+	defer rows.Close()
+
+	var gws []gateway.Gateway
+	for rows.Next() {
+		var g gateway.Gateway
+		if err := rows.Scan(&g.ID, &g.Name, &g.SipAddr, &g.Protocol, &g.Priority, &g.Weight, &g.Enabled); err != nil {
+			return nil, fmt.Errorf("scan gateway: %w", err)
+		}
+		gws = append(gws, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return gws, nil
 }
 
 // InsertCDR persists one billing record into the monthly-partitioned

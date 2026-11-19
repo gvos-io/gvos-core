@@ -33,7 +33,7 @@
 └──────────────────────────────────────────────────────────────────────────┘
 ┌────────────────────────────── 存储与消息 ──────────────────────────────────┐
 │ PostgreSQL（账户/费率/路由/CDR 热数据）│ Redis（余额/会话/注册快照）             │
-│ NATS 或 Kafka（事件总线：CDR 流、告警、Webhook）│ 对象存储（录音/导出）          │
+│ NATS（事件总线：CDR 流、告警、Webhook）│ 对象存储（录音/导出）                    │
 │ Prometheus + Grafana（监控）│ Patroni（PostgreSQL HA）                       │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -46,7 +46,7 @@
 | RTPengine 做媒体 | 内核态转发性能、DTLS/SRTP/ICE 全支持、**录音 fork 原生**（P1 录音模块直接受益） | FreeSWITCH 全量做媒体（单进程瓶颈，10k 端口级），自研 RTP（无必要） |
 | Go 写控制平面 | 内存安全（C 语言信令栈历史漏洞的教训）、goroutine 模型适合高并发事件处理、招聘容易 | Java（重）、Rust（电信场景库少、招人难——可在风控/协议热路径局部使用） |
 | PostgreSQL + Patroni | 关系型适合计费/账务，成熟 HA | MySQL（可以但无优势）；Mongo（账务场景事务弱） |
-| NATS（首选）/Kafka | 轻量、单二进制、JetStream 持久化够用；Kafka 留给客户要求集成的场景 | RabbitMQ（可用，更新慢） |
+| NATS | 轻量、单二进制、JetStream 持久化够用、Go 客户端一流；Kamailio 有原生 nats 模块（5.5+），事件总线全链路单一技术栈 | Kafka（重，运维成本高，仅客户强制集成时再加桥接层）；RabbitMQ（可用，更新慢） |
 
 ## 3. 核心数据流
 
@@ -62,10 +62,19 @@
 - 通话进行中：RTPengine 每 10s 上报活动 → CDR 管道累计时长 → 余额扣减（Redis 原子操作）→ 低于阈值（min_balance）时由控制平面发起 **SIP CANCEL/BYE 强制拆线**（预算拆线延迟 <1s，这是验收硬指标）。
 - 通话结束：Kamailio 生成完整 SIP 计时事件 → CDR 管道补全（QoS 字段来自 RTPengine 统计）→ 落 PostgreSQL（热）+ Parquet（冷，对象存储）→ 触发 Webhook/报表事件。
 
-### 3.3 配置下发
+### 3.3 配置下发（NATS 广播驱动）
 
-- 管理台改费率/路由 → 控制平面版本化写入 PostgreSQL → 生成快照（路由表/费率前缀树/账户限额）→ 推送 Kamailio 内存（memcache 协议或 RPC）+ 各节点 ack → 审计日志记录前后值。
+- 管理台/API 是唯一管理入口：变更先写 PostgreSQL settings（重启兜底），随后以**全量快照载荷广播** `gvos.cfg.reload`（网关表/IP 准入/黑名单前缀等），gv-core 各副本与 Kamailio 信令节点各自订阅应用、本地生效——**Kamailio 侧零 PG 依赖**（dispatcher db_url 已移除，选路读 NATS 镜像的 gw htable）。
+- 广播是 core NATS（at-most-once）：控制面每 60s 周期性重播全量快照作为对账心跳，节点重连/重启后最多 60s 收敛（Kamailio nats 模块无 JetStream 回放能力，重播即兜底）。
+- **Kamailio 订阅点号 subject 的词法限制**：event_route 名称不允许点号，边缘订阅走 gv-core 双发的无点别名（gvos-edge-cfg / gvos-edge-risk / gvos-edge-tear），载荷与正名完全一致。
 - **目标：费率变更 60s 内全节点生效**（传统方案需要"定时替换费率"批处理窗口，这里做成实时+原子）。
+
+### 3.4 风控与注册的边缘联动
+
+- 风控告警（`gvos.risk.alert`，载荷带 SIP username）→ Kamailio banned htable（1h 自动过期）→ 下一通 INVITE 在 SIP 边缘直接 403，零控制面往返。
+- 注册事件（`gvos.reg.event`，save/expiry 钩子发布）→ gv-core 注册镜像（`/v1/admin/registrations`）+ reg_freq 风控规则（注册风暴告警）。
+- 被叫黑名单前缀镜像到 Kamailio bl htable，边缘前缀筛查直接 403（正则/白名单语义留在控制面，双层防御）。
+- 强制拆线：`gvos.call.teardown` 广播到全部信令节点，持有 dialog 的节点经 RPC `dlg.terminate_dlg` 终结通话（持有者执行、其余 no-op）；TEARDOWN durable 消费者在节点全下线时保留指令、重启后补发。
 
 ## 4. 容量与性能预算（v1.0 硬指标）
 
@@ -133,5 +142,5 @@ CI 硬门槛：单测覆盖 ≥70%（计费引擎 ≥90%）、金数据话单回
 - **M3**：端到端 1 通计费通话（INVITE→锁定→BYE→CDR→扣费）+ 单测框架。
 - **M8**：单节点 2,000 并发/300 CPS 压测报告 v1 + docker-compose 一键部署。
 - **M12（GA）**：双机 HA 演练视频 + 渗透测试报告 + Helm chart + 迁移工具 beta。
-- **M15**：API/Webhook 全覆盖 + 风控引擎 + Prometheus 业务面板。
+- **M15**：API/Webhook 全覆盖 + 风控引擎 + Prometheus 业务面板（API 半壁的实施计划见 [api-roadmap.md](api-roadmap.md)：五平面分面、API Key、租户自助面、Webhook 引擎）。
 - **M18**：WebSocket 媒体流 beta（Kamailio WebSocket→RTPengine→fork 到 AI 管道，端到端延迟 <500ms）。

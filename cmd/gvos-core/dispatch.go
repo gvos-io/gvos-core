@@ -13,14 +13,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/lixuanqun/gvos-core/internal/account"
 	"github.com/lixuanqun/gvos-core/internal/blocklist"
 	"github.com/lixuanqun/gvos-core/internal/callstate"
 	"github.com/lixuanqun/gvos-core/internal/events"
+	"github.com/lixuanqun/gvos-core/internal/gateway"
+	"github.com/lixuanqun/gvos-core/internal/ipallow"
 	"github.com/lixuanqun/gvos-core/internal/pkgplan"
 	"github.com/lixuanqun/gvos-core/internal/riskctrl"
 )
@@ -80,12 +84,47 @@ func startAsyncWorkers(s *Server) {
 	}
 }
 
-// dispatchTeardown is the teardown executor seam: sends CANCEL/BYE
-// via Kamailio in production; the spike logs. Invoked by the TEARDOWN
-// worker (bus on) or directly from the billing callback (no bus).
+// teardownTarget is the Kamailio signaling-plane API the teardown
+// executor drives: JSON-RPC (jsonrpcs module, ctl/http transports).
+// The URL is the environment seam (GVOS_KAMAILIO_RPC, e.g.
+// "http://kamailio:5060/RPC"); empty = executor logs only.
+var teardownTarget = os.Getenv("GVOS_KAMAILIO_RPC")
+
+// dispatchTeardown is the teardown executor: terminates the call on
+// the Kamailio node that holds the dialog. Primary path is the bus —
+// the teardown event itself IS the instruction (every Kamailio node
+// subscribes; the one holding the dialog terminates it, others
+// no-op), and the TEARDOWN durable consumer persists retries while
+// the executor is down. This function is the offline seam: a direct
+// JSON-RPC dlg.terminate_dlg for the no-bus / NATS-down shape, so the
+// <1s forced-release budget has a second road to the edge.
 func dispatchTeardown(callID, reason string) {
-	// Production executor slot: send CANCEL/BYE via Kamailio here.
-	log.Printf("TEARDOWN dispatch call=%s reason=%s", callID, reason)
+	if teardownTarget == "" {
+		log.Printf("TEARDOWN dispatch call=%s reason=%s (no GVOS_KAMAILIO_RPC: bus path only)", callID, reason)
+		return
+	}
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "method": "dlg.terminate_dlg",
+		"params": map[string]any{"callid": callID}, "id": 1,
+	})
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, teardownTarget, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("TEARDOWN rpc build failed for %s: %v", callID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		// Bus path remains: the durable consumer redelivers, and the
+		// Kamailio subscription may already have handled it.
+		log.Printf("TEARDOWN rpc failed for %s (bus path unaffected): %v", callID, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		log.Printf("TEARDOWN rpc rejected for %s: status %d", callID, resp.StatusCode)
+	}
 }
 
 func (s *Server) teardownDispatchHandler(data []byte) error {
@@ -198,6 +237,141 @@ func (e *webhookStatusError) Error() string {
 	return "webhook endpoint returned status " + http.StatusText(e.code)
 }
 
+// gatewayApply applies one decoded cfg.reload gateway payload (the
+// full-array set; idempotent). Shared by the bus subscriber and tests.
+func (s *Server) gatewayApply(m map[string]any) error {
+	raw, err := json.Marshal(m["gateways"])
+	if err != nil {
+		return err
+	}
+	var gws []gateway.Gateway
+	if err := json.Unmarshal(raw, &gws); err != nil {
+		return err
+	}
+	n, err := s.gws.Reload(gws)
+	if err == nil {
+		log.Printf("CFG-RELOAD gateway set applied via bus (%d entries)", n)
+	}
+	return err
+}
+
+// payloadOf decodes a broadcast body to a generic map (subscriber
+// entity dispatch).
+func payloadOf(data []byte) map[string]any {
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return map[string]any{}
+	}
+	return m
+}
+
+// startRegConsumer mirrors the signaling nodes' registration events
+// (gvos.reg.event) into the reg table and feeds the risk engine's
+// reg_freq rules. An alert hit rides the existing risk.alert subject
+// so the Kamailio banned htable (and any webhook) sees it exactly
+// like a call-path alert. Plain subscribe: every replica maintains a
+// full mirror; the table is observability, not work distribution.
+func startRegConsumer(s *Server) {
+	if err := s.events.Subscribe(events.SubjectRegEvent, func(data []byte) {
+		var ev struct {
+			User    string `json:"user"`
+			Op      string `json:"op"` // "reg" | "expire"
+			Expires int64  `json:"expires"`
+			SrcIP   string `json:"src_ip"`
+		}
+		if err := json.Unmarshal(data, &ev); err != nil || ev.User == "" {
+			log.Printf("REG bad payload: %v", err)
+			return
+		}
+		s.regs.Apply(ev.User, ev.Op, ev.Expires, ev.SrcIP, time.Now())
+		if ev.Op == "reg" {
+			if h := s.risk.CheckReg(ev.User); h.Alerted {
+				log.Printf("RISK-ALERT reg user=%s rule=%s: %s", ev.User, h.RuleID, h.Reason)
+				s.emit(events.SubjectRiskAlert, map[string]string{
+					"user": ev.User, "username": ev.User, "rule_id": h.RuleID, "reason": h.Reason, "src_ip": ev.SrcIP,
+				})
+			}
+		}
+	}); err != nil {
+		log.Printf("registration mirror disabled: %v", err)
+	}
+}
+
+// cdrRawHandler is the CDRR consumer body: finalizes billing from
+// the signaling edge's raw call-end events (gvos.cdr.raw — Kamailio
+// nats_publish instead of the /v1/call/end HTTP call). Payload is the
+// callEndReq shape; callEnd is the same pure function the HTTP face
+// uses, so the two transports cannot diverge.
+func cdrRawHandler(s *Server) func(data []byte) error {
+	return func(data []byte) error {
+		var req callEndReq
+		if err := json.Unmarshal(data, &req); err != nil || req.CallID == "" {
+			return fmt.Errorf("bad cdr.raw payload: %w", err)
+		}
+		code, body := s.callEnd(context.Background(), req)
+		if code >= 400 {
+			return fmt.Errorf("callEnd rejected call=%s: %v", req.CallID, body)
+		}
+		return nil
+	}
+}
+
+// startCdrRawConsumer runs the cdr.raw finalizer: durable
+// (at-least-once) in JetStream mode — uq_cdr_call collapses
+// redeliveries; plain subscribe in core mode (degraded single-node
+// shape, same as the teardown fallback).
+func startCdrRawConsumer(s *Server) {
+	handler := cdrRawHandler(s)
+	if c, err := s.events.NewDurableConsumer("CDRR", events.SubjectCDRRaw, handler, 1); err != nil {
+		if err2 := s.events.Subscribe(events.SubjectCDRRaw, func(data []byte) {
+			_ = handler(data)
+		}); err2 != nil {
+			log.Printf("cdr.raw consumer disabled: %v / %v", err, err2)
+			return
+		}
+		log.Printf("cdr.raw consumer running in broadcast mode (no JetStream)")
+		return
+	} else {
+		s.workers = append(s.workers, c)
+	}
+	s.workerNames = append(s.workerNames, "cdrr")
+}
+
+// startCfgRebroadcaster re-publishes the edge-facing snapshots
+// (gateway, ip_allowlist, blocklist) every 60s. The Kamailio nats
+// subscriptions are core NATS (at-most-once): a node that was down or
+// reconnecting when a change landed never sees that message, and the
+// nats module has no JetStream replay. A periodic full-array replay
+// heals the gap — at most one minute of drift on the edge. All
+// payloads are full-array and idempotent, so replicas and the edge
+// can apply them any number of times.
+func startCfgRebroadcaster(s *Server) {
+	go func() {
+		t := time.NewTicker(60 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": s.gws.Gateways()})
+			// ip_allowlist: pre-joined CIDR lists (ipAllowPayload) —
+			// the edge cannot rebuild them from the rules array.
+			s.emit(events.SubjectCfgReload, ipAllowPayload(s.ipallow.Rules()))
+			// Blocklist: full replay from the live compiled set (the
+			// per-op broadcasts carry single entries only). add-ops are
+			// idempotent on every consumer.
+			for _, e := range s.blocklist.Snapshot() {
+				// Lowercase keys: the Kamailio BL_APPLY route parses
+				// kind/scope/pattern (the Go struct field names would
+				// serialize capitalized and never match).
+				s.emit(events.SubjectCfgReload, map[string]any{
+					"entity": "blocklist", "op": "add",
+					"entry": map[string]any{
+						"kind": e.Kind, "scope": e.Scope, "pattern": e.Pattern,
+					},
+				})
+			}
+		}
+	}()
+}
+
 // startCallSvc exposes the call lifecycle over NATS request/reply —
 // the same core logic as the HTTP face (callStart/callAnswer/callEnd),
 // reply envelope {code, body} carries the HTTP status so bus clients
@@ -273,6 +447,10 @@ func startCfgReloadSubscriber(s *Server) {
 		case "rate":
 			s.rebuildRates()
 			log.Printf("CFG-RELOAD rate snapshot rebuilt via bus")
+		case "gateway":
+			if err := s.gatewayApply(payloadOf(data)); err != nil {
+				log.Printf("CFG-RELOAD gateway apply failed: %v", err)
+			}
 		case "blocklist":
 			// Operation payload: peers apply the rule change directly
 			// (reloading from PG here would revert memory-only state).
@@ -371,6 +549,19 @@ func startCfgReloadSubscriber(s *Server) {
 			}
 			s.risk.SetRules(op.Rules)
 			log.Printf("CFG-RELOAD risk rules applied via bus (%d rules)", len(op.Rules))
+		case "ip_allowlist":
+			// Full-set replace, same semantics as the admin API. The
+			// Kamailio edge picks the change up via the snapshot
+			// endpoint's version bump on its next poll.
+			var op struct {
+				Rules []ipallow.Rule `json:"rules"`
+			}
+			if err := json.Unmarshal(data, &op); err != nil {
+				log.Printf("CFG-RELOAD ip_allowlist bad payload: %v", err)
+				return
+			}
+			s.ipallow.Reload(op.Rules)
+			log.Printf("CFG-RELOAD IP allowlist applied via bus (%d rules)", len(op.Rules))
 		case "package":
 			var op struct {
 				Op        string          `json:"op"`
@@ -404,4 +595,52 @@ func startCfgReloadSubscriber(s *Server) {
 	}); err != nil {
 		log.Printf("cfg-reload subscriber disabled: %v", err)
 	}
+}
+
+// handleIPAllowSnapshot serves the allowlist to the Kamailio edge on
+// GET /v1/internal/ipallow-snapshot. Auth is a lightweight shared
+// secret (X-GVOS-Internal header, GVOS_INTERNAL_TOKEN env) — this is
+// the machine-to-machine control plane, not the admin API; it must
+// stay token-free of the bearer admin surface so the SIP edge can
+// poll it with a plain http_connect. Version is a content hash: the
+// poller skips the full body unless the version changed.
+func (s *Server) handleIPAllowSnapshot(w http.ResponseWriter, r *http.Request) {
+	want := os.Getenv("GVOS_INTERNAL_TOKEN")
+	if want == "" {
+		// No token configured: internal endpoint disabled rather than
+		// open — the SIP edge falls back to its last-known ruleset.
+		httpError(w, 503, "internal snapshot disabled (GVOS_INTERNAL_TOKEN unset)")
+		return
+	}
+	if r.Header.Get("X-GVOS-Internal") != want {
+		httpError(w, 401, "bad internal token")
+		return
+	}
+	if r.Method != http.MethodGet {
+		httpError(w, 405, "GET required")
+		return
+	}
+	rules := s.ipallow.Rules()
+	// Stable version: hash of the (id, cidr, action) set.
+	h := fnv.New64a()
+	// Pre-joined CIDR lists: the Kamailio poller feeds them straight
+	// into is_in_subnet (its jansson path notation cannot index arrays
+	// with dynamic variables, so the edge cannot rebuild the lists
+	// itself — hand it the finished strings).
+	var allows, denies string
+	for _, ru := range rules {
+		fmt.Fprintf(h, "%s|%s|%s\n", ru.ID, ru.CIDR, ru.Action)
+		if ru.Action == ipallow.Deny {
+			denies += ru.CIDR + ","
+		} else {
+			allows += ru.CIDR + ","
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"version":    fmt.Sprintf("%016x", h.Sum64()),
+		"count":      len(rules),
+		"rules":      rules,
+		"allow_cidrs": allows,
+		"deny_cidrs":  denies,
+	})
 }

@@ -21,6 +21,19 @@ spec:
         - name: kamailio
           image: "{{ .Values.image.kamailio.repository }}:{{ .Values.image.kamailio.tag }}"
           args: ["-DD", "-E"]
+          env:
+            # Per-pod identity: builds the unique NATS queue group name
+            # (broadcast: every pod gets its own copy of each message).
+            - name: GVOS_NODE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: GVOS_CORE_HOST
+              value: {{ .Release.Name }}-gv-core
+            - name: WITH_NATS
+              value: "1"
+            - name: WITH_NATS_CDR
+              value: "1"
           ports:
             - containerPort: 5060
               protocol: UDP

@@ -18,19 +18,19 @@ import (
 
 // Rule is one fraud-control rule.
 type Rule struct {
-	ID     string
-	Kind   string // "freq" calls/minute | "cost_day" daily spend | "dest_prefix"
-	Action string // "block" | "alert"
+	ID     string `json:"id"`
+	Kind   string `json:"kind"` // "freq" calls/minute | "cost_day" daily spend | "dest_prefix" | "reg_freq" registrations/minute
+	Action string `json:"action"` // "block" | "alert"
 	// freq: max calls per window
-	Limit int
+	Limit int `json:"limit"`
 	// cost_day: max accumulated cost
-	CostLimit float64
+	CostLimit float64 `json:"cost_limit"`
 	// dest_prefix: allowed (whitelist semantics) or blocked prefixes
-	Prefixes []string
+	Prefixes []string `json:"prefixes"`
 	// AppliesTo: "" = all accounts, else account id
-	Account string
+	Account string `json:"account"`
 	// Enabled default true
-	Disabled bool
+	Disabled bool `json:"disabled"`
 }
 
 // Engine holds rules and live counters.
@@ -42,14 +42,18 @@ type Engine struct {
 	calls map[string][]int64 // account -> unix seconds
 	// per-account daily cost accumulation (day -> account -> cost)
 	dayCost map[int64]map[string]float64
-	now     func() time.Time
-	cur     *time.Time // tests: shared clock handle
+	// per-user rolling registration timestamps (reg_freq windows),
+	// fed by the gvos.reg.event consumer on the bus
+	regs map[string][]int64 // user -> unix seconds
+	now  func() time.Time
+	cur  *time.Time // tests: shared clock handle
 }
 
 func New() *Engine {
 	return &Engine{
 		calls:   map[string][]int64{},
 		dayCost: map[int64]map[string]float64{},
+		regs:    map[string][]int64{},
 		now:     time.Now,
 	}
 }
@@ -160,6 +164,45 @@ func (e *Engine) SettleCost(account string, estCost, actualCost float64) {
 		return
 	}
 	e.dayCost[day][account] += actualCost - estCost
+}
+
+// CheckReg runs the reg_freq rules for one registration event (fed by
+// the gvos.reg.event consumer). Mirrors the freq path: the trailing
+// minute window prunes first, the current attempt counts inclusive,
+// and every registration (matching or not) is recorded so the window
+// is authoritative across events. expirations do not count.
+func (e *Engine) CheckReg(user string) Hit {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	now := e.now()
+	var hit Hit
+
+	ts := e.regs[user]
+	cutoff := now.Unix() - 60
+	recent := ts[:0]
+	for _, t := range ts {
+		if t >= cutoff {
+			recent = append(recent, t)
+		}
+	}
+	e.regs[user] = recent
+
+	for _, r := range e.rules {
+		if r.Disabled || r.Kind != "reg_freq" {
+			continue
+		}
+		if r.Account != "" && r.Account != user {
+			continue
+		}
+		if len(recent)+1 > r.Limit {
+			hit = decide(hit, r, fmt.Sprintf("%d registrations/min exceeds %d", len(recent)+1, r.Limit))
+		}
+	}
+	// Registration storms count regardless of the hit outcome (the
+	// next registration sees the accumulated window).
+	e.regs[user] = append(e.regs[user], now.Unix())
+	return hit
 }
 
 // decide folds a rule hit into the accumulating result: block rules

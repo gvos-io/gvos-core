@@ -20,9 +20,12 @@ import (
 	"github.com/lixuanqun/gvos-core/internal/blocklist"
 	"github.com/lixuanqun/gvos-core/internal/callstate"
 	"github.com/lixuanqun/gvos-core/internal/events"
+	"github.com/lixuanqun/gvos-core/internal/gateway"
+	"github.com/lixuanqun/gvos-core/internal/ipallow"
 	"github.com/lixuanqun/gvos-core/internal/mediastream"
 	"github.com/lixuanqun/gvos-core/internal/pkgplan"
 	"github.com/lixuanqun/gvos-core/internal/rate"
+	"github.com/lixuanqun/gvos-core/internal/regtable"
 	"github.com/lixuanqun/gvos-core/internal/riskctrl"
 	"github.com/lixuanqun/gvos-core/internal/store"
 )
@@ -38,9 +41,12 @@ type Server struct {
 	userIndex     map[string]string    // SIP username -> account ID (PG mode)
 	recordEnabled bool                 // global recording opt-in (admin toggle)
 	blocklist     *blocklist.List      // number screening (black/white rules)
-	risk          *riskctrl.Engine     // real-time fraud engine (freq/cost/prefix)
+	ipallow       *ipallow.List        // source-IP admission (default-deny)
+	risk          *riskctrl.Engine     // real-time fraud engine (freq/cost/prefix/reg_freq)
 	media         *mediastream.Manager // AI media plane (per-call bidirectional streams)
 	pkg           *pkgplan.Engine      // subscription packages (allowance/discount/min-spend)
+	gws           *gateway.List        // outbound gateway directory (API-authoritative)
+	regs          *regtable.Table      // SIP registration mirror (fed by gvos.reg.event)
 	events        *events.Publisher    // NATS event bus (nil = publishing off)
 	webhookURL    string               // webhook dispatcher target ("" = off)
 	asyncCdr      bool                 // CDRW worker owns CDR persistence
@@ -52,9 +58,24 @@ type Server struct {
 
 // emit is the single event-bus seam: nil-safe and best-effort. The
 // billing answer never waits on the bus (publisher queues internally).
+// Three subjects carry a dot-free edge alias (the Kamailio nats module's
+// event_route lexer cannot express dots): cfg.reload, risk.alert and
+// call.teardown are dual-published so core replicas subscribe to the
+// canonical dotted name while the signaling edge subscribes to the
+// alias. Payloads are identical — aliases are transport copies, not
+// semantic forks.
 func (s *Server) emit(subject string, payload any) {
-	if s.events != nil {
-		s.events.Publish(subject, payload)
+	if s.events == nil {
+		return
+	}
+	s.events.Publish(subject, payload)
+	switch subject {
+	case events.SubjectCfgReload:
+		s.events.Publish(events.SubjectEdgeCfgReload, payload)
+	case events.SubjectRiskAlert:
+		s.events.Publish(events.SubjectEdgeRiskAlert, payload)
+	case events.SubjectCallTeardown:
+		s.events.Publish(events.SubjectEdgeTeardown, payload)
 	}
 }
 
@@ -75,7 +96,7 @@ func (s *Server) rebuildRates() {
 
 // NewServer builds the in-memory demo server (dev/test mode).
 func NewServer() *Server {
-	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), regs: regtable.New(), startAt: time.Now()}
 	s.userIndex = map[string]string{}
 
 	// Demo seed: one tenant chain and a small rate table. The tenant
@@ -83,6 +104,14 @@ func NewServer() *Server {
 	s.store.Put(&account.Account{ID: "tenant", Name: "Demo Tenant", RateGroup: "demo", Postpaid: true})
 	s.store.Put(&account.Account{ID: "agent1", ParentID: "tenant", Credit: 1000, RateGroup: "demo"})
 	s.store.Put(&account.Account{ID: "1000", ParentID: "agent1", Name: "Demo SIP user", Credit: 10, RateGroup: "demo"})
+
+	// Demo gateway set: mirrors migrations/004 seed so the signaling
+	// edge has a routable target out of the box (NATS broadcast from
+	// startAsyncWorkers ships it once the bus is up).
+	s.gws.Reload([]gateway.Gateway{
+		{ID: "demo-gw", Name: "demo-gw", SipAddr: "demo-gw:5060", Protocol: "udp", Priority: 5, Weight: 100, Enabled: true},
+		{ID: "demo-gw-backup", Name: "demo-gw-backup", SipAddr: "demo-gw:5060", Protocol: "udp", Priority: 10, Weight: 100, Enabled: true},
+	})
 
 	s.rateList = demoRates()
 	s.rates = rate.NewTable(s.rateList)
@@ -96,7 +125,7 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), regs: regtable.New(), startAt: time.Now()}
 	n, err := pg.LoadAccounts(ctx, s.store)
 	if err != nil {
 		pg.Close()
@@ -111,6 +140,13 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 		log.Printf("blocklist load failed: %v", err)
 	} else if n > 0 {
 		log.Printf("loaded %d screening rules", n)
+	}
+	var ipRules []ipallow.Rule
+	if err := pg.GetSetting(ctx, "ip_allowlist", &ipRules); err == nil {
+		s.ipallow.Reload(ipRules)
+		log.Printf("restored %d IP allowlist rules from settings (default-deny)", s.ipallow.Count())
+	} else if !errors.Is(err, store.ErrSettingNotFound) {
+		log.Printf("IP allowlist setting load failed: %v", err)
 	}
 	// Global runtime settings: admin toggles persisted across the bus
 	// broadcasts (a restart or new replica resumes the recorded state).
@@ -137,6 +173,26 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 			len(pkgSnap.Packages), len(pkgSnap.Assignments))
 	} else if !errors.Is(err, store.ErrSettingNotFound) {
 		log.Printf("packages setting load failed: %v", err)
+	}
+	// Gateway directory: settings first (API-authoritative once the
+	// admin plane has written once), the legacy gateways table as the
+	// one-time bootstrap fallback.
+	var gwList []gateway.Gateway
+	if err := pg.GetSetting(ctx, "gateways", &gwList); err == nil {
+		if n, err2 := s.gws.Reload(gwList); err2 == nil {
+			log.Printf("restored %d gateways from settings", n)
+		}
+	} else if !errors.Is(err, store.ErrSettingNotFound) {
+		log.Printf("gateways setting load failed: %v", err)
+	}
+	if s.gws.Count() == 0 {
+		if fallback, err := pg.LoadGateways(ctx); err == nil && len(fallback) > 0 {
+			if n, _ := s.gws.Reload(fallback); n > 0 {
+				log.Printf("bootstrapped %d gateways from the legacy table (first run; the settings key owns it from now on)", n)
+			}
+		} else if err != nil {
+			log.Printf("gateway table fallback load failed: %v", err)
+		}
 	}
 	s.userIndex = map[string]string{}
 	for _, a := range mustList(s.store) {
@@ -328,6 +384,9 @@ func main() {
 			startCfgReloadSubscriber(s)
 			startCallSvc(s)
 			startStatsSvc(s)
+			startRegConsumer(s)
+			startCdrRawConsumer(s)
+			startCfgRebroadcaster(s)
 			if webhookVal != "" {
 				webhookConsumer = startWebhookDispatcher(s)
 			}
@@ -372,6 +431,10 @@ func muxFor(s *Server) *http.ServeMux {
 	mux.HandleFunc("/v1/admin/record", s.handleRecordToggle)
 	mux.HandleFunc("/v1/admin/blocklist", s.handleBlocklist)
 	mux.HandleFunc("/v1/admin/risk", s.handleRiskRules)
+	mux.HandleFunc("/v1/admin/ipallow", s.handleIPAllow)
+	mux.HandleFunc("/v1/internal/ipallow-snapshot", s.handleIPAllowSnapshot)
+	mux.HandleFunc("/v1/admin/gateways", s.routeGateways)
+	mux.HandleFunc("/v1/admin/registrations", s.handleRegList)
 	mux.HandleFunc("/v1/admin/stream-push", s.handleStreamPush)
 	mux.HandleFunc("/v1/admin/reports", s.handleReports)
 	mux.HandleFunc("/v1/admin/packages", s.handlePackages)
@@ -431,6 +494,18 @@ func (s *Server) routeRates(w http.ResponseWriter, r *http.Request) {
 		s.handleRateUpsert(w, r)
 	case http.MethodGet:
 		s.handleRateList(w, r)
+	default:
+		httpError(w, 405, "POST or GET")
+	}
+}
+
+// routeGateways dispatches by verb.
+func (s *Server) routeGateways(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		s.handleGatewaySet(w, r)
+	case http.MethodGet:
+		s.handleGatewayList(w, r)
 	default:
 		httpError(w, 405, "POST or GET")
 	}

@@ -35,8 +35,10 @@ import (
 // already self-describing and versioned through the stream itself.
 const (
 	SubjectCDRCompleted = "gvos.cdr.completed" // payload: callstate.CDR
+	SubjectCDRRaw       = "gvos.cdr.raw"       // payload: callEndReq (Kamailio-measured; CDRR consumer finalizes billing)
 	SubjectCallTeardown = "gvos.call.teardown" // payload: {call_id, reason}
-	SubjectRiskAlert    = "gvos.risk.alert"    // payload: {account, rule_id, reason, to}
+	SubjectRiskAlert    = "gvos.risk.alert"    // payload: {account, username, rule_id, reason, to}
+	SubjectRegEvent     = "gvos.reg.event"     // payload: {user, expires, src_ip, op} (Kamailio usrloc hooks)
 	SubjectAdminChanged = "gvos.admin.changed" // payload: {action, entity, entity_id, before, after}
 )
 
@@ -49,9 +51,22 @@ const (
 //     durable TEARDOWN consumer dispatches CANCEL/BYE (at-least-once,
 //     persists while the executor is down).
 //   - gvos.svc.* are request/reply service calls (call lifecycle
-//     mirroring the HTTP face, ops stats snapshot).
+//     mirroring the HTTP face, stats snapshot).
 const (
-	SubjectCfgReload = "gvos.cfg.reload" // payload: {entity: rate|blocklist|account|credit|recording|risk|package}
+	SubjectCfgReload = "gvos.cfg.reload" // payload entity: rate|blocklist|account|credit|recording|risk|ip_allowlist|package|gateway
+)
+
+// Edge-alias subjects: the same events mirrored under dot-free names.
+// The Kamailio nats module's event_route lexer token
+// ([a-zA-Z][0-9a-zA-Z-]*(":"[...])+) cannot express dotted subjects,
+// so the signaling edge subscribes to these aliases instead. EmitEdge
+// (used by emitEdge below) dual-publishes so both audiences see one
+// message; the aliases stay outside streamSubjects (the dotted
+// originals are the persisted, canonical stream records).
+const (
+	SubjectEdgeCfgReload = "gvos-edge-cfg"   // alias of gvos.cfg.reload
+	SubjectEdgeRiskAlert = "gvos-edge-risk"  // alias of gvos.risk.alert
+	SubjectEdgeTeardown  = "gvos-edge-tear"  // alias of gvos.call.teardown
 )
 
 // Service request/reply subjects (outside the stream domains — see
@@ -85,6 +100,7 @@ var streamSubjects = []string{
 	"gvos.risk.>",
 	"gvos.admin.>",
 	"gvos.cfg.>",
+	"gvos.reg.>",
 }
 
 // Poster is the transport seam (second interface in the repo, after

@@ -21,7 +21,7 @@ services:
       - ../migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "15432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U gvos"]
       interval: 5s
@@ -36,8 +36,8 @@ services:
     image: nats:2-alpine
     command: ["-js", "-m", "8222"]
     ports:
-      - "4222:4222"
-      - "8222:8222" # monitoring endpoint
+      - "14222:4222"
+      - "18222:8222" # monitoring endpoint
 
   gv-core:
     build:
@@ -51,24 +51,42 @@ services:
     environment:
       GVOS_DB_DSN: "postgres://gvos:gvos_dev@postgres:5432/gvos?sslmode=disable"
       GVOS_NATS_URL: "nats://nats:4222"
+      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
       GVOS_LISTEN: ":8080"
     volumes:
       - ./tls:/etc/gvos/tls:ro
     ports:
-      - "8080:8080"
+      - "28080:8080"
 
   kamailio:
-    # Official CI build (ghcr mirror works where docker.io is blocked).
-    image: ghcr.io/kamailio/kamailio-ci:6.1-alpine
+    # Self-built image: the upstream CI alpine build lacks nats.so
+    # (see kamailio.Dockerfile). Debian bookworm ships
+    # kamailio-nats-modules (Kamailio 5.6).
+    build:
+      context: .
+      dockerfile: kamailio.Dockerfile
+    image: gvos-kamailio
     depends_on:
-      - gv-core
+      gv-core:
+        condition: service_started
+      nats:
+        condition: service_started
     volumes:
       - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
       - ./tls:/etc/kamailio/tls:ro
+    environment:
+      GVOS_CORE_HOST: gv-core
+      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
+      # Per-node identity: builds the unique NATS queue group name
+      # (broadcast semantics across the signaling pool).
+      GVOS_NODE_HOST: kamailio-1
+      # NATS publish routes on: registration events + CDR over bus.
+      WITH_NATS: "1"
+      WITH_NATS_CDR: "1"
     ports:
-      - "5060:5060/udp"
-      - "5060:5060/tcp"
-      - "4444:4444/tcp"
+      - "15060:5060/udp"
+      - "15060:5060/tcp"
+      - "14444:4444/tcp"
 
   rtpengine:
     # Media relay built from Debian packages (see rtpengine.Dockerfile);

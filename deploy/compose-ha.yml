@@ -70,24 +70,43 @@ services:
     environment:
       GVOS_DB_DSN: "postgres://gvos:gvos_dev@pg-primary:5432/gvos?sslmode=disable"
       GVOS_NATS_URL: "nats://nats:4222"
+      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
       GVOS_LISTEN: ":8080"
 
   # Signaling pair: two stateless Kamailio nodes. Real deployments
   # front them with any UDP/TCP LB (or DNS SRV); here they share the
   # dispatcher config so either serves the calls.
   kamailio-1:
-    image: ghcr.io/kamailio/kamailio-ci:6.1-alpine
-    depends_on: [gv-core]
+    # Self-built image with nats.so (see kamailio.Dockerfile).
+    build:
+      context: .
+      dockerfile: kamailio.Dockerfile
+    image: gvos-kamailio
+    depends_on: [gv-core, nats]
     volumes:
       - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
+    environment:
+      GVOS_CORE_HOST: gv-core
+      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
+      # Unique per node: builds the per-node NATS queue group
+      # (broadcast: each node gets its own copy of every message).
+      GVOS_NODE_HOST: kamailio-1
+      WITH_NATS: "1"
+      WITH_NATS_CDR: "1"
     ports:
       - "5060:5060/udp"
 
   kamailio-2:
-    image: ghcr.io/kamailio/kamailio-ci:6.1-alpine
-    depends_on: [gv-core]
+    image: gvos-kamailio
+    depends_on: [gv-core, nats]
     volumes:
       - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
+    environment:
+      GVOS_CORE_HOST: gv-core
+      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
+      GVOS_NODE_HOST: kamailio-2
+      WITH_NATS: "1"
+      WITH_NATS_CDR: "1"
     ports:
       - "5061:5060/udp"
 

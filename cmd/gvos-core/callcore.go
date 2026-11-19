@@ -55,8 +55,14 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 		return 403, map[string]string{"error": "risk-blocked [" + h.RuleID + "]: " + h.Reason}
 	} else if h.Alerted {
 		log.Printf("RISK-ALERT account=%s rule=%s: %s", accID, h.RuleID, h.Reason)
+		// username rides the payload: the Kamailio edge keys its
+		// banned htable on $fU (SIP username), not the account ID.
+		username := req.From
+		if a, err := s.store.Get(accID); err == nil {
+			username = a.Username
+		}
 		s.emit(events.SubjectRiskAlert, map[string]string{
-			"account": accID, "rule_id": h.RuleID, "reason": h.Reason, "to": req.To,
+			"account": accID, "username": username, "rule_id": h.RuleID, "reason": h.Reason, "to": req.To,
 		})
 	}
 

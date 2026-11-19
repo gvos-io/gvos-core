@@ -98,6 +98,33 @@ func (l *List) Add(e Entry) {
 	l.addEntry(e)
 }
 
+// Snapshot returns the prefix entries currently active (regex entries
+// included as-is, re unexported). The compiled index drops the tenant
+// dimension, so entries come back tenant-flattened — consumers that
+// need per-tenancy (audit) read the admin list; this snapshot is for
+// rebroadcasting the full rule set to replicas/edges.
+func (l *List) Snapshot() []Entry {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	var out []Entry
+	for scope, byLen := range l.black {
+		for _, set := range byLen {
+			for pattern := range set {
+				out = append(out, Entry{Kind: "black", Scope: scope, Pattern: pattern})
+			}
+		}
+	}
+	for scope, byLen := range l.white {
+		for _, set := range byLen {
+			for pattern := range set {
+				out = append(out, Entry{Kind: "white", Scope: scope, Pattern: pattern})
+			}
+		}
+	}
+	out = append(out, l.regexes...)
+	return out
+}
+
 // Remove drops prefix rules matching tenant/kind/scope/pattern.
 func (l *List) Remove(tenant, kind, scope, pattern string) int {
 	l.mu.Lock()
