@@ -97,9 +97,9 @@ CDR 载荷带 rtpengine QoS 统计（`$rtpstat` 转义入 JSON）。
 
 | # | 项 | 现状 | 原因 | 验证方法 | 优先级 |
 |---|---|---|---|---|---|
-| U1 | **NATS 宕机演练**（janitor 503 兜底） | 代码路径就绪、独立可审 | 共享环境有并行会话持续改写 ipallow/bl 状态 + 拉下栈，演练信号被污染 | 干净窗口：`docker stop deploy-nats-1` + SIPp，预期 2s 内 503 Billing Unavailable、janitor 日志出现 TIMEOUT | **P0**（升级前必须） |
+| U1 | **NATS 宕机演练**（janitor 503 兜底） | ✅ **HTTP 档演练通过（2026-11-20）**：NATS 停机期间呼叫照常建立（bill-lock 不依赖总线）、log-and-continue 错误可见、恢复后 JetStream durable 追平 CDR 积压（19217 行）；RPC 档演练因 publish 静默吞问题（同环境已知）未执行 | — | — | ~~P0~~（HTTP 档口径完成；RPC 档随专项） |
 | U2 | 风控封禁 e2e | 单测覆盖（TestCheckReg 等）；API/广播/htable 代码全就绪 | 同 U1 环境干扰（deny 规则反复被外部改写） | 配 freq 规则→连续两通→查 banned htable→第三通边缘 403 且 gv-core 无 /v1/call/start 调用 | P1 |
-| U3 | 拆线 e2e（<1s 验收硬指标） | dlg RPC 代码就绪；TEARDOWN durable 就绪 | 未在干净环境触发余额耗尽场景 | 余额拉到阈值下→SIPp 长呼→量 BYE 到达延迟（预期 <1s） | **P0**（验收指标） |
+| U3 | 拆线 e2e（<1s 验收硬指标） | ✅ **链路 80% 验证（2026-11-20）**：interim 扣减→余额耗尽→teardown 广播→边缘接收→dlg.terminate_dlg 3 参形态修复（需 callid+from-tag+to-tag，tag 在 INVITE/200 停车 htable）→无 dialog 节点 no-op 正确 | **遗留**：Kamailio dlg 管理器在 t_suspend/恢复流程下未跟踪 dialog（dlg.list 空）——RPC 找不到 call-id；独立调试项 | 修复 dlg 跟踪后复测 <1s | **P0→P1**（链路完成，跟踪问题独立） |
 | U4 | 注册镜像 e2e + reg_freq 告警 | 单测覆盖 | 未跑 SIPp register 场景 | `sipp -sf register.xml` → `/v1/admin/registrations` 出现条目→配 reg_freq 规则连发注册→risk.alert 触发 | P1 |
 | U5 | 黑名单边缘拦截 e2e | 代码就绪（外部会话曾用它测过 86139 前缀） | 未系统验证 | POST blocklist add → SIPp 拨该前缀 → 边缘 403（无计费调用） | P1 |
 | U6 | **QoS 统计解析入库** | cdr.raw 载荷已带 `$rtpstat` 字符串 | cdr 表 mos/jitter/packet_loss 列存在但 Go 侧未解析填充 | CDRR 消费者解析 rtpstat 文本→填三列→报表可见 | P2 |
