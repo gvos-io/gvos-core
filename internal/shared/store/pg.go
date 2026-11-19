@@ -636,3 +636,48 @@ func (p *PG) QueryCrossAnalysis(ctx context.Context, day string) ([]CrossRow, er
 	}
 	return out, rows.Err()
 }
+
+// UpsertRecording indexes one recording artifact (recpipe pipeline;
+// migration 009). Idempotent per (call_id, track, format).
+func (p *PG) UpsertRecording(ctx context.Context, callID, track, objectKey, locator, format string, sizeBytes int64) error {
+	_, err := p.pool.Exec(ctx, `
+        INSERT INTO recordings (call_id, track, object_key, locator, format, size_bytes, status)
+        VALUES ($1, $2, $3, $4, $5, $6, 'ready')
+        ON CONFLICT (call_id, track, format) DO UPDATE
+        SET object_key = $3, locator = $4, size_bytes = $6, status = 'ready', updated_at = now()`,
+		callID, track, objectKey, locator, format, sizeBytes)
+	if err != nil {
+		return fmt.Errorf("upsert recording: %w", err)
+	}
+	return nil
+}
+
+// GetRecordings lists the tracks of one call for the play endpoint.
+func (p *PG) GetRecordings(ctx context.Context, callID string) ([]RecordingRow, error) {
+	rows, err := p.pool.Query(ctx, `
+        SELECT track, object_key, locator, format, size_bytes, status
+        FROM recordings WHERE call_id = $1 AND status = 'ready'`, callID)
+	if err != nil {
+		return nil, fmt.Errorf("get recordings: %w", err)
+	}
+	defer rows.Close()
+	var out []RecordingRow
+	for rows.Next() {
+		var r RecordingRow
+		if err := rows.Scan(&r.Track, &r.ObjectKey, &r.Locator, &r.Format, &r.SizeBytes, &r.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// RecordingRow is one recordings-table row (play endpoint face).
+type RecordingRow struct {
+	Track     string
+	ObjectKey string
+	Locator   string
+	Format    string
+	SizeBytes int64
+	Status    string
+}

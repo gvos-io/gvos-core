@@ -40,6 +40,7 @@ const (
 	SubjectRiskAlert    = "gvos.risk.alert"    // payload: {account, username, rule_id, reason, to}
 	SubjectRegEvent     = "gvos.reg.event"     // payload: {user, expires, src_ip, op} (Kamailio usrloc hooks)
 	SubjectAdminChanged = "gvos.admin.changed" // payload: {action, entity, entity_id, before, after}
+	SubjectRecordingCompleted = "gvos.recording.completed" // payload: {call_id, track, object_key, backend, size_bytes, format}
 )
 
 // Interaction subjects (beyond fire-and-forget events):
@@ -101,6 +102,7 @@ var streamSubjects = []string{
 	"gvos.admin.>",
 	"gvos.cfg.>",
 	"gvos.reg.>",
+	"gvos.recording.>",
 }
 
 // Poster is the transport seam (second interface in the repo, after

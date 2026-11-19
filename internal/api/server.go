@@ -26,6 +26,7 @@ import (
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"github.com/lixuanqun/gvos-core/internal/shared/acl"
 	"github.com/lixuanqun/gvos-core/internal/mediamain/mediastream"
+	"github.com/lixuanqun/gvos-core/internal/recpipe"
 	"github.com/lixuanqun/gvos-core/internal/shared/events"
 	"github.com/lixuanqun/gvos-core/internal/shared/rds"
 	"github.com/lixuanqun/gvos-core/internal/shared/store"
@@ -50,6 +51,7 @@ type Server struct {
 	acl           *acl.Store           // API-key registry (Phase B; nil = keys off, legacy fallback)
 	idem          *idemStore           // Idempotency-Key registry for money routes
 	rds           *rds.Client          // Redis runtime-state authority (nil = off, memory authoritative)
+	recpipe       *recpipe.Uploader   // recording pipeline (nil = off)
 	redisLocks    bool                 // single-runner locks active (rollup/rebroadcast dedup)
 	bal           *account.BalanceR   // redis balance face (nil = in-memory authority)
 	events        *events.Publisher    // NATS event bus (nil = publishing off)
@@ -493,6 +495,10 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("POST /v1/admin/reports/rollup", s.handleReports)
 	mux.HandleFunc("GET /v1/admin/reports", s.handleReportList)
 	mux.HandleFunc("GET /v1/admin/reports/views", s.handleReportViews)
+	// Recording pipeline (R2/R3).
+	mux.HandleFunc("GET /v1/recording/{call_id}", s.handleRecordingList)
+	mux.HandleFunc("GET /v1/recording/{call_id}/{track}", s.handleRecordingPlay)
+
 	// API-key administration (Phase B).
 	mux.HandleFunc("POST /v1/admin/keys", s.handleKeyCreate)
 	mux.HandleFunc("GET /v1/admin/keys", s.handleKeyList)
@@ -659,6 +665,34 @@ func Shutdown(s *Server) {
 
 // SetClock overrides the call manager's clock (test seam).
 func SetClock(s *Server, now func() time.Time) { s.calls.SetClock(now) }
+
+// AttachRecording wires the recording pipeline: LocalFS archive root
+// + output dir scanner + PG index (GVOS_RECORDING_OUTPUT /
+// GVOS_RECORDING_ARCHIVE env). Empty output = pipeline off.
+func AttachRecording(s *Server, outputDir, archiveDir string) *recpipe.Uploader {
+	if outputDir == "" {
+		return nil
+	}
+	_ = os.MkdirAll(archiveDir, 0o755)
+	var idx recpipe.PGERecordIndex
+	if s.pg != nil {
+		idx = s.pg
+	}
+	u := recpipe.NewUploader(outputDir, &recpipe.LocalFS{Root: archiveDir}, idx, func(subject string, payload any) {
+		s.emit(subject, payload)
+	})
+	s.recpipe = u
+	return u
+}
+
+// StartRecordingPipeline runs the uploader scan loop (call after the
+// other async workers; ctx governs lifetime).
+func StartRecordingPipeline(s *Server, ctx context.Context) (stop func()) {
+	if s.recpipe == nil {
+		return func() {}
+	}
+	return s.recpipe.Run(ctx, 5*time.Second)
+}
 
 // routeRatesLegacy: old verb route (POST=upsert, GET=list) kept for
 // the deprecation window.

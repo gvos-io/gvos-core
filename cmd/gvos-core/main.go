@@ -73,6 +73,18 @@ func main() {
 	if rc != nil {
 		api.AttachRedis(s, rc)
 	}
+	// Recording pipeline (R2): on when GVOS_RECORDING_OUTPUT is set;
+	// artifacts archive to GVOS_RECORDING_ARCHIVE (LocalFS backend;
+	// OSS plugs into the same Storage interface once creds exist).
+	recOut := os.Getenv("GVOS_RECORDING_OUTPUT")
+	if recOut != "" {
+		if u := api.AttachRecording(s, recOut, os.Getenv("GVOS_RECORDING_ARCHIVE")); u != nil {
+			pipelineCtx, pipelineCancel := context.WithCancel(context.Background())
+			defer pipelineCancel()
+			api.StartRecordingPipeline(s, pipelineCtx)
+			log.Printf("recording pipeline on (output=%s archive=%s)", recOut, os.Getenv("GVOS_RECORDING_ARCHIVE"))
+		}
+	}
 	// Event bus is auxiliary, not authority: a missing/unreachable
 	// broker must not take the control plane down (it reconnects on
 	// its own; publishes just log until the broker appears).
