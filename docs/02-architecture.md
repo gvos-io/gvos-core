@@ -3,7 +3,7 @@
 **版本**:v0.2(2026-11-19)
 **v0.1→v0.2 修订**:v0.1(2026-10-06,M8 时代)事实与承诺混写,读者无法分辨哪些已兑现。本版建立标记纪律:**✅ 已交付**(代码+测试为证,注明位置)、**⚠️ 交付但受限**(注明限制)、**🎯 目标**(未实施,注明载体文档)。每条声明可对到代码或规划文档,不再有第三种状态。
 **上游依据**:PRD 容量基线(内部文档);竞品对标 [competitive-analysis-vos-sbc.md](competitive-analysis-vos-sbc.md)
-**配套事实源**:NATS 转型 [nats-event-driven-upgrade.md](nats-event-driven-upgrade.md) · Redis 收口 [redis-adoption-plan.md](redis-adoption-plan.md) · API 体系 [api-roadmap.md](api-roadmap.md) · 录音管道 [recording-oss-upgrade-plan.md](recording-oss-upgrade-plan.md) · 部署 [deployment-plan.md](deployment-plan.md)
+**配套事实源**:NATS 转型 [nats-event-driven-upgrade.md](nats-event-driven-upgrade.md) · Redis 收口 [redis-adoption-plan.md](redis-adoption-plan.md) · API 体系 [api-roadmap.md](api-roadmap.md) · 录音管道 [recording-oss-upgrade-plan.md](recording-oss-upgrade-plan.md) · 部署 [deployment-plan.md](deployment-plan.md) · Voice Agent 接入 [pipecat-integration-plan.md](pipecat-integration-plan.md)（主路径）/ [livekit-integration-plan.md](livekit-integration-plan.md)（WebRTC/多方）
 
 ---
 

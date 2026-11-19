@@ -16,42 +16,42 @@ import (
 var forbidden = map[string][]string{
 	// Money flows one way: policy reads billing; billing never
 	// reaches back (config reaches it via shared/events payloads).
-	"github.com/lixuanqun/gvos-core/internal/billingdomain": {
-		"github.com/lixuanqun/gvos-core/internal/customerdomain",
-		"github.com/lixuanqun/gvos-core/internal/mediamain",
+	"github.com/fastvoip/gvos-core/internal/billingdomain": {
+		"github.com/fastvoip/gvos-core/internal/customerdomain",
+		"github.com/fastvoip/gvos-core/internal/mediamain",
 	},
 	// The event bus / acl / redis / migrate packages know no domains
 	// (the store adapter is the sanctioned projection point).
-	"github.com/lixuanqun/gvos-core/internal/shared/events": {
-		"github.com/lixuanqun/gvos-core/internal/billingdomain",
-		"github.com/lixuanqun/gvos-core/internal/customerdomain",
-		"github.com/lixuanqun/gvos-core/internal/mediamain",
-		"github.com/lixuanqun/gvos-core/internal/callcore",
-		"github.com/lixuanqun/gvos-core/internal/api",
+	"github.com/fastvoip/gvos-core/internal/shared/events": {
+		"github.com/fastvoip/gvos-core/internal/billingdomain",
+		"github.com/fastvoip/gvos-core/internal/customerdomain",
+		"github.com/fastvoip/gvos-core/internal/mediamain",
+		"github.com/fastvoip/gvos-core/internal/callcore",
+		"github.com/fastvoip/gvos-core/internal/api",
 	},
-	"github.com/lixuanqun/gvos-core/internal/shared/rds": {
-		"github.com/lixuanqun/gvos-core/internal/billingdomain",
-		"github.com/lixuanqun/gvos-core/internal/customerdomain",
-		"github.com/lixuanqun/gvos-core/internal/mediamain",
-		"github.com/lixuanqun/gvos-core/internal/callcore",
-		"github.com/lixuanqun/gvos-core/internal/api",
+	"github.com/fastvoip/gvos-core/internal/shared/rds": {
+		"github.com/fastvoip/gvos-core/internal/billingdomain",
+		"github.com/fastvoip/gvos-core/internal/customerdomain",
+		"github.com/fastvoip/gvos-core/internal/mediamain",
+		"github.com/fastvoip/gvos-core/internal/callcore",
+		"github.com/fastvoip/gvos-core/internal/api",
 	},
-	"github.com/lixuanqun/gvos-core/internal/shared/acl": {
-		"github.com/lixuanqun/gvos-core/internal/billingdomain",
-		"github.com/lixuanqun/gvos-core/internal/customerdomain",
-		"github.com/lixuanqun/gvos-core/internal/mediamain",
-		"github.com/lixuanqun/gvos-core/internal/callcore",
-		"github.com/lixuanqun/gvos-core/internal/api",
+	"github.com/fastvoip/gvos-core/internal/shared/acl": {
+		"github.com/fastvoip/gvos-core/internal/billingdomain",
+		"github.com/fastvoip/gvos-core/internal/customerdomain",
+		"github.com/fastvoip/gvos-core/internal/mediamain",
+		"github.com/fastvoip/gvos-core/internal/callcore",
+		"github.com/fastvoip/gvos-core/internal/api",
 	},
-	"github.com/lixuanqun/gvos-core/internal/shared/migrate": {
-		"github.com/lixuanqun/gvos-core/internal/billingdomain",
-		"github.com/lixuanqun/gvos-core/internal/customerdomain",
-		"github.com/lixuanqun/gvos-core/internal/mediamain",
-		"github.com/lixuanqun/gvos-core/internal/callcore",
-		"github.com/lixuanqun/gvos-core/internal/api",
+	"github.com/fastvoip/gvos-core/internal/shared/migrate": {
+		"github.com/fastvoip/gvos-core/internal/billingdomain",
+		"github.com/fastvoip/gvos-core/internal/customerdomain",
+		"github.com/fastvoip/gvos-core/internal/mediamain",
+		"github.com/fastvoip/gvos-core/internal/callcore",
+		"github.com/fastvoip/gvos-core/internal/api",
 	},
-	"github.com/lixuanqun/gvos-core/internal/shared/recpipe": {
-		"github.com/lixuanqun/gvos-core/internal/api",
+	"github.com/fastvoip/gvos-core/internal/shared/recpipe": {
+		"github.com/fastvoip/gvos-core/internal/api",
 	},
 }
 

@@ -14,24 +14,24 @@ import (
 	"os"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/pkgplan"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/rate"
-	"github.com/lixuanqun/gvos-core/internal/callcore"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/axb"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/gateway"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/ipallow"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/regtable"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/riskctrl"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
-	"github.com/lixuanqun/gvos-core/internal/shared/acl"
-	"github.com/lixuanqun/gvos-core/internal/mediamain/mediastream"
-	"github.com/lixuanqun/gvos-core/internal/recpipe"
-	"github.com/lixuanqun/gvos-core/internal/shared/events"
-	"github.com/lixuanqun/gvos-core/internal/shared/rds"
-	"github.com/lixuanqun/gvos-core/internal/webhook"
-	"github.com/lixuanqun/gvos-core/internal/shared/store"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/pkgplan"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/rate"
+	"github.com/fastvoip/gvos-core/internal/callcore"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/blocklist"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/axb"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/gateway"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/ipallow"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/regtable"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/riskctrl"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/shared/acl"
+	"github.com/fastvoip/gvos-core/internal/mediamain/mediastream"
+	"github.com/fastvoip/gvos-core/internal/recpipe"
+	"github.com/fastvoip/gvos-core/internal/shared/events"
+	"github.com/fastvoip/gvos-core/internal/shared/rds"
+	"github.com/fastvoip/gvos-core/internal/webhook"
+	"github.com/fastvoip/gvos-core/internal/shared/store"
 )
 
 type Server struct {
@@ -529,6 +529,9 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("GET /v1/recording/{call_id}", s.handleRecordingList)
 	mux.HandleFunc("GET /v1/recording/{call_id}/{track}", s.handleRecordingPlay)
 
+	// OpenAPI 3.1 spec (public contract descriptor).
+	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
+
 	// API-key administration (Phase B).
 	mux.HandleFunc("POST /v1/admin/keys", s.handleKeyCreate)
 	mux.HandleFunc("GET /v1/admin/keys", s.handleKeyList)
@@ -543,24 +546,6 @@ func MuxFor(s *Server) http.Handler {
 
 	// Media stream (WebSocket).
 	mux.HandleFunc("/v1/stream/", s.handleMediaStream)
-
-	// Deprecated spike routes (Phase A migration window): 307 to the
-	// resource form; removed next version. Deprecation header set.
-	deprecated := func(target string) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Deprecation", "true")
-			w.Header().Set("Sunset", "0")
-			http.Redirect(w, r, target, http.StatusTemporaryRedirect)
-		}
-	}
-	mux.HandleFunc("/v1/admin/topup", deprecated("/v1/admin/accounts/{id}/topup"))
-	mux.HandleFunc("/v1/admin/rates", s.routeRatesLegacy)
-	mux.HandleFunc("/v1/admin/record", deprecated("/v1/admin/recording"))
-	mux.HandleFunc("/v1/admin/blocklist", s.handleBlocklistLegacy)
-	mux.HandleFunc("/v1/admin/risk", s.routeRiskLegacy)
-	mux.HandleFunc("/v1/admin/ipallow", s.handleIPAllowLegacy)
-	mux.HandleFunc("/v1/admin/gateways", s.routeGatewaysLegacy)
-	mux.HandleFunc("/v1/admin/reports", s.routeReportsLegacy)
 
 	// Static admin console (token entered in the UI).
 	mux.HandleFunc("/ui", s.handleUI)

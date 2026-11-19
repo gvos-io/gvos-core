@@ -12,9 +12,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/gateway"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/gateway"
 
-	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/fastvoip/gvos-core/internal/shared/events"
 )
 
 // TestGatewayAdminAPI: replace, list, remove — each mutation

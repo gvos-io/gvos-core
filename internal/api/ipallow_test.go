@@ -9,8 +9,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/ipallow"
-	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/ipallow"
+	"github.com/fastvoip/gvos-core/internal/shared/events"
 )
 
 func TestIPAllowAdminAPI(t *testing.T) {
@@ -56,30 +56,30 @@ func TestIPAllowAdminAPI(t *testing.T) {
 	}
 
 	// Empty list = default-deny: no rules loaded, engine rejects.
-	if code, m := get("/v1/admin/ipallow", true); code != 200 || m["count"] != float64(0) {
+	if code, m := get("/v1/admin/ipallow/rules", true); code != 200 || m["count"] != float64(0) {
 		t.Fatalf("initial GET: %d %v", code, m)
 	}
 
 	// Auth guard: no token -> 401.
-	if code, _ := post("/v1/admin/ipallow", map[string]any{"rules": []any{}}, false); code != 401 {
+	if code, _ := post("/v1/admin/ipallow/rules", map[string]any{"rules": []any{}}, false); code != 401 {
 		t.Errorf("unauthenticated POST: %d, want 401", code)
 	}
 
 	// Validation: bad CIDR rejected with 400, state untouched.
-	if code, m := post("/v1/admin/ipallow", map[string]any{"rules": []any{
+	if code, m := post("/v1/admin/ipallow/rules", map[string]any{"rules": []any{
 		map[string]any{"id": "bad", "cidr": "10.0.0.0/99", "action": "allow"},
 	}}, true); code != 400 {
 		t.Errorf("bad CIDR accepted: %d %v", code, m)
 	}
 
 	// Valid replace: allow + deny (exception) rules land and broadcast.
-	if code, m := post("/v1/admin/ipallow", map[string]any{"rules": []any{
+	if code, m := post("/v1/admin/ipallow/rules", map[string]any{"rules": []any{
 		map[string]any{"id": "office", "cidr": "192.168.1.0/24", "action": "allow"},
 		map[string]any{"id": "quarantine", "cidr": "192.168.1.66/32", "action": "deny"},
 	}}, true); code != 200 || m["rules"] != float64(2) {
 		t.Fatalf("replace: %d %v", code, m)
 	}
-	if code, m := get("/v1/admin/ipallow", true); code != 200 {
+	if code, m := get("/v1/admin/ipallow/rules", true); code != 200 {
 		t.Fatal(code)
 	} else {
 		rules := m["rules"].([]any)
@@ -108,14 +108,14 @@ func TestIPAllowAdminAPI(t *testing.T) {
 	}
 
 	// remove_id removes exactly one rule.
-	if code, m := post("/v1/admin/ipallow", map[string]any{"remove_id": "quarantine"}, true); code != 200 {
+	if code, m := post("/v1/admin/ipallow/rules", map[string]any{"remove_id": "quarantine"}, true); code != 200 {
 		t.Fatalf("remove: %d %v", code, m)
 	}
 	if got := s.ipallow.Count(); got != 1 {
 		t.Errorf("count after remove = %d, want 1", got)
 	}
 	// Unknown remove_id -> 404.
-	if code, _ := post("/v1/admin/ipallow", map[string]any{"remove_id": "nope"}, true); code != 404 {
+	if code, _ := post("/v1/admin/ipallow/rules", map[string]any{"remove_id": "nope"}, true); code != 404 {
 		t.Errorf("unknown remove: %d, want 404", code)
 	}
 }

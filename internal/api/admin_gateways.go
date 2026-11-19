@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/gateway"
-	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/gateway"
+	"github.com/fastvoip/gvos-core/internal/shared/events"
 )
 
 func (s *Server) handleGatewaySet(w http.ResponseWriter, r *http.Request) {

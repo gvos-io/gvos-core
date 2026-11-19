@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
 )
 
 // TestAdminAuth guards all admin routes.
@@ -83,8 +83,8 @@ func TestAdminAccountLifecycle(t *testing.T) {
 	}
 
 	// 3. Top up +5.
-	code, m = authed("POST", "/v1/admin/topup", map[string]any{
-		"account_id": newID, "delta": 5.0, "reason": "topup",
+	code, m = authed("POST", "/v1/admin/accounts/"+newID+"/topup", map[string]any{
+		"delta": 5.0, "reason": "topup",
 	})
 	if code != 200 {
 		t.Fatalf("topup: code=%d body=%v", code, m)
@@ -138,7 +138,7 @@ func TestAdminRateUpsertLiveEffect(t *testing.T) {
 	}
 
 	// Halve the CN mobile price: 0.05 -> 0.025.
-	code, m := authedPost("/v1/admin/rates", map[string]any{
+	code, m := authed("PUT", "/v1/admin/rates", map[string]any{
 		"prefix": "8613", "price": 0.025,
 	})
 	if code != 200 {
@@ -188,13 +188,13 @@ func TestAdminValidation(t *testing.T) {
 	if code := authedPost("/v1/admin/accounts", map[string]any{"name": "no-username"}); code != 400 {
 		t.Errorf("create without username: %d, want 400", code)
 	}
-	if code := authedPost("/v1/admin/topup", map[string]any{"account_id": "x", "delta": 0}); code != 400 {
+	if code := authedPost("/v1/admin/accounts/x/topup", map[string]any{"delta": 0}); code != 400 {
 		t.Errorf("topup zero delta: %d, want 400", code)
 	}
-	if code := authedPost("/v1/admin/rates", map[string]any{"prefix": "", "price": 1}); code != 400 {
+	if code := authed("PUT", "/v1/admin/rates", map[string]any{"prefix": "", "price": 1}); code != 400 {
 		t.Errorf("rate empty prefix: %d, want 400", code)
 	}
-	if code := authedPost("/v1/admin/rates", map[string]any{"prefix": "86", "price": -1}); code != 400 {
+	if code := authed("PUT", "/v1/admin/rates", map[string]any{"prefix": "86", "price": -1}); code != 400 {
 		t.Errorf("rate negative price: %d, want 400", code)
 	}
 }

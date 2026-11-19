@@ -1,12 +1,12 @@
 package callcore
 
 import (
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
 
 	"testing"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
 )
 
 // TestSweeperSettlesZombies: a call that never gets a BYE is force

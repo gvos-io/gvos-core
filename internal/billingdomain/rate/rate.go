@@ -4,7 +4,7 @@
 package rate
 
 import (
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"sort"
 )

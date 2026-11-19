@@ -3,8 +3,8 @@ package billing
 import (
 	"testing"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/rate"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/rate"
 )
 
 // entry builds a rate entry for tests: price/min, initDur+stepDur.

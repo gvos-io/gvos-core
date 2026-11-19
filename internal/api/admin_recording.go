@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/fastvoip/gvos-core/internal/shared/events"
 )
 
 func (s *Server) handleRecordToggle(w http.ResponseWriter, r *http.Request) {

@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/lixuanqun/gvos-core/internal/mediamain/mediastream"
+	"github.com/fastvoip/gvos-core/internal/mediamain/mediastream"
 )
 
 func (s *Server) handleStreamPush(w http.ResponseWriter, r *http.Request) {

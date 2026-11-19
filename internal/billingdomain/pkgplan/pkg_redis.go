@@ -13,8 +13,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
-	"github.com/lixuanqun/gvos-core/internal/shared/rds"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/shared/rds"
 )
 
 const cycleTTL = 40 * 24 * time.Hour // cycle end + buffer

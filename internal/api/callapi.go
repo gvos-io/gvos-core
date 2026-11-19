@@ -8,16 +8,16 @@ package api
 
 import (
 	"math"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
 	"context"
 	"errors"
 	"log"
 	"strings"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
-	"github.com/lixuanqun/gvos-core/internal/callcore"
-	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
+	"github.com/fastvoip/gvos-core/internal/callcore"
+	"github.com/fastvoip/gvos-core/internal/shared/events"
 )
 
 type callStartReq struct {
@@ -65,7 +65,7 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	// Both the dialed number and the real destination are screened.
 	for _, screened := range []string{req.To, actualDest} {
 		if ok, why := s.blocklist.CheckScreen(screened, "dest"); !ok {
-			return 403, map[string]string{"error": "destination blocked: " + why}
+			return 403, map[string]errorEnvelope{"error": {Code: "FORBIDDEN", Message: "destination blocked: " + why}}
 		}
 	}
 
@@ -74,7 +74,7 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	// dest_prefix rule for B must fire even when the caller dialed X).
 	// Estimated cost for the cost-cap check uses the 60s lock basis.
 	if h := s.risk.CheckCall(accID, actualDest, money.MustFromYuan(0.05)); h.Blocked {
-		return 403, map[string]string{"error": "risk-blocked [" + h.RuleID + "]: " + h.Reason}
+		return 403, map[string]errorEnvelope{"error": {Code: "FORBIDDEN", Message: "risk-blocked [" + h.RuleID + "]: " + h.Reason}}
 	} else if h.Alerted {
 		log.Printf("RISK-ALERT account=%s rule=%s: %s", accID, h.RuleID, h.Reason)
 		// username rides the payload: the Kamailio edge keys its
@@ -91,7 +91,7 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	now := time.Now()
 	entry := s.rates.Lookup(actualDest, int(now.Weekday()), now.Hour()*60+now.Minute())
 	if entry == nil {
-		return 404, map[string]string{"error": "no rate for destination " + actualDest}
+		return 404, map[string]errorEnvelope{"error": {Code: "NOT_FOUND", Message: "no rate for destination " + actualDest}}
 	}
 	if err := s.calls.Start(req.CallID, accID, actualDest, entry, 60, s.recordEnabled); err != nil {
 		// Insufficient balance is a 403 for the caller; account limits
@@ -101,7 +101,7 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 			return 429, map[string]errorEnvelope{"error": {Code: "RATE_LIMITED", Message: err.Error()}}
 		}
 		if strings.Contains(err.Error(), "not found") {
-			return 404, map[string]string{"error": err.Error()}
+			return 404, map[string]errorEnvelope{"error": {Code: "NOT_FOUND", Message: err.Error()}}
 		}
 		return 403, map[string]errorEnvelope{"error": {Code: "INSUFFICIENT_CREDIT", Message: err.Error()}}
 	}
@@ -156,7 +156,7 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 	}
 	cdr, err := s.calls.End(req.CallID, seconds)
 	if err != nil {
-		return 404, map[string]string{"error": err.Error()}
+		return 404, map[string]errorEnvelope{"error": {Code: "NOT_FOUND", Message: err.Error()}}
 	}
 	// Subscription package: free allowance first, then discount on the
 	// billable remainder. The CDR carries the effective cost; free

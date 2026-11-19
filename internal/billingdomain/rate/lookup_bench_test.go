@@ -3,7 +3,7 @@ package rate
 import (
 	"testing"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
 )
 
 func BenchmarkLookupFast(b *testing.B) {

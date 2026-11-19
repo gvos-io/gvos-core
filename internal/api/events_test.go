@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
-	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/shared/events"
 )
 
 // capturePoster records every published event (subject + decoded
@@ -214,7 +214,7 @@ func TestEventBusCfgReloadBroadcast(t *testing.T) {
 	if code := admin("/v1/admin/rates", map[string]any{"prefix": "44", "price": 0.2}); code != 200 {
 		t.Fatalf("rate upsert: %d", code)
 	}
-	if code := admin("/v1/admin/blocklist", map[string]any{"kind": "black", "scope": "dest", "pattern": "44"}); code != 201 {
+	if code := admin("/v1/admin/blocklist-entries", map[string]any{"kind": "black", "scope": "dest", "pattern": "44"}); code != 201 {
 		t.Fatalf("blocklist add: %d", code)
 	}
 	flush(s)

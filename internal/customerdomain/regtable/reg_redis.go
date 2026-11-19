@@ -12,7 +12,7 @@ import (
 	"time"
 
 
-	"github.com/lixuanqun/gvos-core/internal/shared/rds"
+	"github.com/fastvoip/gvos-core/internal/shared/rds"
 )
 
 // RegR is the redis mirror face.

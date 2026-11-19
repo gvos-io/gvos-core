@@ -10,15 +10,15 @@ package store
 //     go test ./internal/store/ -v
 
 import (
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
 	"context"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
-	"github.com/lixuanqun/gvos-core/internal/callcore"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/blocklist"
+	"github.com/fastvoip/gvos-core/internal/callcore"
 )
 
 func testDSN() string {

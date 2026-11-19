@@ -19,16 +19,16 @@ import (
 	"os"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
-	"github.com/lixuanqun/gvos-core/internal/shared/rds"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/pkgplan"
-	"github.com/lixuanqun/gvos-core/internal/callcore"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/gateway"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/ipallow"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/riskctrl"
-	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/shared/rds"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/pkgplan"
+	"github.com/fastvoip/gvos-core/internal/callcore"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/blocklist"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/gateway"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/ipallow"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/riskctrl"
+	"github.com/fastvoip/gvos-core/internal/shared/events"
 )
 
 // startAsyncWorkers launches the durable write/exec workers. Each

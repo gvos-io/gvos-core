@@ -4,7 +4,7 @@
 package store
 
 import (
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,11 +13,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
-	"github.com/lixuanqun/gvos-core/internal/callcore"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/gateway"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/rate"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/blocklist"
+	"github.com/fastvoip/gvos-core/internal/callcore"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/gateway"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/rate"
 )
 
 // PG wraps the connection pool.
@@ -347,7 +347,7 @@ func nullIfEmpty(s string) any {
 func (p *PG) UpsertNumberList(ctx context.Context, e blocklist.Entry) error {
 	_, err := p.pool.Exec(ctx, `
         INSERT INTO number_lists (tenant_id, kind, scope, pattern, is_regex)
-        VALUES ($1::uuid, $2::numeric, $3::numeric, $4, $5)`,
+        VALUES ($1::uuid, $2, $3, $4, $5)`,
 		nullIfEmpty(e.TenantID), e.Kind, e.Scope, e.Pattern, e.IsRegex)
 	if err != nil {
 		return fmt.Errorf("insert number_lists: %w", err)
@@ -683,4 +683,55 @@ type RecordingRow struct {
 	Format    string
 	SizeBytes int64
 	Status    string
+}
+
+
+// --- webhook subscription storage (api.WebhookStore face) ---
+
+// WebhookRow is one subscription row (Secret rides along: the
+// dispatcher signs with it; the admin list endpoint must not echo it).
+type WebhookRow struct {
+	ID     string
+	URL    string
+	Secret string
+	Events []string
+	Active bool
+}
+
+// CreateWebhook inserts one subscription.
+func (p *PG) CreateWebhook(ctx context.Context, url, secret string, events []string) (string, error) {
+	var id string
+	err := p.pool.QueryRow(ctx, `INSERT INTO webhook_subscriptions (url, secret, events) VALUES ($1, $2, $3) RETURNING id::text`, url, secret, events).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("create webhook: %w", err)
+	}
+	return id, nil
+}
+
+// ListWebhooks returns active subscriptions (secrets included — the
+// dispatcher needs them to sign; the admin API never echoes them).
+func (p *PG) ListWebhooks(ctx context.Context) ([]WebhookRow, error) {
+	rows, err := p.pool.Query(ctx, `SELECT id::text, url, secret, events, active FROM webhook_subscriptions WHERE active`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []WebhookRow
+	for rows.Next() {
+		var r WebhookRow
+		if err := rows.Scan(&r.ID, &r.URL, &r.Secret, &r.Events, &r.Active); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// DeleteWebhook deactivates one subscription (soft delete).
+func (p *PG) DeleteWebhook(ctx context.Context, id string) (int, error) {
+	tag, err := p.pool.Exec(ctx, `UPDATE webhook_subscriptions SET active = false WHERE id = $1::uuid`, id)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
 }

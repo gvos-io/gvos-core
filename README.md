@@ -4,7 +4,7 @@
 
 **云原生话务运营平台 — 软交换编排 · 实时精确计费 · NATS 事件总线 · 内置风控**
 
-[![CI](https://github.com/lixuanqun/gvos-core/actions/workflows/ci.yml/badge.svg)](https://github.com/lixuanqun/gvos-core/actions/workflows/ci.yml)
+[![CI](https://github.com/fastvoip/gvos-core/actions/workflows/ci.yml/badge.svg)](https://github.com/fastvoip/gvos-core/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.21%2B-00ADD8.svg)](go.mod)
 
@@ -105,6 +105,7 @@ Windows 开发机（i7-13700H，双副本 + 真 PG/NATS），方法与原始数�
 - [架构设计](docs/02-architecture.md) · [部署规划](docs/deployment-plan.md) · [运维手册](docs/operations-manual.md)
 - [竞品对标（昆石 VOS/SBC）](docs/competitive-analysis-vos-sbc.md)（功能差距 + 排期输入）
 - [Redis 收口方案](docs/redis-adoption-plan.md)（规划稿）
+- [Voice Agent 接入：Pipecat 原生 SIP（主路径）](docs/pipecat-integration-plan.md) · [LiveKit SIP（WebRTC/多方）](docs/livekit-integration-plan.md)（规划稿）
 - [自测报告（130 项）](docs/bench/selftest-report-2026-11-19.md) · [容量报告 v0.4](docs/bench/capacity-report-2026-11-19.md) · [验收报告 v0.3](docs/bench/acceptance-report-2026-10-07.md)
 
 ## 参与

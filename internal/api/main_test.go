@@ -11,9 +11,9 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
-	"github.com/lixuanqun/gvos-core/internal/shared/rds"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/shared/rds"
 )
 
 // TestMain pins the internal token for the signaling face (Phase A

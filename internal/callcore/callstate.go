@@ -8,14 +8,14 @@ import (
 	"context"
 	"strings"
 	"strconv"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/billing"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/rate"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/billing"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/rate"
 )
 
 // TeardownFunc is invoked when a live call must be torn down (balance

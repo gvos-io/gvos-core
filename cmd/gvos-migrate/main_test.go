@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/lixuanqun/gvos-core/internal/shared/migrate"
+	"github.com/fastvoip/gvos-core/internal/shared/migrate"
 )
 
 // mockCore is a minimal stand-in for the gv-core admin API: enough

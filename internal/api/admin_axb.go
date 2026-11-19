@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/axb"
+	"github.com/fastvoip/gvos-core/internal/customerdomain/axb"
 )
 
 // handleAXBBind serves POST /v1/admin/axb/bindings

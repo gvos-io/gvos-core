@@ -2,7 +2,7 @@
 package account
 
 import (
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"sync"
 	"time"
@@ -12,17 +12,17 @@ import (
 // end account). Parent chains drive cascade charging: each level's rate
 // group can add margin on the same CDR.
 type Account struct {
-	ID         string
-	Username   string // SIP auth username (PG mode index key)
-	Name       string
-	ParentID   string // "" for tenant root
-	RateGroup  string // which rate.Table applies
-	Currency   string
-	Postpaid   bool    // skip prepaid locks when true
-	Credit     money.Amount // prepaid balance (ADR-0003 fixed point)
-	MaxDebt    money.Amount // allowed negative balance
-	Concurrent int     // concurrent-call cap, 0 = unlimited
-	CPS        int     // calls-per-second cap, 0 = unlimited
+	ID         string       `json:"id"`
+	Username   string       `json:"username"` // SIP auth username (PG mode index key)
+	Name       string       `json:"name"`
+	ParentID   string       `json:"parent_id"` // "" for tenant root
+	RateGroup  string       `json:"rate_group"` // which rate.Table applies
+	Currency   string       `json:"currency"`
+	Postpaid   bool         `json:"postpaid"` // skip prepaid locks when true
+	Credit     money.Amount `json:"credit"` // prepaid balance (ADR-0003 fixed point)
+	MaxDebt    money.Amount `json:"max_debt"` // allowed negative balance
+	Concurrent int          `json:"concurrent"` // concurrent-call cap, 0 = unlimited
+	CPS        int          `json:"cps"` // calls-per-second cap, 0 = unlimited
 }
 
 // Store is an in-memory account registry with balance operations. The

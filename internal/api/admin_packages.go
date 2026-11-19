@@ -2,16 +2,21 @@
 package api
 
 import (
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
 	"encoding/json"
 	"net/http"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/pkgplan"
-	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/pkgplan"
+	"github.com/fastvoip/gvos-core/internal/shared/events"
 )
 
 func (s *Server) handlePackages(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) || !requirePOST(w, r) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		snap := s.pkg.Snapshot()
+		writeJSON(w, 200, map[string]any{"packages": snap.Packages, "count": len(snap.Packages)})
 		return
 	}
 	var req struct {

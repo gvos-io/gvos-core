@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/shared/acl"
+	"github.com/fastvoip/gvos-core/internal/shared/acl"
 )
 
 // handleKeyCreate serves POST /v1/admin/keys {"role","tenant_id"}.

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
+	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
 )
 
 // TestEndToEndCallFlow simulates the exact Kamailio event sequence for
@@ -150,7 +150,7 @@ func TestBlocklistRejectsCall(t *testing.T) {
 
 	// Blacklist the prefix via the admin API.
 	b, _ := json.Marshal(map[string]any{"kind": "black", "scope": "dest", "pattern": "86139"})
-	req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/blocklist", bytes.NewReader(b))
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/blocklist-entries", bytes.NewReader(b))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 	resp, err := http.DefaultClient.Do(req)
@@ -170,7 +170,7 @@ func TestBlocklistRejectsCall(t *testing.T) {
 
 	// Remove the rule; the range is callable again.
 	rb, _ := json.Marshal(map[string]any{"kind": "black", "scope": "dest", "pattern": "86139", "remove": true})
-	req2, _ := http.NewRequest("POST", srv.URL+"/v1/admin/blocklist", bytes.NewReader(rb))
+	req2, _ := http.NewRequest("POST", srv.URL+"/v1/admin/blocklist-entries", bytes.NewReader(rb))
 	req2.Header.Set("Authorization", "Bearer "+adminToken)
 	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil || resp2.StatusCode != 200 {
@@ -194,7 +194,7 @@ func TestRiskEngineBlocksBurst(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"rules": []map[string]any{{"id": "burst", "kind": "freq", "action": "block", "limit": 3}},
 	})
-	req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/risk", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/risk-rules", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 	resp, err := http.DefaultClient.Do(req)
