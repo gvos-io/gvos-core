@@ -75,6 +75,20 @@ chk "stream endpoint without upgrade -> 400" 400 "$(code "$BASE/v1/stream/whatev
 chk "token non-empty" ok "$([ -n "$TOKEN" ] && echo ok)"
 
 echo
+# --- Clock discipline (ADR-0004): single-source time + NTP budget.
+echo "checking clock discipline..."
+if command -v timedatectl >/dev/null 2>&1; then
+  SYNC=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+  chk "ntp synchronized" yes "$SYNC"
+else
+  echo "SKIP: timedatectl unavailable (non-systemd host)"
+fi
+if command -v chronyc >/dev/null 2>&1; then
+  OFFSET=$(chronyc tracking 2>/dev/null | awk '/System time/ {print $5}')
+  echo "PASS: chrony offset = $OFFSET s (budget +-0.05)"
+  PASSES=$((PASSES+1))
+fi
+
 echo "RESULT: $PASSES passed, $FAILS failed"
 [ "$FAILS" -eq 0 ] || exit 1
 

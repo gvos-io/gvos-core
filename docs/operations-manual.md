@@ -150,3 +150,12 @@ curl -X POST -H "Authorization: Bearer <token>"   -d '{"remove_id":"quarantine"}
 - Kamailio 侧需设置环境变量：`GVOS_CORE_HOST`（gv-core 地址）与 `GVOS_INTERNAL_TOKEN`
   （内部快照令牌，必须与 gv-core 一致；生产环境更换默认值）
 - Digest HA1 认证走 authcache htable（24h TTL）——稳态下每通呼叫 0 次 PG 查询
+
+## 时钟纪律（ADR-0004）
+
+计费时间戳的权威是 **gv-core 进程时钟**（CDR 落库以 gv-core 收到事件时刻为准，Kamailio 侧载荷时间为辅）；PG 的 now() 仅作审计行时间。多副本部署的硬性前置：
+
+- **所有 gv-core / Kamailio / PG 节点必须 NTP 同步，偏差预算 ±50ms**；
+- 每次交付跑 `bash test/security/baseline.sh`（含 NTP 同步与 chrony 偏移检查项）；
+- 跨副本对账报告含"时钟偏差抽检"一节；
+- 套餐周期 key（cycleKey）与风控日费用窗口由 gv-core 统一生成，Kamailio 不生成周期边界 key。
