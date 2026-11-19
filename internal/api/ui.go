@@ -108,6 +108,10 @@ function saveTok() {
   localStorage.setItem('gvos_tok', TOK);
   load();
 }
+function playRec(cid) {
+  const w = window.open('/v1/recording/' + encodeURIComponent(cid) + '/agent', '_blank');
+  if (!w) alert('popup blocked; open /v1/recording/' + cid + '/agent');
+}
 function tab(t) {
   TAB = t;
   for (const x of ['accounts','rates','cdrs']) {
