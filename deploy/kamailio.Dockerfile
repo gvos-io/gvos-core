@@ -29,8 +29,12 @@ RUN apt-get update && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Config and certificates are volume-mounted at runtime (see compose);
-# the packaged /etc/kamailio stays as an untouched fallback.
+# the packaged /etc/kamailio stays as an untouched fallback. The
+# entrypoint materializes @NODE@ (per-node NATS subjects) into a
+# runtime copy before exec.
+COPY kamailio-entrypoint.sh /usr/local/bin/gvos-kamailio-entrypoint
+RUN chmod +x /usr/local/bin/gvos-kamailio-entrypoint
 
 EXPOSE 5060/udp 5060/tcp 4444/tcp
 
-ENTRYPOINT ["kamailio", "-DD", "-E", "-f", "/etc/kamailio/kamailio.cfg"]
+ENTRYPOINT ["gvos-kamailio-entrypoint"]

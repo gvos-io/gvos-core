@@ -50,12 +50,13 @@
 
 ## 3. 核心数据流
 
-### 3.1 呼叫建立（计费锁定）
+### 3.1 呼叫建立（计费锁定，NATS 异步 RPC）
 
-1. INVITE 到 Kamailio → 账户认证（Redis 查账户状态+鉴权凭据）。
-2. Kamailiio 通过本地缓存的路由决策（由控制平面下发快照）选网关；无缓存则 JSON-RPC 同步调用路由引擎（预算 P99 5ms）。
-3. **计费预锁定**：路由引擎同时向 Redis 写入 `call_lock(account, estimated_cost, ttl)`，余额不足直接 403（行业标准"实时计费、强制拆线"语义）。
-4. 183/200 后媒体走 RTPengine 直通（对称 RTP/DTLS），信令 Kamailiio 透明转发（P0 为 proxy 模式；选择 B2BUA 模式的客户在 FreeSWITCH 上承接，保通话不断）。
+1. INVITE 到 Kamailio → 账户认证（本地 HA1 缓存，DB 兜底）。
+2. **计费预锁定（异步 RPC）**：Kamailio 以 `nats_publish` 携带挂起坐标（tindex/tlabel）发 `gvos.svc.call.start`，`t_suspend()` 挂起 INVITE 事务（worker 立即释放去接下一通）；gv-core 应答回**节点唯一回复主题** `gvos-edge-reply-<node>`，持有事务的节点 `t_continue` 恢复：余额不足 403，放行则重选网关中继。挂起→恢复全程 <5ms 预算。
+3. **超时兜底**：1s janitor 定时器扫描挂起超 2s 的锁定，`t_continue` 进 503（Billing Unavailable）——总线宕机时呼叫建立**有界失败**（最多 2s 拒绝），不无限挂起。
+4. **关键依赖声明**：开启 WITH_NATS_RPC 后事件总线成为呼叫建立路径的关键依赖（NATS 挂 = 新呼叫 503；HTTP 模式下 NATS 只丢遥测）。部署形态按此选择开关；Kamailio 与 gv-core 间层间通信全部走 NATS，HTTP 只保留北向管理面与南向 webhook 出口。
+5. 183/200 后媒体走 RTPengine 直通（对称 RTP/DTLS），信令 Kamailiio 透明转发（P0 为 proxy 模式；选择 B2BUA 模式的客户在 FreeSWITCH 上承接，保通话不断）。answer 事件与 BYE 话单同样经总线（`gvos.svc.call.answer` / `gvos.cdr.raw`，载荷含 rtpengine QoS 统计）。
 
 ### 3.2 计费与拆线
 

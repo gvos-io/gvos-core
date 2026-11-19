@@ -375,12 +375,33 @@ func startCfgRebroadcaster(s *Server) {
 // startCallSvc exposes the call lifecycle over NATS request/reply —
 // the same core logic as the HTTP face (callStart/callAnswer/callEnd),
 // reply envelope {code, body} carries the HTTP status so bus clients
-// see identical semantics. Kamailio stays on HTTP for the lock (sync
-// gate); this is the endpoint for bus-native clients and the landing
-// spot if signaling ever moves to nats_publish + a bridge.
+// see identical semantics. The start subject serves two audiences:
+// bus-native clients and the Kamailio async bill-lock (WITH_NATS_RPC:
+// the request carries tindex/tlabel; the reply envelope echoes them
+// plus the call_id so the signaling node can t_continue the suspended
+// INVITE from its node-unique reply subject).
 func startCallSvc(s *Server) {
 	callReply := func(code int, body any) []byte {
 		b, _ := json.Marshal(map[string]any{"code": code, "body": body})
+		return b
+	}
+	// lockReply wraps the start answer with the suspend coordinates
+	// the Kamailio edge needs (tindex/tlabel are opaque pass-throughs;
+	// call_id rides along for log correlation on the resume side).
+	lockReply := func(code int, body any, req []byte) []byte {
+		var suspend struct {
+			CallID  string `json:"call_id"`
+			TIndex  int64  `json:"tindex"`
+			TLabel  int64  `json:"tlabel"`
+		}
+		_ = json.Unmarshal(req, &suspend)
+		if suspend.TIndex == 0 && suspend.TLabel == 0 {
+			return callReply(code, body) // plain bus client: no suspend to resume
+		}
+		b, _ := json.Marshal(map[string]any{
+			"code": code, "body": body,
+			"call_id": suspend.CallID, "tindex": suspend.TIndex, "tlabel": suspend.TLabel,
+		})
 		return b
 	}
 	for subject, serve := range map[string]func(req []byte) []byte{
@@ -390,7 +411,7 @@ func startCallSvc(s *Server) {
 				return callReply(400, map[string]string{"error": "call_id and to_user required"})
 			}
 			code, body := s.callStart(r)
-			return callReply(code, body)
+			return lockReply(code, body, req)
 		},
 		events.SubjectCallAnswer: func(req []byte) []byte {
 			var r struct {

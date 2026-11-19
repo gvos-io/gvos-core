@@ -83,6 +83,7 @@ services:
       # NATS publish routes on: registration events + CDR over bus.
       WITH_NATS: "1"
       WITH_NATS_CDR: "1"
+      WITH_NATS_RPC: "1"
     ports:
       - "15060:5060/udp"
       - "15060:5060/tcp"
