@@ -13,6 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 // Storage is one object backend.
@@ -78,4 +81,64 @@ func fileModTime(path string) time.Time {
 		return time.Now()
 	}
 	return st.ModTime()
+}
+
+// ---- S3/MinIO backend (the OSS-compatible exit) ----
+
+// MinIO stores objects on any S3-compatible endpoint (MinIO for
+// on-prem, aliyun OSS S3-compatible mode for cloud). Enabled via
+// GVOS_RECORDING_S3_ENDPOINT (+ _AK/_SK/_BUCKET); GVOS_RECORDING_S3_SECURE
+// selects TLS (default on).
+type MinIO struct {
+	Client *minio.Client
+	Bucket string
+	scheme string
+}
+
+// NewMinIO builds the backend from the env tuple; a failed client
+// construction is a hard error (the pipeline refuses to run without
+// its archive).
+func NewMinIO(endpoint, accessKey, secretKey, bucket string, secure bool) (*MinIO, error) {
+	cli, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure: secure,
+	})
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := cli.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+		exists, eb := cli.BucketExists(ctx, bucket)
+		if !exists || eb != nil {
+			return nil, fmt.Errorf("minio bucket %s: %w", bucket, err)
+		}
+	}
+	return &MinIO{Client: cli, Bucket: bucket, scheme: "http"}, nil
+}
+
+// Put streams the local file into the bucket (multipart by the SDK).
+func (m *MinIO) Put(ctx context.Context, objectKey, localPath string) (string, error) {
+	_, err := m.Client.FPutObject(ctx, m.Bucket, objectKey, localPath,
+		minio.PutObjectOptions{
+			ContentType:          "audio/mpeg",
+			DisableContentSha256: false, // single-shot PUT (S3-simple); streaming chunked mode breaks naive proxies
+		})
+	if err != nil {
+		return "", err
+	}
+	return m.Locator(objectKey), nil
+}
+
+// Delete removes the object.
+func (m *MinIO) Delete(ctx context.Context, objectKey string) error {
+	return m.Client.RemoveObject(ctx, m.Bucket, objectKey, minio.RemoveObjectOptions{})
+}
+
+// Kind implements Storage.
+func (m *MinIO) Kind() string { return "s3" }
+
+// Locator is the canonical object URI (play API resolves via the SDK).
+func (m *MinIO) Locator(objectKey string) string {
+	return fmt.Sprintf("s3://%s/%s", m.Bucket, objectKey)
 }

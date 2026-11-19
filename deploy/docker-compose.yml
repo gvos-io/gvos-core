@@ -118,6 +118,19 @@ services:
   # rtpengine DUX spool and emits MP3 per SSRC. Opt-in via
   # `--profile recording` — the spool consumer format issue recorded in
   # the plan §R0 makes this experimental until the verification batch.
+  # Object storage for recordings (S3-compatible): the local minio
+  # mirrors the production aliyun-OSS S3 mode. Same recording profile.
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: gvos
+      MINIO_ROOT_PASSWORD: gvos-minio-secret
+    ports:
+      - "${GVOS_MINIO_PORT:-29000}:9000"
+      - "${GVOS_MINIO_CONSOLE_PORT:-29001}:9001"
+    profiles: ["recording"]
+
   recording:
     build:
       context: .
