@@ -239,6 +239,17 @@ func (p *PG) CreateAccountWithHA1(ctx context.Context, tenantID, parentID, name,
 	return id, nil
 }
 
+// WriteBalance sets an account's credit to an absolute value (Redis
+// snapshot write-back path; no ledger row — the ledger stays
+// call/topup-driven).
+func (p *PG) WriteBalance(ctx context.Context, accountID string, credit money.Amount) error {
+	_, err := p.pool.Exec(ctx, `UPDATE accounts SET credit = $1::numeric WHERE id = $2::uuid`, credit.String(), accountID)
+	if err != nil {
+		return fmt.Errorf("write balance: %w", err)
+	}
+	return nil
+}
+
 // TopUp adjusts an account balance (delta signed) and returns the new
 // balance; it also appends the ledger row so topup and adjustment stay
 // in the append-only history.

@@ -647,4 +647,7 @@ func AttachRedis(s *Server, c *rds.Client) {
 		log.Printf("redis balance seed partial: %v (SETNX keeps live values; retry at next boot)", err)
 	}
 	s.calls.SetBalanceAuthority(s.bal)
+	// Phase 2: the shared admission ledger (chain-mirrored ZSETs +
+	// per-second CPS counters) closes the ×N concurrent/CPS oversell.
+	s.calls.SetAdmissionLedger(callcore.NewAdmissionR(c))
 }

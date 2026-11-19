@@ -17,6 +17,7 @@ func (s *Server) startReportWorker() {
 	run := func() {
 		ctx, cancel := contextWithTimeoutDuration(context.Background(), 30*time.Second)
 		defer cancel()
+		s.snapshotRedisBalances(ctx)
 		for _, day := range []string{todayStr(-1), todayStr(0)} {
 			if n, err := s.pg.RollupDaily(ctx, day); err != nil {
 				logPrintf("REPORT rollup %s failed: %v", day, err)

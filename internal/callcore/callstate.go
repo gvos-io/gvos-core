@@ -60,6 +60,7 @@ type Manager struct {
 	calls       map[string]*Call
 	store       *account.Store
 	bal         BalanceAuthority // nil = the in-memory store path
+	adm         *AdmissionR      // nil = local-map admission (single replica)
 	charger     *billing.Charger
 	teardown    TeardownFunc
 	interval    time.Duration // interim deduction period
@@ -70,6 +71,11 @@ type Manager struct {
 // SetBalanceAuthority swaps the money authority (Redis phase 1). The
 // in-memory fallback stays for configuration reads.
 func (m *Manager) SetBalanceAuthority(b BalanceAuthority) { m.bal = b }
+
+// SetAdmissionLedger swaps the admission source (Redis phase 2):
+// concurrent/CPS caps count the shared ledger instead of the local
+// map, closing the ×N oversell. nil = local admission.
+func (m *Manager) SetAdmissionLedger(a *AdmissionR) { m.adm = a }
 
 // reserve/commit route through the balance authority (fail-closed on
 // start: an unavailable authority is an error the caller turns into a
@@ -219,23 +225,48 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 
 	m.mu.Lock()
 
-	// Concurrent limit: live calls of this account (chain ancestors
-	// each carry their own limit — the whole chain must admit it).
-	if err := m.admitConcurrent(accountID, acc); err != nil {
-		m.mu.Unlock()
-		return err
-	}
-	// CPS limit: start events in the current second for this account.
-	if err := m.admitCPS(accountID, acc); err != nil {
-		m.mu.Unlock()
-		return err
+	// Admission: with the Redis ledger wired (multi-replica), caps
+	// count the shared truth; locally (single replica) the map walk
+	// below. Ledger errors fail closed — admission is money-adjacent.
+	if m.adm != nil {
+		chain, _ := m.store.Chain(accountID)
+		caps := map[string]int{}
+		for _, a := range append(chain, acc) {
+			if a.Concurrent > 0 {
+				caps[a.ID] = a.Concurrent
+			}
+		}
+		ids := []string{accountID}
+		for _, a := range chain {
+			ids = append(ids, a.ID)
+		}
+		if err := m.adm.AdmitConcurrent(context.Background(), ids, accountID, caps); err != nil {
+			m.mu.Unlock()
+			return err
+		}
+		if err := m.adm.AdmitCPS(context.Background(), accountID, m.now().Unix(), acc.CPS); err != nil {
+			m.mu.Unlock()
+			return err
+		}
+	} else {
+		// Concurrent limit: live calls of this account (chain ancestors
+		// each carry their own limit — the whole chain must admit it).
+		if err := m.admitConcurrent(accountID, acc); err != nil {
+			m.mu.Unlock()
+			return err
+		}
+		// CPS limit: start events in the current second for this account.
+		if err := m.admitCPS(accountID, acc); err != nil {
+			m.mu.Unlock()
+			return err
+		}
 	}
 
 	if err := m.reserve(context.Background(), accountID, est); err != nil {
 		m.mu.Unlock()
 		return err
 	}
-	m.calls[callID] = &Call{
+	c := &Call{
 		ID:          callID,
 		AccountID:   accountID,
 		Destination: dest,
@@ -243,6 +274,22 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 		Start:       m.now(),
 		Lock:        est,
 		Recorded:    recorded,
+	}
+	m.calls[callID] = c
+	if m.adm != nil {
+		chain, _ := m.store.Chain(accountID)
+		keys := []string{accountID}
+		for _, a := range chain {
+			if a.ID != accountID {
+				keys = append(keys, a.ID)
+			}
+		}
+		if err := m.adm.StartChain(context.Background(), callID, keys, c.Start); err != nil {
+			// Ledger registration failed after local admit: log and
+			// continue — the local map still owns runtime detail, and
+			// the sweeper's zombie scan tolerates stragglers.
+			_ = err
+		}
 	}
 	m.mu.Unlock()
 	return nil
@@ -416,6 +463,16 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 		return nil, fmt.Errorf("unknown call %q", callID)
 	}
 	delete(m.calls, callID)
+	if m.adm != nil {
+		chain, _ := m.store.Chain(c.AccountID)
+		keys := []string{c.AccountID}
+		for _, a := range chain {
+			if a.ID != c.AccountID {
+				keys = append(keys, a.ID)
+			}
+		}
+		_ = m.adm.EndChain(context.Background(), callID, keys)
+	}
 	entry := c.Rate
 	lock := c.Lock
 	accrued := c.Accrued

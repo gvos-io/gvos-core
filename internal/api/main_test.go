@@ -239,3 +239,42 @@ func srvURL(t *testing.T, s *Server) string {
 	t.Cleanup(srv.Close)
 	return srv.URL
 }
+
+// TestAdmissionUnderRedisAuthority: with Redis wired, the concurrent
+// cap counts the shared ledger — two starts admitted, the third over
+// the chain cap gets 429.
+func TestAdmissionUnderRedisAuthority(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rc, err := rds.New("redis://" + mr.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+
+	s := NewServer()
+	// Pin the demo account's chain cap: agent1 (parent of 1000) cap 2.
+	if a, err := s.store.Get("agent1"); err == nil {
+		a.Concurrent = 2
+		_ = s.store.Put(a)
+	}
+	AttachRedis(s, rc)
+	url := srvURL(t, s)
+
+	start := func(id string) int {
+		t.Helper()
+		b, _ := json.Marshal(map[string]string{
+			"call_id": id, "from_user": "1000", "to_user": "8613800138000",
+		})
+		code, _ := postInternal(t, url+"/v1/call/start", b)
+		return code
+	}
+	if c := start("adm-1"); c != 200 {
+		t.Fatalf("first start: %d", c)
+	}
+	if c := start("adm-2"); c != 200 {
+		t.Fatalf("second start: %d", c)
+	}
+	if c := start("adm-3"); c != 429 {
+		t.Fatalf("third start over chain cap = %d, want 429", c)
+	}
+}
