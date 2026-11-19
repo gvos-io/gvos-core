@@ -84,6 +84,7 @@ docker compose -f compose-ha.yml -p gvosha up -d   # standby basebackup 成功�
 
 1. **NATS 单点**（compose 注释已自认）：生产先改 3 节点 NATS 集群跑同一 JetStream stream——配置量小（routes 互联 + 共享 supercluster），是当前性价比最高的补齐项。
 2. **SIP 入口**：两节点 5060/5061 直暴仅适合演练；生产前置任意 UDP/TCP LB 或 DNS SRV（节点无状态，分发无需亲和）。
+3. **PG 自动故障切换（已落地轻量版，2026-11-20）**：双机热备的自动切换分两层——①应用层：gv-core 的 DSN 改多主机（`pg-primary,pg-standby`）+ `target_session_attrs=read-write`，pgx 按序探测、只连可写节点，standby 被 promote 后**无需改配置即自动收敛**（pgx 原生能力）；②提升层：pg-standby 容器内置 watchdog（探 primary 连续 3 次失败 → `pg_ctl promote` 自动提升）。**Patroni 三节点同步复制仍是生产推荐**（共识选举、RPO 控制、脑裂防护），轻量版适合 compose-ha 交付档位。
 3. **PG 自动故障切换**：当前手动 promote；容量/客户档位上来后上 Patroni 三节点同步复制（架构文档已规划，代码未进）。
 
 ### 3.3 K8s 集群（Helm chart）
