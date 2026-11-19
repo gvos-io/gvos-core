@@ -25,6 +25,23 @@ type Account struct {
 	CPS        int          `json:"cps"` // calls-per-second cap, 0 = unlimited
 }
 
+// ParseID guards the PG-mode topup path: only strict non-UUID shapes
+// that would trip PG's uuid cast short-circuit here (memory-mode ids
+// like "1000" or "acc-..." pass; unknown-but-well-formed uuids fall
+// through to the normal 404 from the store/PG lookup).
+func ParseID(id string) (string, error) {
+	// PG uuid shape check only when it looks like it was MEANT to be
+	// a uuid (36 chars with dashes) but isn't valid — or contains
+	// characters PG will reject outright.
+	if len(id) == 36 && (id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-') {
+		return "", fmt.Errorf("bad account id %q", id)
+	}
+	if len(id) > 64 {
+		return "", fmt.Errorf("account id too long")
+	}
+	return id, nil
+}
+
 // Store is an in-memory account registry with balance operations. The
 // production implementation swaps this for Redis (call locks) +
 // PostgreSQL (authoritative), same method surface.

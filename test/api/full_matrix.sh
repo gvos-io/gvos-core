@@ -73,7 +73,7 @@ chk "axb delete missing" 404 "$(code -X DELETE -H "Authorization: Bearer $KEY" "
 # ---- keys ----
 KEYNEW=$(body -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"role":"operator"}' "$BASE/v1/admin/keys")
 KPRE=$(echo "$KEYNEW" | python -c "import json,sys; print(json.load(sys.stdin).get('prefix',''))" 2>/dev/null)
-chk "keys create" 201 "$(echo "$KEYNEW" | grep -q secret && echo 201)"
+chk "keys create" 201 "$(echo "$KEYNEW" | grep -q gvos_ && echo 201)"
 chk "keys list" 200 "$(code -H "Authorization: Bearer $KEY" "$BASE/v1/admin/keys")"
 chk "keys delete" 200 "$(code -X DELETE -H "Authorization: Bearer $KEY" "$BASE/v1/admin/keys/$KPRE")"
 

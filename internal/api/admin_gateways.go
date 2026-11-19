@@ -10,7 +10,8 @@ import (
 )
 
 func (s *Server) handleGatewaySet(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) || !requirePOST(w, r) {
+	if !s.requireAdmin(w, r) || r.Method != http.MethodPut {
+		httpError(w, 405, "PUT required")
 		return
 	}
 	var req struct {

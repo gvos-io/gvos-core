@@ -194,7 +194,7 @@ func TestRiskEngineBlocksBurst(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"rules": []map[string]any{{"id": "burst", "kind": "freq", "action": "block", "limit": 3}},
 	})
-	req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/risk-rules", bytes.NewReader(body))
+	req, _ := http.NewRequest("PUT", srv.URL+"/v1/admin/risk-rules", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 	resp, err := http.DefaultClient.Do(req)

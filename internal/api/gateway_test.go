@@ -46,7 +46,7 @@ func TestGatewayAdminAPI(t *testing.T) {
 	}
 
 	// Full-set replace.
-	resp := do("POST", "/v1/admin/gateways",
+	resp := do("PUT", "/v1/admin/gateways",
 		`{"gateways":[{"id":"g1","name":"primary","sip_addr":"10.0.0.1:5060","protocol":"udp","priority":5,"enabled":true},
 		             {"id":"g2","name":"backup","sip_addr":"10.0.0.2:5060","protocol":"udp","priority":10,"enabled":true}]}`)
 	if resp.StatusCode != 200 {
@@ -70,7 +70,7 @@ func TestGatewayAdminAPI(t *testing.T) {
 	}
 
 	// Invalid entry rejected wholesale (400), state untouched.
-	resp = do("POST", "/v1/admin/gateways", `{"gateways":[{"id":"x","name":"x"}]}`)
+	resp = do("PUT", "/v1/admin/gateways", `{"gateways":[{"id":"x","name":"x"}]}`)
 	if resp.StatusCode != 400 {
 		t.Fatalf("invalid replace status = %d (want 400)", resp.StatusCode)
 	}
@@ -80,7 +80,7 @@ func TestGatewayAdminAPI(t *testing.T) {
 	}
 
 	// Single removal.
-	resp = do("POST", "/v1/admin/gateways", `{"remove_id":"g2"}`)
+	resp = do("PUT", "/v1/admin/gateways", `{"remove_id":"g2"}`)
 	if resp.StatusCode != 200 {
 		t.Fatalf("remove status = %d", resp.StatusCode)
 	}
@@ -90,7 +90,7 @@ func TestGatewayAdminAPI(t *testing.T) {
 	}
 
 	// Unknown removal: 404.
-	resp = do("POST", "/v1/admin/gateways", `{"remove_id":"nope"}`)
+	resp = do("PUT", "/v1/admin/gateways", `{"remove_id":"nope"}`)
 	if resp.StatusCode != 404 {
 		t.Fatalf("unknown remove status = %d (want 404)", resp.StatusCode)
 	}

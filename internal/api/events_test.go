@@ -211,7 +211,19 @@ func TestEventBusCfgReloadBroadcast(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-	if code := admin("/v1/admin/rates", map[string]any{"prefix": "44", "price": 0.2}); code != 200 {
+	adminPUT := func(path string, body any) int {
+		t.Helper()
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest(http.MethodPut, srv.URL+path, bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := adminPUT("/v1/admin/rates", map[string]any{"prefix": "44", "price": 0.2}); code != 200 {
 		t.Fatalf("rate upsert: %d", code)
 	}
 	if code := admin("/v1/admin/blocklist-entries", map[string]any{"kind": "black", "scope": "dest", "pattern": "44"}); code != 201 {

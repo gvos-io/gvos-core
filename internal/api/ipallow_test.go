@@ -4,6 +4,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -117,6 +118,92 @@ func TestIPAllowAdminAPI(t *testing.T) {
 	// Unknown remove_id -> 404.
 	if code, _ := post("/v1/admin/ipallow/rules", map[string]any{"remove_id": "nope"}, true); code != 404 {
 		t.Errorf("unknown remove: %d, want 404", code)
+	}
+}
+
+// TestIPAllowDeleteRoute: the resource DELETE path must behave exactly
+// like the remove_id form — memory updated, one broadcast emitted, and
+// the persisted shape must be the plain rules array ([]ipallow.Rule),
+// because NewPGServer restores the setting by unmarshalling into that
+// type (a broadcast-shaped map survives PG but fails the restore, and
+// the empty result default-denies every SIP source after a restart).
+// PG is nil here, so the persistence contract is pinned by marshalling
+// what this handler would hand PutSetting.
+func TestIPAllowDeleteRoute(t *testing.T) {
+	s := NewServer()
+	s.ipallow.Reload([]ipallow.Rule{
+		{ID: "office", CIDR: "192.168.1.0/24", Action: "allow"},
+		{ID: "quarantine", CIDR: "192.168.1.66/32", Action: "deny"},
+		{ID: "vpn", CIDR: "10.8.0.0/16", Action: "allow"},
+	})
+	cap := &capturePoster{}
+	s.events = events.NewWithPoster(cap)
+	srv := httptest.NewServer(MuxFor(s))
+	defer srv.Close()
+	defer flush(s)
+
+	req, _ := http.NewRequest("DELETE", srv.URL+"/v1/admin/ipallow/rules/quarantine", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err := srv.Client().Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("DELETE: %v %d", err, resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	if got := s.ipallow.Count(); got != 2 {
+		t.Fatalf("count after DELETE = %d, want 2", got)
+	}
+	// The deny exception is gone: 192.168.1.66 falls back to the
+	// covering allow rule ("office"), which is the point of deleting it.
+	if allowed, matched := s.ipallow.Check(net.ParseIP("192.168.1.66")); !allowed || matched != "office" {
+		t.Errorf("after deleting the deny rule: allowed=%v matched=%q, want true/office", allowed, matched)
+	}
+	if allowed, _ := s.ipallow.Check(net.ParseIP("10.8.0.1")); !allowed {
+		t.Error("unrelated allow rule lost by DELETE")
+	}
+
+	// Exactly one broadcast, carrying the full kept set (Kamailio
+	// IPALLOW_APPLY and the 60s rebroadcaster both rely on it).
+	subjects, bodies := cap.snapshot()
+	broadcasts := 0
+	for i, name := range subjects {
+		if name == events.SubjectCfgReload && bodies[i]["entity"] == "ip_allowlist" {
+			broadcasts++
+			rules, ok := bodies[i]["rules"].([]any)
+			if !ok || len(rules) != 2 {
+				t.Errorf("broadcast payload rules = %v", bodies[i]["rules"])
+			}
+		}
+	}
+	if broadcasts != 1 {
+		t.Errorf("ip_allowlist broadcasts = %d, want 1", broadcasts)
+	}
+
+	// Persistence contract: what this handler persists must round-trip
+	// through the restore type. The handler keeps kept as
+	// []ipallow.Rule — assert that shape directly (PG is nil in-memory;
+	// this is the value PutSetting would marshal).
+	var restored []ipallow.Rule
+	if b, err := json.Marshal(s.ipallow.Rules()); err != nil {
+		t.Fatal(err)
+	} else if err := json.Unmarshal(b, &restored); err != nil {
+		t.Fatalf("persisted shape does not unmarshal into []ipallow.Rule: %v", err)
+	} else if len(restored) != 2 {
+		t.Fatalf("restored rules = %d, want 2", len(restored))
+	}
+
+	// Unknown id -> 404, nothing broadcast.
+	beforeSubjects, _ := cap.snapshot()
+	before := len(beforeSubjects)
+	req2, _ := http.NewRequest("DELETE", srv.URL+"/v1/admin/ipallow/rules/nope", nil)
+	req2.Header.Set("Authorization", "Bearer "+adminToken)
+	resp2, err := srv.Client().Do(req2)
+	if err != nil || resp2.StatusCode != 404 {
+		t.Fatalf("DELETE unknown: %v %d", err, resp2.StatusCode)
+	}
+	resp2.Body.Close()
+	if afterSubjects, _ := cap.snapshot(); len(afterSubjects) != before {
+		t.Errorf("unknown DELETE broadcast (%d -> %d)", before, len(afterSubjects))
 	}
 }
 

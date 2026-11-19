@@ -11,7 +11,7 @@ import (
 )
 
 func (s *Server) handleRateUpsert(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) || !requirePOST(w, r) {
+	if !s.requireAdmin(w, r) {
 		return
 	}
 	var req struct {

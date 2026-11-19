@@ -138,7 +138,21 @@ func TestAdminRateUpsertLiveEffect(t *testing.T) {
 	}
 
 	// Halve the CN mobile price: 0.05 -> 0.025.
-	code, m := authed("PUT", "/v1/admin/rates", map[string]any{
+	putJSON := func(path string, body any) (int, map[string]any) {
+		t.Helper()
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest(http.MethodPut, srv.URL+path, bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var m map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&m)
+		return resp.StatusCode, m
+	}
+	code, m := putJSON("/v1/admin/rates", map[string]any{
 		"prefix": "8613", "price": 0.025,
 	})
 	if code != 200 {
@@ -191,10 +205,22 @@ func TestAdminValidation(t *testing.T) {
 	if code := authedPost("/v1/admin/accounts/x/topup", map[string]any{"delta": 0}); code != 400 {
 		t.Errorf("topup zero delta: %d, want 400", code)
 	}
-	if code := authed("PUT", "/v1/admin/rates", map[string]any{"prefix": "", "price": 1}); code != 400 {
+	putRate := func(body any) int {
+		t.Helper()
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest(http.MethodPut, srv.URL+"/v1/admin/rates", bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := putRate(map[string]any{"prefix": "", "price": 1}); code != 400 {
 		t.Errorf("rate empty prefix: %d, want 400", code)
 	}
-	if code := authed("PUT", "/v1/admin/rates", map[string]any{"prefix": "86", "price": -1}); code != 400 {
+	if code := putRate(map[string]any{"prefix": "86", "price": -1}); code != 400 {
 		t.Errorf("rate negative price: %d, want 400", code)
 	}
 }

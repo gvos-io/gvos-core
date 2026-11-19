@@ -83,7 +83,11 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 // Body: {"rules":[{"id","kind","action","limit","cost_limit","prefixes","account"}]}
 
 func (s *Server) handleRiskRules(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) || !requirePOST(w, r) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		writeJSON(w, 200, map[string]any{"rules": s.risk.Rules(), "count": len(s.risk.Rules())})
 		return
 	}
 	var req struct {
@@ -287,14 +291,23 @@ func (s *Server) handleIPAllowDelete(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 404, "rule not found: "+id)
 		return
 	}
-	s.ipallow.Reload(kept)
+	// Persist the plain rules array, before touching memory: the
+	// restore path (NewPGServer) unmarshals the setting into
+	// []ipallow.Rule — the broadcast-shaped map (ipAllowPayload) does
+	// not unmarshal there, and a failed save must leave state untouched
+	// (same ordering as the full-set replace above).
 	if s.pg != nil {
-		if err := s.pg.PutSetting(r.Context(), "ip_allowlist", ipAllowPayload(kept)); err != nil {
+		if err := s.pg.PutSetting(r.Context(), "ip_allowlist", kept); err != nil {
 			httpError(w, 500, err.Error())
 			return
 		}
 	}
+	s.ipallow.Reload(kept)
 	s.audit(r, "remove", "ipallow", id, map[string]any{"removed": 1}, nil)
+	// Same broadcast as the remove_id path: replicas and the Kamailio
+	// htable mirror converge immediately instead of waiting for the 60s
+	// rebroadcaster to heal the drift.
+	s.emit(events.SubjectCfgReload, ipAllowPayload(kept))
 	writeJSON(w, 200, map[string]any{"removed": id})
 }
 

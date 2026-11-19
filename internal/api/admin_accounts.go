@@ -100,12 +100,16 @@ func (s *Server) handleTopUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		AccountID string  `json:"account_id"`
-		Delta     float64 `json:"delta"`
-		Reason    string  `json:"reason"`
+		Delta  float64 `json:"delta"`
+		Reason string  `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.AccountID == "" || req.Delta == 0 {
-		httpError(w, 400, "account_id and non-zero delta required")
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Delta == 0 {
+		httpError(w, 400, "non-zero delta required")
+		return
+	}
+	reqAccountID := r.PathValue("id")
+	if _, err := account.ParseID(reqAccountID); err != nil {
+		httpErrorC(w, 404, "NOT_FOUND", "no account "+reqAccountID)
 		return
 	}
 	if req.Reason == "" {
@@ -117,18 +121,18 @@ func (s *Server) handleTopUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	before, _ := account.Balance(s.store, req.AccountID)
+	before, _ := account.Balance(s.store, reqAccountID)
 
 	balance := before.Add(deltaAmt)
 	if s.pg != nil {
-		balance, err = s.pg.TopUp(r.Context(), req.AccountID, deltaAmt, req.Reason, whoAmI(r).Prefix)
+		balance, err = s.pg.TopUp(r.Context(), reqAccountID, deltaAmt, req.Reason, whoAmI(r).Prefix)
 		if err != nil {
 			httpError(w, 500, err.Error())
 			return
 		}
 	}
 	// Update the live in-memory balance: read-modify-write via Put.
-	if a, err := s.store.Get(req.AccountID); err == nil {
+	if a, err := s.store.Get(reqAccountID); err == nil {
 		a.Credit = balance
 		_ = s.store.Put(a)
 	}
@@ -136,19 +140,19 @@ func (s *Server) handleTopUp(w http.ResponseWriter, r *http.Request) {
 	// writes PG -> Redis absolute; the broadcast below keeps no-redis
 	// peers' caches converging).
 	if s.bal != nil {
-		if err := s.bal.SetAbsolute(r.Context(), req.AccountID, balance); err != nil {
-			log.Printf("REDIS topup absolute write failed (%s): %v", req.AccountID, err)
+		if err := s.bal.SetAbsolute(r.Context(), reqAccountID, balance); err != nil {
+			log.Printf("REDIS topup absolute write failed (%s): %v", reqAccountID, err)
 		}
 	}
-	s.audit(r, "topup", "account", req.AccountID,
+	s.audit(r, "topup", "account", reqAccountID,
 		map[string]any{"balance": before}, map[string]any{"balance": balance, "delta": req.Delta})
 	// Absolute new balance (not the delta) so replaying the broadcast
 	// is idempotent on peer replicas.
 	s.emit(events.SubjectCfgReload, map[string]any{
 		"entity": "credit", "op": "topup",
-		"account_id": req.AccountID, "credit": balance,
+		"account_id": reqAccountID, "credit": balance,
 	})
-	writeJSON(w, 200, map[string]any{"account_id": req.AccountID, "balance": balance})
+	writeJSON(w, 200, map[string]any{"account_id": reqAccountID, "balance": balance})
 }
 
 // GET /v1/admin/accounts
