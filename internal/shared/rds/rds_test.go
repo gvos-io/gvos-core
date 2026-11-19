@@ -41,7 +41,7 @@ func TestScriptEvalShaFallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	s := newScript("return {KEYS[1], ARGV[1]}")
+	s := NewScript("return {KEYS[1], ARGV[1]}")
 	got, err := s.Run(ctx, c, []string{"k1"}, "v1")
 	if err != nil {
 		t.Fatalf("script run: %v", err)

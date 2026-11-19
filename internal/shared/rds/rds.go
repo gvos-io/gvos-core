@@ -79,7 +79,7 @@ type script struct {
 	sha1 string
 }
 
-func newScript(src string) *script {
+func NewScript(src string) *script {
 	sum := sha1.Sum([]byte(src))
 	return &script{src: src, sha1: hex.EncodeToString(sum[:])}
 }

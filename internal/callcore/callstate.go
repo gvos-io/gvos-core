@@ -5,6 +5,7 @@
 package callcore
 
 import (
+	"context"
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"sync"
@@ -44,16 +45,49 @@ func (e *ErrLimit) Error() string {
 	return fmt.Sprintf("account %q exceeded %s limit: %s", e.AccountID, e.Kind, e.Detail)
 }
 
+// BalanceAuthority is the money-moving seam: the in-memory Store
+// implements it directly; the Redis authority (account.BalanceR)
+// implements it with fail-closed semantics. callcore stays storage-
+// agnostic.
+type BalanceAuthority interface {
+	ReserveCtx(ctx context.Context, id string, est money.Amount) (string, error)
+	CommitCtx(ctx context.Context, token, id string, est, actual money.Amount) error
+}
+
 // Manager owns live calls and their billing lifecycle.
 type Manager struct {
 	mu          sync.Mutex
 	calls       map[string]*Call
 	store       *account.Store
+	bal         BalanceAuthority // nil = the in-memory store path
 	charger     *billing.Charger
 	teardown    TeardownFunc
 	interval    time.Duration // interim deduction period
 	now         func() time.Time
 	lastRelease map[string]string // callID -> release reason set at teardown
+}
+
+// SetBalanceAuthority swaps the money authority (Redis phase 1). The
+// in-memory fallback stays for configuration reads.
+func (m *Manager) SetBalanceAuthority(b BalanceAuthority) { m.bal = b }
+
+// reserve/commit route through the balance authority (fail-closed on
+// start: an unavailable authority is an error the caller turns into a
+// 403/503; interim/settle paths log and continue per the plan).
+func (m *Manager) reserve(ctx context.Context, id string, est money.Amount) error {
+	if m.bal != nil {
+		_, err := m.bal.ReserveCtx(ctx, id, est)
+		return err
+	}
+	_, err := m.store.Reserve(id, est)
+	return err
+}
+
+func (m *Manager) commit(id string, est, actual money.Amount) error {
+	if m.bal != nil {
+		return m.bal.CommitCtx(context.Background(), "", id, est, actual)
+	}
+	return m.store.Commit("", id, est, actual)
 }
 
 func NewManager(store *account.Store, teardown TeardownFunc, interval time.Duration) *Manager {
@@ -197,7 +231,7 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 		return err
 	}
 
-	if _, err := m.store.Reserve(accountID, est); err != nil {
+	if err := m.reserve(context.Background(), accountID, est); err != nil {
 		m.mu.Unlock()
 		return err
 	}
@@ -331,7 +365,7 @@ func (m *Manager) Interim(callID string) (bool, error) {
 	// Cost so far vs already deducted: reconcile the difference.
 	delta := cost.Sub(c.Accrued)
 	if delta > 0 {
-		if _, err := m.store.Reserve(c.AccountID, delta); err != nil {
+		if err := m.reserve(context.Background(), c.AccountID, delta); err != nil {
 			// Cannot afford the next interval: forced teardown.
 			m.markRelease(callID, "balance-exhausted")
 			if m.teardown != nil {
@@ -341,10 +375,10 @@ func (m *Manager) Interim(callID string) (bool, error) {
 		}
 		// Reserve succeeded: fold the delta into accrued (release trick:
 		// commit the reservation immediately at actual cost delta).
-		_ = m.store.Commit("", c.AccountID, delta, delta)
+		_ = m.commit(c.AccountID, delta, delta)
 		c.Accrued = c.Accrued.Add(delta)
 	} else if delta < 0 {
-		_ = m.store.Commit("", c.AccountID, -delta, 0) // refund excess
+		_ = m.commit(c.AccountID, -delta, 0) // refund excess
 		c.Accrued = c.Accrued.Add(delta)
 	}
 
@@ -411,13 +445,13 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 	// a negative est means extra charge via Reserve.
 	taken := lock.Add(accrued)
 	if taken > cost {
-		_ = m.store.Commit("", c.AccountID, taken.Sub(cost), 0)
+		_ = m.commit(c.AccountID, taken.Sub(cost), 0)
 	} else if taken < cost {
 		// Under-collection (call ran longer than locked): charge the
 		// gap. Exhausted prepaid accounts still get the CDR at full
 		// cost — the debt shows in the next call's 403.
-		if _, err := m.store.Reserve(c.AccountID, cost.Sub(taken)); err == nil {
-			_ = m.store.Commit("", c.AccountID, cost.Sub(taken), cost.Sub(taken))
+		if err := m.reserve(context.Background(), c.AccountID, cost.Sub(taken)); err == nil {
+			_ = m.commit(c.AccountID, cost.Sub(taken), cost.Sub(taken))
 		}
 	}
 

@@ -50,6 +50,7 @@ type Server struct {
 	acl           *acl.Store           // API-key registry (Phase B; nil = keys off, legacy fallback)
 	idem          *idemStore           // Idempotency-Key registry for money routes
 	rds           *rds.Client          // Redis runtime-state authority (nil = off, memory authoritative)
+	bal           *account.BalanceR   // redis balance face (nil = in-memory authority)
 	events        *events.Publisher    // NATS event bus (nil = publishing off)
 	webhookURL    string               // webhook dispatcher target ("" = off)
 	asyncCdr      bool                 // CDRW worker owns CDR persistence
@@ -634,6 +635,16 @@ func (s *Server) routeRiskLegacy(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/v1/admin/risk-rules", http.StatusTemporaryRedirect)
 }
 
-// AttachRedis wires the Redis runtime-state authority (Phase 0
-// wiring; domain packages adopt it in Phases 1-5).
-func AttachRedis(s *Server, c *rds.Client) { s.rds = c }
+// AttachRedis wires the Redis runtime-state authority: the balance
+// authority swaps to the Redis face (Phase 1), balances are seeded
+// SETNX-style, and the call manager routes money through it
+// (fail-closed at call start; interim/settle fail-open per the
+// adoption plan).
+func AttachRedis(s *Server, c *rds.Client) {
+	s.rds = c
+	s.bal = account.NewBalanceR(s.store, c)
+	if err := s.bal.Seed(context.Background()); err != nil {
+		log.Printf("redis balance seed partial: %v (SETNX keeps live values; retry at next boot)", err)
+	}
+	s.calls.SetBalanceAuthority(s.bal)
+}

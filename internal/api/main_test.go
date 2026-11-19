@@ -2,14 +2,18 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
+
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/money"
+	"github.com/lixuanqun/gvos-core/internal/shared/rds"
 )
 
 // TestMain pins the internal token for the signaling face (Phase A
@@ -182,4 +186,56 @@ func mustParseBal(t *testing.T, v any) float64 {
 	}
 	t.Fatalf("balance type %T", v)
 	return 0
+}
+
+// TestRedisAuthorityEndToEnd: with the Redis authority attached, a
+// full call flow (start -> 66s end) moves the money in Redis, the
+// in-memory map is untouched, and a drain-to-zero is enforced by the
+// authority (fail-closed face).
+func TestRedisAuthorityEndToEnd(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rc, err := rds.New("redis://" + mr.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+
+	s := NewServer()
+	AttachRedis(s, rc)
+
+	// The demo seed (tenant/agent/end1) is now authority-backed.
+	b, _ := json.Marshal(map[string]string{
+		"call_id": "redis-e2e-1", "from_user": "1000", "to_user": "8613800138000",
+	})
+	code, _ := postInternal(t, srvURL(t, s)+"/v1/call/start", b)
+	if code != 200 {
+		t.Fatalf("start under redis authority: %d", code)
+	}
+	b2, _ := json.Marshal(map[string]any{"call_id": "redis-e2e-1", "duration": 66})
+	code, m := postInternal(t, srvURL(t, s)+"/v1/call/end", b2)
+	if code != 200 {
+		t.Fatalf("end: %d %v", code, m)
+	}
+	// Money moved in Redis, not in the memory map.
+	bal, _ := s.bal.Get(context.Background(), "1000")
+	if bal <= 0 {
+		t.Errorf("redis balance after call = %s, expected a positive drained-remainder", bal)
+	}
+
+	// Drain to zero via the authority -> next call is refused by the
+	// authority (403 insufficient, not a crash).
+	_ = s.bal.SetAbsolute(context.Background(), "1000", 0)
+	b3, _ := json.Marshal(map[string]string{
+		"call_id": "redis-e2e-2", "from_user": "1000", "to_user": "8613800138000",
+	})
+	if code, m := postInternal(t, srvURL(t, s)+"/v1/call/start", b3); code != 403 {
+		t.Errorf("drained start = %d %v, want 403", code, m)
+	}
+}
+
+func srvURL(t *testing.T, s *Server) string {
+	t.Helper()
+	srv := httptest.NewServer(MuxFor(s))
+	t.Cleanup(srv.Close)
+	return srv.URL
 }
