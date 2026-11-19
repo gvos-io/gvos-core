@@ -1,149 +1,183 @@
-# 技术架构设计：G-VOS
+# 技术架构设计:G-VOS
 
-**版本**：v0.1（草案）
-**日期**：2026-10-06
-**上游依据**：PRD 的容量基线与 P0 验收标准（内部文档）
-**配套**：[nats-event-driven-upgrade.md](nats-event-driven-upgrade.md) ——
-"层间通信全 NATS、事件驱动"转型的完成状态与升级排期（2026-11 起的单一事实源）
+**版本**:v0.2(2026-11-19)
+**v0.1→v0.2 修订**:v0.1(2026-10-06,M8 时代)事实与承诺混写,读者无法分辨哪些已兑现。本版建立标记纪律:**✅ 已交付**(代码+测试为证,注明位置)、**⚠️ 交付但受限**(注明限制)、**🎯 目标**(未实施,注明载体文档)。每条声明可对到代码或规划文档,不再有第三种状态。
+**上游依据**:PRD 容量基线(内部文档);竞品对标 [competitive-analysis-vos-sbc.md](competitive-analysis-vos-sbc.md)
+**配套事实源**:NATS 转型 [nats-event-driven-upgrade.md](nats-event-driven-upgrade.md) · Redis 收口 [redis-adoption-plan.md](redis-adoption-plan.md) · API 体系 [api-roadmap.md](api-roadmap.md) · 录音管道 [recording-oss-upgrade-plan.md](recording-oss-upgrade-plan.md) · 部署 [deployment-plan.md](deployment-plan.md)
 
 ---
 
 ## 1. 架构总原则
 
-1. **控制平面与数据平面分离**——这是对传统"一体化大盒"架构的代际优势，也是研发预算的分配原则：
-   - 信令/媒体用开源组件（成熟、免费、性能久经验证），**不重造协议栈**；
-   - 计费/路由/租户/风控/CDR 全部自研（传统一体机最难被验证和替换的 80%）。
-2. **API-first**：管理台只是 REST API 的一个消费者；所有能力可通过 API 自动化（代际差异点）。
-3. **无状态信令、可水平扩展媒体**：扩容加节点，不是换大机器。
-4. **计费零丢失**：CDR/扣费事件先落日志再处理（WAL 思路），宕机不丢一通计费。
+1. **控制平面与数据平面分离**——代际优势与研发预算分配原则:信令/媒体用开源组件(Kamailio/RTPengine,不重造协议栈);计费/路由/租户/风控/CDR 全部自研(传统一体机最难被验证和替换的 80%)。✅ 已按此交付(自研面 internal/ 16 包;开源面 deploy/)。
+2. **API-first**:管理台只是 REST API 的一个消费者。⚠️ API 面已可用但未成契约(见 §8 安全与 [api-roadmap.md](api-roadmap.md) 的十项缺口)。
+3. **无状态信令、可水平扩展媒体**:✅ Kamailio 零 PG 依赖、配置/黑名单走 NATS 镜像(60s 重播对账);媒体直通模式信令面故障不影响进行中通话。
+4. **计费零丢失**:CDR 与账本双路径独立持久化、`uq_cdr_call` 幂等落库、持续对账——✅ 6,714 行逐分零漂移(capacity-report-2026-11-19 §S6)。🎯 大规模长稳对账进 CI 回归门(nats-event-driven 阶段 B)。
 
 ## 2. 组件拓扑
 
 ```
-┌────────────────────────────── 管理面（自研） ──────────────────────────────┐
-│  Web 管理台(Vue/React) ── REST API 网关(Go) ── OpenAPI 3.1 / Webhook 引擎    │
-└──────────────────────────────────┬──────────────────────────────────────┘
-┌────────────────────────────── 控制平面（自研，Go） ─────────────────────────┐
-│  账户/多级代理服务 │ 费率引擎 │ 路由决策引擎 │ 风控引擎 │ CDR 管道 │ 审计日志  │
-└───────┬──────────────┬──────────────┬─────────────────────────────────────┘
-        │ (Redis/内存快照) │ (Dispatcher/JSON-RPC) │ (Kamailio exec/HA) 
-┌───────▼──────────────▼──────────────▼─────────────────────────────────────┐
-│ 数据平面（开源）                                                              │
-│  Kamailio ×N（信令：注册、认证、选路分发、负载均衡）                            │
-│  RTPengine ×M（媒体：转发、DTLS/SRTP、录音 fork、转码预留）                    │
-│  FreeSWITCH（按需挂载：B2BUA 模式通话保持/IVR/转码，P1 起可选部署）             │
-└──────────────────────────────────────────────────────────────────────────┘
-┌────────────────────────────── 存储与消息 ──────────────────────────────────┐
-│ PostgreSQL（账户/费率/路由/CDR 热数据）│ Redis（余额/会话/注册快照）             │
-│ NATS（事件总线：CDR 流、告警、Webhook）│ 对象存储（录音/导出）                    │
-│ Prometheus + Grafana（监控）│ Patroni（PostgreSQL HA）                       │
-└────────────────────────────────────────────────────────────────────────────┘
+┌────────────── 管理面(自研,⚠️ 未成契约) ──────────────┐
+│  Web 管理台(ui.go,单页) ── REST API(gvos-core :8080)   │
+│  🎯 OpenAPI 3.1 + Webhook 引擎(api-roadmap Phase E/D)   │
+└──────────────────────┬──────────────────────────┘
+┌────────────── 控制平面(自研 Go,✅) ───────────────────┐
+│ 账户树/费率/风控/套餐/CDR 管道 gvos-core(计费/账户/风控/API) │
+│ gvos-asr(DashScope ASR 桥接) · gvos-migrate(VOS 话单迁移)  │
+└──────┬────────────────────────────┬─────────────────┘
+       │ NATS 事件总线 gvos.>(JetStream)│ internal token(信令同步面)
+┌──────▼────────────────────────────▼─────────────────┐
+│ 数据平面(开源):Kamailio ×N(信令/认证/选路)           │
+│ RTPengine ×M(媒体转发/录音 fork;直通模式)             │
+│ FreeSWITCH B2BUA:🎯 未启动(v0.1 图有,无代码无规划认领,│
+│ 客户需求出现时立项)                                    │
+└──────────────────────────────────────────────┬─────┘
+┌──────────────────────────────────────────────▼─────┐
+│ PostgreSQL(配置/账务/CDR 权威,月分区)✅              │
+│ NATS(事件总线,JetStream)✅ · Redis 🎯(redis-plan)   │
+│ 对象存储(录音归档)🎯(recording-plan) · Prometheus    │
+│ + Grafana 🎯(M15) · Patroni 🎯(PG 自动故障切换)       │
+└────────────────────────────────────────────────────┘
 ```
 
-**为什么这么选**：
+技术选型(不变):Kamailio(25 年历史、原生 nats 模块——OpenSIPS 没有,这是选型决定性因素之一)、RTPengine(内核态转发+录音 fork)、Go 控制面(内存安全+goroutine 模型)、PG(NATS 桥接淘汰 Kafka:运维成本高,仅客户强制集成时加桥接层)。
 
-| 选择 | 理由 | 被否决的替代 |
-|---|---|---|
-| Kamailio 做信令 | 25 年历史、v6.1.4 活跃、数千 CPS、SIP over WebSocket 原生（P2 媒体流直接受益）、dispatcher/hhtable/LCR 模块齐全 | OpenSIPS（同样优秀，社区略小，Sippy 已用）；自研协议栈（烧钱且没必要） |
-| RTPengine 做媒体 | 内核态转发性能、DTLS/SRTP/ICE 全支持、**录音 fork 原生**（P1 录音模块直接受益） | FreeSWITCH 全量做媒体（单进程瓶颈，10k 端口级），自研 RTP（无必要） |
-| Go 写控制平面 | 内存安全（C 语言信令栈历史漏洞的教训）、goroutine 模型适合高并发事件处理、招聘容易 | Java（重）、Rust（电信场景库少、招人难——可在风控/协议热路径局部使用） |
-| PostgreSQL + Patroni | 关系型适合计费/账务，成熟 HA | MySQL（可以但无优势）；Mongo（账务场景事务弱） |
-| NATS | 轻量、单二进制、JetStream 持久化够用、Go 客户端一流；Kamailio 有原生 nats 模块（5.5+），事件总线全链路单一技术栈 | Kafka（重，运维成本高，仅客户强制集成时再加桥接层）；RabbitMQ（可用，更新慢） |
+**仓库形态**:Go 1.21,零框架(标准库 ServeMux),vendor 仅 pgx v5.6;~10.6k 行 Go;docker-compose(单机)/compose-ha(双机)/Helm(K8s)三形态;无 git remote(本地私有仓)。
 
-## 3. 核心数据流
+## 3. 状态权威矩阵(v0.2 新增——本系统的核心架构透镜)
 
-### 3.1 呼叫建立（计费锁定，NATS 异步 RPC）
+"谁是某个状态的唯一权威"决定了一致性机制、故障语义与扩展上限:
 
-1. INVITE 到 Kamailio → 账户认证（本地 HA1 缓存，DB 兜底）。
-2. **计费预锁定（异步 RPC）**：Kamailio 以 `nats_publish` 携带挂起坐标（tindex/tlabel）发 `gvos.svc.call.start`，`t_suspend()` 挂起 INVITE 事务（worker 立即释放去接下一通）；gv-core 应答回**节点唯一回复主题** `gvos-edge-reply-<node>`，持有事务的节点 `t_continue` 恢复：余额不足 403，放行则重选网关中继。挂起→恢复全程 <5ms 预算。
-3. **超时兜底**：1s janitor 定时器扫描挂起超 2s 的锁定，`t_continue` 进 503（Billing Unavailable）——总线宕机时呼叫建立**有界失败**（最多 2s 拒绝），不无限挂起。
-4. **关键依赖声明**：开启 WITH_NATS_RPC 后事件总线成为呼叫建立路径的关键依赖（NATS 挂 = 新呼叫 503；HTTP 模式下 NATS 只丢遥测）。部署形态按此选择开关；Kamailio 与 gv-core 间层间通信全部走 NATS，HTTP 只保留北向管理面与南向 webhook 出口。
-5. 183/200 后媒体走 RTPengine 直通（对称 RTP/DTLS），信令 Kamailiio 透明转发（P0 为 proxy 模式；选择 B2BUA 模式的客户在 FreeSWITCH 上承接，保通话不断）。answer 事件与 BYE 话单同样经总线（`gvos.svc.call.answer` / `gvos.cdr.raw`，载荷含 rtpengine QoS 统计）。
-
-### 3.2 计费与拆线
-
-- 通话进行中：RTPengine 每 10s 上报活动 → CDR 管道累计时长 → 余额扣减（Redis 原子操作）→ 低于阈值（min_balance）时由控制平面发起 **SIP CANCEL/BYE 强制拆线**（预算拆线延迟 <1s，这是验收硬指标）。
-- 通话结束：Kamailio 生成完整 SIP 计时事件 → CDR 管道补全（QoS 字段来自 RTPengine 统计）→ 落 PostgreSQL（热）+ Parquet（冷，对象存储）→ 触发 Webhook/报表事件。
-
-### 3.3 配置下发（NATS 广播驱动）
-
-- 管理台/API 是唯一管理入口：变更先写 PostgreSQL settings（重启兜底），随后以**全量快照载荷广播** `gvos.cfg.reload`（网关表/IP 准入/黑名单前缀等），gv-core 各副本与 Kamailio 信令节点各自订阅应用、本地生效——**Kamailio 侧零 PG 依赖**（dispatcher db_url 已移除，选路读 NATS 镜像的 gw htable）。
-- 广播是 core NATS（at-most-once）：控制面每 60s 周期性重播全量快照作为对账心跳，节点重连/重启后最多 60s 收敛（Kamailio nats 模块无 JetStream 回放能力，重播即兜底）。
-- **Kamailio 订阅点号 subject 的词法限制**：event_route 名称不允许点号，边缘订阅走 gv-core 双发的无点别名（gvos-edge-cfg / gvos-edge-risk / gvos-edge-tear），载荷与正名完全一致。
-- **目标：费率变更 60s 内全节点生效**（传统方案需要"定时替换费率"批处理窗口，这里做成实时+原子）。
-
-### 3.4 风控与注册的边缘联动
-
-- 风控告警（`gvos.risk.alert`，载荷带 SIP username）→ Kamailio banned htable（1h 自动过期）→ 下一通 INVITE 在 SIP 边缘直接 403，零控制面往返。
-- 注册事件（`gvos.reg.event`，save/expiry 钩子发布）→ gv-core 注册镜像（`/v1/admin/registrations`）+ reg_freq 风控规则（注册风暴告警）。
-- 被叫黑名单前缀镜像到 Kamailio bl htable，边缘前缀筛查直接 403（正则/白名单语义留在控制面，双层防御）。
-- 强制拆线：`gvos.call.teardown` 广播到全部信令节点，持有 dialog 的节点经 RPC `dlg.terminate_dlg` 终结通话（持有者执行、其余 no-op）；TEARDOWN durable 消费者在节点全下线时保留指令、重启后补发。
-
-## 4. 容量与性能预算（v1.0 硬指标）
-
-| 指标 | 单节点目标 | 集群目标（3 信令+2 媒体+1 控制平面） | 测法 |
+| 状态类 | 当前权威 | 一致性机制 | 状态 |
 |---|---|---|---|
-| 并发呼叫 | 2,000 | 6,000 | SIPp 稳态长呼 |
-| CPS | 300 | 1,000 | SIPp 突发拨号（模拟 AI 外呼） |
-| 注册用户 | 200,000 | 1,000,000 | REGISTER 风暴 |
-| 选路延迟 | P99 < 5ms | — | 控制平面基准测试 |
-| CDR 落地 | < 2s | — | 端到端打点 |
-| 计费正确性 | 100%（回放校验） | 同 | CDR 回放对账测试 |
+| 配置(账户/费率/网关/IP 准入/黑名单/风控/套餐) | PG | 写 PG → `gvos.cfg.reload` 快照广播 → 60s 重播对账 | ✅ |
+| CDR/账本 | PG 月分区 | `uq_cdr_call` 幂等 + 双路径持续对账 | ✅ |
+| 事件 | NATS JetStream | durable 消费者 + NAK 重投 + MaxDeliver 防毒丸 | ✅ |
+| **余额/预锁/并发/CPS/风控滑窗/套餐用量** | **每副本进程内 mutex map** | TopUp 绝对值广播 + 小时回写 PG | ❌ 单副本正确、N>1 失效(8 项缺口,redis-plan §0) |
+| 注册镜像 | 进程内存(易失) | reg 事件流重建 | ⚠️ 重启表空 |
 
-**硬件基线**：单节点 = 16 vCPU / 32GB / 万兆（媒体节点）；信令节点 8 vCPU / 16GB。压测环境与推荐生产环境一致性写进报告。
+**结构性后果**:"钱的权威 per-replica"是 gv-core 必须单副本的全部原因——并发/CPS 上限 ×N、风控滑窗失效、僵尸呼叫无人回收、集群容量目标(6,000 并发)不可达,全是它的下游症状。🎯 Redis 收口(redis-plan Phase 0-5,fail-closed 语义表已定稿):收拢钱的权威为独立状态平面。**配置类明确不进 Redis**(换传输层无正确性收益,redis-plan §1 非目标)。
 
-## 5. HA 与容灾设计
+金额表示:**🎯 int64 计费单位定点化**(ADR-0003,参考 VOS3000 系 20 年无漂移经验;与 Redis Phase 1 合并为一次账本重构,上线前是唯一免费迁移窗口)。多副本时钟纪律:🎯 单一时间源 + NTP ±50ms 预算(ADR-0004)。注册状态:🎯 边缘本地为主 + Redis 派生镜像兜底(ADR-0002,usrloc db_mode=0 不变)。
 
-- **PostgreSQL**：Patroni 三节点（或双机+仲裁），同步复制——计费数据 RPO=0。
-- **Redis**：主从+Sentinel，余额/会话允许 30s 内恢复（RPO≤1 次扣减窗口，由 CDR 回放补账）。
-- **Kamailio**：无状态信令节点池（dispatcher 分发），节点宕机秒级摘除；注册状态写 Redis 共享。
-- **媒体直通模式**下 Kamailio 宕机不影响进行中通话（RTP 已直通），只影响新呼叫——这本身就是容灾优势。
-- **双机热备套餐**（对齐传统话务商采购心智的售卖单元）= 上列组件的 2 节点精简打包 + 演练脚本（`ha-drill.sh`：拔电源/杀进程/断网三剧本，输出 RTO/RPO 报告）——**每次给客户交付都跑一次并留视频，作为销售证据**。
+## 4. 核心数据流
 
-## 6. 安全设计（产品叙事：从 Day 1 做对）
+### 4.1 呼叫建立(计费锁定)——两种档位,部署时选择
 
-- 传输：SIP TLS + SRTP/DTLS 全默认开启（VosPower 才刚补上 DTLS）。
-- 认证：Digest（Password）+ IP 白名单（无注册中继）；管理台 OIDC/SSO 可选。
-- 密码存储 argon2id；密钥分离（License 校验密钥与数据密钥）。
-- 审计：所有配置变更写 append-only 审计表（时间、操作人、IP、前后 JSON diff）——同时服务客户信任与中国合规叙事。
-- 防"盗打"（行业普遍痛点）：默认开启——账户级日/月消费上限、并发上限、异常地区告警、SIP 防火墙（fail2ban 模式自动封禁）。
-- **License**：云端校验（离线宽限期 30 天），核心计费逻辑在服务端闭源——结构性防篡改（核心计费逻辑不在客户端）。
-- 漏洞披露流程（security.txt + CVE 响应 SLA）写入官网——公开响应 SLA 是行业稀缺能力。
+**档位 A(NATS RPC,compose 主力已开)**:INVITE → `nats_publish(gvos.svc.call.start,载荷带 tindex/tlabel,reply=节点唯一主题)` → `t_suspend()`(worker 释放)→ gv-core 计费锁定 → 应答回 `gvos-edge-reply-<node>` → `t_continue` 恢复(网关重选在恢复路由内)→ 403/中继。兜底:1s janitor 扫挂起 >2s 的锁定 → 503 Billing Unavailable。✅ e2e 实测通过(挂起→RPC→恢复→选路→计费闭环)。
 
-## 7. 部署形态
+**档位 B(HTTP 同步,compose-ha/Helm 当前形态)**:Kamailio 直接 HTTP 调 `/v1/call/start`,阻塞 worker。✅ 可用,但 worker 占用与 HTTP 失败语义不同档。
 
-| 形态 | 组合 | 客群 |
-|---|---|---|
-| 单机 all-in-one | docker-compose：全组件 + 单 PG | 试用/POC/小客户（500 并发档） |
-| 双机热备 | compose-ha 或 K3s 双节点 | ICP-1 主力形态 |
-| K8s 集群 | Helm chart + HPA（信令）+ 媒体节点池 | ICP-3 大客户/自营 SaaS（未来） |
-| 离线交付 | 私有化 tar 包 + 云端 License 或本地 License 服务（等保客户） | 政企/金融 |
+| 部署形态 | WITH_NATS | WITH_NATS_CDR | WITH_NATS_RPC |
+|---|---|---|---|
+| docker-compose(单机) | 1 | 1 | **1** |
+| compose-ha(双机主力) | 1 | 1 | **未开(档位 B)** |
+| Helm(K8s) | 1 | 1 | **未开(档位 B)** |
 
-CI 硬门槛：单测覆盖 ≥70%（计费引擎 ≥90%）、金数据话单回放对账、SIPp 冒烟、容器镜像扫描（trivy）、模糊测试（信令解析层）。
+**依赖声明(v0.2 收口口径,取代 v0.1 与 deployment-plan 的矛盾表述)**:gv-core → NATS 是**分档依赖**——RPC 档(档位 A)下 NATS 是呼叫建立关键依赖(宕机 = 新呼叫 2s 内 503 有界失败,不影响进行中通话);HTTP 档(档位 B)下 NATS 宕机只丢遥测/CDR 总线与配置镜像(60s 内收敛退化)。 compose-ha 选 HTTP 档是当前有意的保守选择(避免 HA 交付形态叠加 NATS 单点),NATS 3 节点集群化后升档(deployment-plan §3.2 缺口 1)。
 
-## 8. 公开压测方案（可信容量叙事的载体）
+### 4.2 计费与拆线
 
-每季度发布《容量与性能报告》，内容：
-1. 环境全披露（硬件/内核/版本/参数）；
-2. SIPp 场景：稳态并发、突发 CPS、REGISTER 风暴、通话保持时长分布；
-3. 控制平面微基准：选路 P99、费率变更生效延迟、CDR 端到端延迟；
-4. 故障演练：节点宕机的 RTO/RPO、通话保持率；
-5. 对标表：与主流商业软交换公开宣称值（5,000 并发/1,200 CPS）的同条件对比（注明"基于公开资料，条件可能有差异"）。
-脚本与原始数据全部开源（GitHub）——**可复现性本身就是差异化**。
+- 通话中:interim driver 每 10s 扣减(callstate.go:60)→ 余额低于阈值 → `gvos.call.teardown` 广播 → 持有 dialog 节点 RPC 终结。✅ 代码就绪;⚠️ <1s 拆线延迟验收硬指标未测(nats-event-driven U3,P0)。
+- 通话结束:BYE → `gvos.cdr.raw`(载荷含 rtpengine QoS 统计)→ CDRR durable 消费者(复用 callEnd 纯函数)→ PG。✅ e2e 实测。
+- 🎯 QoS 统计(mos/jitter/packet_loss)解析填列(U6,列已建未填)。
 
-## 9. 关键风险与技术对策
+### 4.3 配置下发(NATS 广播驱动)✅
 
-| 风险 | 对策 |
+变更写 PG settings(重启兜底)→ `gvos.cfg.reload` 全量快照广播(网关/IP 准入/黑名单/费率/录音/风控/套餐)→ 各副本与 Kamailio 节点本地生效——**Kamailio 零 PG 依赖**(dispatcher db_url 已删)。core NATS at-most-once → 60s 周期重播即对账心跳(节点重启实测 60s 内 htable 自愈)。费率变更 60s 内全节点生效。🎯 LCR 成本路由:控制面按"费率最低→优先级→冷却"计算,随同一 cfg 通道下发(competitive-analysis §3.1,竞研唯一功能缺口)。
+
+### 4.4 风控与注册的边缘联动 ✅(代码就绪,e2e 待验证窗口)
+
+风控告警(载荷带 SIP username)→ banned htable(1h 过期)→ 边缘 403 零控制面往返;注册事件 → gv-core 镜像 + reg_freq 规则;黑名单前缀 → bl htable 边缘 403(正则/白名单语义留控制面,双层防御)。Kamailio 订阅点号 subject 的词法限制:走 gv-core 双发无点别名(gvos-edge-cfg/-risk/-tear)。
+
+## 5. 容量与性能预算
+
+**实测基线(capacity-report-2026-11-19,控制面,双副本 loadgen)**:
+
+| 指标 | 实测 | v1.0 目标 | 差距性质 |
+|---|---|---|---|
+| 稳态吞吐 | 100 CPS × 30s 零失败;锁定 p50=0.8ms/p99=2.9ms | 300 CPS(单节点) | 容量验证缺口 |
+| 并发 | 1,000 并发零失败,内存线性(+9MB) | 2,000(单节点) | 同上 |
+| 突发 | 1,245 CPS burst 零失败;CDRW 2.4s 追平 | 300 CPS 稳态 | 反超 |
+| 对账 | 6,714 行逐分零漂移 | 100% 回放校验 | 达标口径 |
+| SIP 全栈 | 未在本轮重压(v0.3 报告 2,000 并发/300 CPS 结论沿用,镜像未拉) | — | 复测列 v0.5 |
+
+⚠️ 压测可复现性缺口:loadgen 不在仓库内(bench 报告引用但仓内无源码)——§8"可复现性叙事"落地前必须补齐(loadgen 入仓或换 SIPp 脚本,scripts 目录)。
+
+**集群目标(6,000 并发)当前不可达**——前置是 Redis 收口(多副本账务正确)+ SIP 全栈复测;20 万注册量级 regtable 具备但未验证。
+
+## 6. 部署形态与可用性预算
+
+三形态详见 [deployment-plan.md](deployment-plan.md)(定稿)。v0.2 补一层**关键路径复合可用性**视角:RPC 档下预付费呼叫建立可用性 = P(NATS 存活) × P(Redis 存活,Redis 收口后)。compose-ha 当前 NATS 单节点 + gv-core 单副本,故:
+
+- 当前 compose-ha 呼叫可用性绑定 = PG 主备(演练 RTO/RPO 有证据)+ NATS 单点 + gv-core 单副本;
+- **多副本解禁顺序**:Redis 收口(解锁 gv-core N>1)→ NATS 3 节点(解锁 RPC 档进 HA)→ Patroni(RTO<60s 自动切换,客户档位驱动);
+- 每一步升档都应重算上表乘积并在交付报告里披露——这是"诚实容量叙事"的可用性版本。
+
+## 7. HA 与容灾
+
+- PG:✅ 双机流复制(compose-ha)+ 手动 promote(failover 是设计如此,对齐话务商"拔电源"验收心智;drill.sh 输出 RTO/RPO 报告,每次交付必跑)。🎯 Patroni 三节点同步复制。
+- Redis:🎯 主从+Sentinel,余额/会话 30s 内恢复(RPO≤1 扣减窗口,CDR 回放补账)。
+- Kamailio:✅ 无状态节点池(双节点在 compose-ha,前置任意 LB/DNS SRV;生产前缺口=接入层)。
+- 媒体直通:✅ Kamailio 宕机不影响进行中通话(架构性容灾优势)。
+- 双机热备套餐 = 2 节点精简打包 + 演练脚本 + 交付视频(销售证据)。✅ 载体就绪。
+- ⚠️ HA/K8s 形态录音链路缺失(compose-ha 无 rtpengine;recording-plan R4 补齐)。
+
+## 8. 安全设计(逐项核对——v0.1 此节与代码差距最大)
+
+| 项 | v0.1 声明 | 现实 | 状态 |
+|---|---|---|---|
+| SIP TLS | 全默认开启 | kamailio.cfg:4444 WSS TLSv1.2 ✅;5060 明文 UDP 仍是主通道 | ⚠️ |
+| SRTP/DTLS | 全默认开启 | rtpengine 支持但未见端到端验证与显式配置 | ⚠️ 待验证 |
+| Digest 认证 | Password | ha1 MD5(SIP Digest 协议约束,auth_db)| ✅ |
+| IP 准入 | 白名单 | CIDR 规则+默认拒绝;⚠️ 首轮快照到达前短暂 fail-open | ✅/⚠️ |
+| **管理面鉴权** | (隐含可用) | `admin.go:32` 常量 `dev-admin-token`,无 env 覆盖 | ❌ F4 |
+| **信令计费面鉴权** | (隐含可用) | `/v1/call/*` 仅 requirePOST,`main.go:251` | ❌ F4 |
+| 密码存储 argon2id | 有 | **无此实现**(管理面无密码存储;ha1 是协议内 MD5)| v0.1 失实,删除 |
+| 审计表 | append-only | ✅ audit_log 存在且在写;❌ operator 是常量 "admin" | ⚠️ 有形无实 |
+| 防盗打默认 | 账户级上限 | ✅ 日/月消费上限、并发上限、异常封禁 | ✅ |
+| License 闭源校验 | 有 | 未启动 | 🎯(等保/离线交付批次) |
+
+**结论**:安全面的实缺口集中于三项(F4:常量凭据/信令面鉴权/审计身份),修复全部在 [api-roadmap.md](api-roadmap.md) Phase A+B 内,无需新规划。SIP TLS/SRTP 的"全默认开启"叙事在验证完成前降级为"支持已配置,验证待做"。
+
+## 9. 事件总线契约与治理(v0.2 新增——客户对接前的必设门槛)
+
+Subject 体系(`internal/events/events.go`):`gvos.cdr.completed/.raw`、`gvos.call.teardown`、`gvos.risk.alert`、`gvos.reg.event`、`gvos.admin.changed`、`gvos.cfg.reload`、服务域 `gvos.svc.call.start/.answer/.end`、`gvos.svc.stats`,边缘无点别名 ×3;JetStream stream GVOS 持久化 `gvos.>` 正名域。
+
+⚠️ 载荷是**无版本裸 JSON**。今天成本为零;[api-roadmap.md](api-roadmap.md) Phase D 将把载荷投影为客户 Webhook 契约,边缘别名机制又加字节级兼容约束,60s 重播+durable 意味旧载荷跨版本存活。**载荷演进规则必须在 Phase D 前成文**(并入 api-conventions.md):
+
+1. 加字段:容忍(消费者必须忽略未知字段)。
+2. 改字段名/语义:禁止原地改,走 v2 subject(如 `gvos.cdr.completed.v2`)→ 弃用期(双发+`Deprecation` 语义)→ 下线。
+3. 破坏性变更前的兼容矩阵:边缘别名(字节一致)、durable 消费者(重放旧消息)、Kamailio jansson 解析(点路径,陷阱见 nats-event-driven §2.4)。
+
+## 10. 关键风险与技术对策
+
+| 风险 | 现状与对策 |
 |---|---|
-| Kamailio 与自研控制平面集成复杂度被低估 | M0-M3 spike 就打通"认证→选路→计费锁定"闭环再铺开；预算 Kamailio 电信专家 1 名 |
-| 计费精度纠纷（客户拿旧系统话单对比） | 金数据回放测试集（支持旧系统话单格式导入）+ 迁移工具的双跑对比报告 |
-| 媒体层录音 fork 性能损耗 | RTPengine 内核模式；录音默认异步落对象存储 |
-| 单机 2,000 并发达标但 4,000 CPS 突发不够（ICP-2 甜点） | CPS 瓶颈在信令分发不在媒体，Kamailio 节点池横向扩即可；v1.1 高档位出 4,000 CPS 集群包 |
+| Kamailio 集成复杂度 | ✅ 已被驯服(九个陷阱钉死,nats-event-driven §2.4);后续 Kamailio 侧改动的隐性成本主要在 cfg 词法/jansson |
+| 计费精度纠纷 | ✅ 对账不变量在;🎯 金数据回放测试集进 CI(M12 迁移工具 beta 联动) |
+| **"叙述领先于现实"速率差** | v0.2 本文档存在的理由:宪法/README/竞研描述的系统曾比代码领先半个版本;此后任何规划文档必须显式声明状态(已交付/目标),README 已知限制节维持诚实声明 |
+| 关键路径证据最少 | RPC 面零 CI 覆盖、U1/U3 依赖人工"干净窗口";对策=验证批次结构化(进 testcontainers/CI,见 nats-event-driven 阶段 B/D) |
+| 媒体面 spike 级 | 录音 fork 实测可用;生产级调优/大容量验证在路线图(README 已声明) |
+| 4,000 CPS 突发(ICP-2) | CPS 瓶颈在信令分发不在媒体,Kamailio 节点池横向扩;v1.1 出集群包 |
 
-## 10. 里程碑技术出口
+## 11. 里程碑技术出口
 
-- **M3**：端到端 1 通计费通话（INVITE→锁定→BYE→CDR→扣费）+ 单测框架。
-- **M8**：单节点 2,000 并发/300 CPS 压测报告 v1 + docker-compose 一键部署。
-- **M12（GA）**：双机 HA 演练视频 + 渗透测试报告 + Helm chart + 迁移工具 beta。
-- **M15**：API/Webhook 全覆盖 + 风控引擎 + Prometheus 业务面板（API 半壁的实施计划见 [api-roadmap.md](api-roadmap.md)：五平面分面、API Key、租户自助面、Webhook 引擎）。
-- **M18**：WebSocket 媒体流 beta（Kamailio WebSocket→RTPengine→fork 到 AI 管道，端到端延迟 <500ms）。
+| 里程碑 | 出口 | 状态 |
+|---|---|---|
+| M3 | 端到端 1 通计费通话 + 单测框架 | ✅ |
+| M8 | 单节点压测报告 + compose 一键部署(验收 101 项 PASS) | ✅ |
+| NATS 转型 | 三层全事件驱动(六项边缘改造 + 计费 RPC) | ✅ 代码;⚠️ e2e 验收 U1-U5 待窗口 |
+| 首批交付 | compose-ha + RTO/RPO 演练 | ✅ 载体就绪 |
+| M12(GA) | Helm 生产化 + 渗透测试 + 迁移工具 beta + NATS 集群化/SIP LB | 🎯 |
+| M15 | API/Webhook 全覆盖 + 风控引擎 + Prometheus 面板([api-roadmap.md](api-roadmap.md) M-A~M-D = API 半壁) | 🎯 |
+| Redis 收口 | 多副本账务正确(解锁扩容/集群容量目标,[redis-adoption-plan.md](redis-adoption-plan.md) M0-M4) | 🎯 方案定稿 |
+| LCR 成本路由 | 竞研唯一功能开发缺口([competitive-analysis-vos-sbc.md](competitive-analysis-vos-sbc.md) §3.1) | 🎯 |
+| 录音管道 | WAV/MP3 + OSS + 分轨 + presigned([recording-oss-upgrade-plan.md](recording-oss-upgrade-plan.md) R0-R4) | 🎯 方案定稿 |
+| M18 | WebSocket 媒体流 beta(<500ms 端到端) | 🎯 |
+
+CI 硬门槛的诚实口径:v0.1 列了覆盖率/trivy/SIPp 冒烟/模糊测试,**实际 CI 仅 vet+test+build(hermetic)**。🎯 分批补齐:U 系列 e2e 进 testcontainers(阶段 A/B)→ 对账回归门 → 覆盖率与镜像扫描(M12 前)。
+
+---
+
+**变更记录**:2026-10-06 v0.1 初稿 · 2026-11-19 v0.2 全量修订(状态权威矩阵/档位矩阵/事件契约治理新增;argon2id、CI 门槛、Parquet、FreeSWITCH 等失实项修正;安全面逐项核对;口径与 deployment-plan 收口)。
