@@ -97,14 +97,22 @@ type Hit struct {
 // CheckCall runs the rules for a prospective call. It also advances
 // the freq counter and day-cost reservation only when the call is
 // admitted (blocked calls do not count toward frequency).
+//
+// The engine mutex guards the LOCAL windows only — the redis face
+// runs outside it, so concurrent call admissions overlap their redis
+// round trips instead of serializing behind one lock (the redis face
+// is the shared truth; the local windows are the fail-open fallback
+// and their exact interleaving is not observable).
 func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	now := e.now()
 	var hit Hit
 
-	for _, r := range e.rules {
+	e.mu.Lock()
+	rules := e.rules // header copy: SetRules swaps the slice, elements are never mutated
+	rr := e.rr
+	e.mu.Unlock()
+
+	for _, r := range rules {
 		if r.Disabled {
 			continue
 		}
@@ -115,8 +123,8 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 		case "freq":
 			// Redis face: the shared sliding window counts every
 			// replica's calls (Phase 3). Fail-open to local on error.
-			if e.rr != nil {
-				n, err := e.rr.SlidingCount(context.Background(), rfreqKey(account), now)
+			if rr != nil {
+				n, err := rr.SlidingCount(context.Background(), rfreqKey(account), now)
 				if err == nil {
 					if n > r.Limit {
 						hit = decide(hit, r, fmt.Sprintf("%d calls/min exceeds %d (shared)", n, r.Limit))
@@ -126,8 +134,10 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 				}
 				warn("freq window", err)
 			}
-			// calls in the trailing minute (inclusive of this attempt)
+			// calls in the trailing minute (inclusive of this attempt);
+			// the prune-and-count needs the local window under the lock
 			cutoff := now.Unix() - 60
+			e.mu.Lock()
 			ts := e.calls[account]
 			recent := ts[:0]
 			for _, t := range ts {
@@ -136,14 +146,15 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 				}
 			}
 			e.calls[account] = recent
+			e.mu.Unlock()
 			if len(recent)+1 > r.Limit {
 				hit = decide(hit, r, fmt.Sprintf("%d calls/min exceeds %d", len(recent)+1, r.Limit))
 				continue // rule matched; other rules may still add alerts
 			}
 		case "cost_day":
 			day := dayKey(now)
-			if e.rr != nil {
-				spent, err := e.rr.CostDayGet(ctx0(), day, account)
+			if rr != nil {
+				spent, err := rr.CostDayGet(ctx0(), day, account)
 				if err == nil {
 					if spent.Add(estCost) > money.MustFromYuan(r.CostLimit) {
 						hit = decide(hit, r, fmt.Sprintf("daily cost %s+%s exceeds %.2f (shared)", spent, estCost, r.CostLimit))
@@ -152,7 +163,9 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 				}
 				warn("cost_day get", err)
 			}
+			e.mu.Lock()
 			spent := e.dayCost[day][account]
+			e.mu.Unlock()
 			if spent.Add(estCost) > money.MustFromYuan(r.CostLimit) {
 				hit = decide(hit, r, fmt.Sprintf("daily cost %s+%s exceeds %.2f", spent, estCost, r.CostLimit))
 			}
@@ -173,18 +186,20 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 	}
 
 	if !hit.Blocked {
-		// Admitted: advance counters (both faces: redis is the shared
-		// truth, local keeps the fail-open fallback warm).
+		// Admitted: advance the local counters (fail-open fallback and
+		// single-replica truth) under a short lock.
+		e.mu.Lock()
 		e.calls[account] = append(e.calls[account], now.Unix())
 		day := dayKey(now)
 		if e.dayCost[day] == nil {
 			e.dayCost[day] = map[string]money.Amount{}
 		}
 		e.dayCost[day][account] += estCost
-		if e.rr != nil {
+		e.mu.Unlock()
+		if rr != nil {
 			// freq window already advanced inside SlidingCount; the day
 			// accumulator is advanced here (evaluate read, admit writes).
-			if _, err := e.rr.CostDayAdd(ctx0(), day, account, estCost); err != nil {
+			if _, err := rr.CostDayAdd(ctx0(), day, account, estCost); err != nil {
 				warn("cost_day add", err)
 			}
 		}

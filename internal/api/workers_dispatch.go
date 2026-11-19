@@ -654,7 +654,7 @@ func (s *Server) handleIPAllowSnapshot(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 503, "internal snapshot disabled (GVOS_INTERNAL_TOKEN unset)")
 		return
 	}
-	if r.Header.Get("X-GVOS-Internal") != want {
+	if r.Header.Get("X-GVOS-Internal") != want && r.URL.Query().Get("token") != want {
 		httpError(w, 401, "bad internal token")
 		return
 	}
@@ -698,7 +698,7 @@ func (s *Server) handleRegLookup(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 503, "internal endpoints disabled (GVOS_INTERNAL_TOKEN unset)")
 		return
 	}
-	if r.Header.Get("X-GVOS-Internal") != want {
+	if r.Header.Get("X-GVOS-Internal") != want && r.URL.Query().Get("token") != want {
 		httpError(w, 401, "bad internal token")
 		return
 	}

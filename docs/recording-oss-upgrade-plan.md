@@ -111,7 +111,7 @@ CDR 侧：recorded 列已有；UI ● 徽标 → 可点链接（播放器/下载
 
 | Phase | 内容 | 上线判定 |
 |---|---|---|
-| R0 POC（半天） | compose 加 rtpengine-recording 容器（bookworm 包），喂现有 spool 的 3 个 DUX pcap，产出 MP3；确认分轨文件数与归属判定可行 | output 目录出现可播放 MP3；tshark/ffprobe 验证 |
+| R0 POC（半天） | compose 加 rtpengine-recording 容器（bookworm 包），喂现有 spool 的 3 个 DUX pcap，产出 MP3；确认分轨文件数与归属判定可行 | ✅ **已执行（2026-11-19/20）**：录音链路全通（SIP 呼叫→bill-lock ok→recording ON→dispatching）；DUX spool 产出机制实证（662KB 双流 pcap + 闭合 metadata，双向 RTP 注入）；daemon 容器化可行（bookworm 10.5.3.5 完整依赖链）。**遗留一项**：daemon 消费 spool 报 "Unterminated content length"（其对 metadata 中 pcap section 的 content-length 声明依赖流的优雅关闭，手动 delete/超时路径缺失该声明）——两条出路：①对比官方 ngcp 镜像的行为；②验证批次在真实双端媒体下复验。**转码本身由 daemon 内部 ffmpeg 完成，DUX 解码为 daemon 专有能力（标准 ffmpeg 无法直读 DUX——已实测）** |
 | R1 | recording daemon 常驻化：Dockerfile + compose/Helm 适配（spool/output 双卷、目录权限）；`kamailio.cfg` 录音触发不变 | 冒烟通话后 output 自动出现成品文件 |
 | R2 | Go uploader：OSS 客户端、DUX metadata 解析、agent/user 归属、PG `recording` 表迁移、NATS 事件、失败重试、本地清理 | 落一通电话，OSS 出现 agent/user 两文件，表里两行 |
 | R3 | 下载/调听：`GET /v1/recording/{call_id}` presigned URL 端点 + 权限；UI 徽标变可点播放器 | UI 里点开即播，track 可切 |

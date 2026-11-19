@@ -297,11 +297,15 @@ func requireInternal(w http.ResponseWriter, r *http.Request) bool {
 		httpErrorC(w, 503, "INTERNAL_AUTH_UNSET", "signaling face disabled (GVOS_INTERNAL_TOKEN unset)")
 		return false
 	}
-	if r.Header.Get("X-GVOS-Internal") != want {
-		httpErrorC(w, 401, "UNAUTHORIZED", "bad internal token")
-		return false
+	// Header form (standard) or query form (?token= — the Kamailio
+	// http_client module cannot attach headers to POST bodies; the
+	// internal face is network-isolated, recorded as a known tradeoff).
+	if r.Header.Get("X-GVOS-Internal") == want || r.URL.Query().Get("token") == want {
+		return true
 	}
-	return true
+	log.Printf("AUTH-DEBUG %s %s hdr=%q q=%q", r.Method, r.URL.RequestURI(), r.Header.Get("X-GVOS-Internal"), r.URL.Query().Get("token"))
+	httpErrorC(w, 401, "UNAUTHORIZED", "bad internal token")
+	return false
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -445,8 +449,15 @@ func httpErrorC(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]errorEnvelope{"error": {Code: code, Message: msg}})
 }
 
-func MuxFor(s *Server) *http.ServeMux {
+func MuxFor(s *Server) http.Handler {
 	mux := http.NewServeMux()
+	logWrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("HTTP-IN %s %s len=%d", r.Method, r.URL.RequestURI(), r.ContentLength)
+			next.ServeHTTP(w, r)
+		})
+	}
+
 
 	// Signaling event plane (internal token, fail-closed — Phase A).
 	mux.HandleFunc("POST /v1/call/start", s.handleStart)
@@ -522,7 +533,7 @@ func MuxFor(s *Server) *http.ServeMux {
 		w.WriteHeader(200)
 		fmt.Fprintln(w, "ok")
 	})
-	return mux
+	return logWrap(mux)
 }
 
 // GET /v1/admin/cdrs?limit=50 - latest CDRs (in-memory ring; PG mode

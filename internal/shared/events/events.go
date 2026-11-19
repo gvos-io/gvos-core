@@ -348,29 +348,49 @@ func (p *Publisher) Subscribe(subject string, fn func(data []byte)) error {
 	return err
 }
 
+// responderWorkers bounds the per-subscription dispatch pool. The NATS
+// client runs one subscription's callbacks serially, so an inline
+// handler makes the slowest request (call admission: several redis
+// round trips) the throughput ceiling of every caller on the subject.
+const responderWorkers = 16
+
 // Respond serves request/reply on subject: fn turns a request payload
 // into the reply bytes; the reply goes back over the requester's
-// _INBOX. Used by service seams (teardown dispatch today).
+// _INBOX. Requests run on a bounded worker pool — the NATS dispatcher
+// hands messages to the pool and stays free; once the pool plus the
+// inbox buffer saturate, the dispatcher stalls (bounded backpressure,
+// messages queue in the client buffer rather than being dropped).
+// Reply order is not preserved: safe, because every caller matches
+// its own _INBOX. Used by the service seams (call start/answer/end,
+// stats, teardown dispatch).
 func (p *Publisher) Respond(subject string, fn func(req []byte) []byte) error {
 	if p.nc == nil {
 		return errors.New("nats: respond requires a live connection")
 	}
-	_, err := p.nc.Subscribe(subject, func(m *nats.Msg) {
-		var reply []byte
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("NATS responder panic (%s): %v", subject, r)
-					reply = []byte(`{"error":"internal panic"}`)
+	inbox := make(chan *nats.Msg, responderWorkers)
+	for i := 0; i < responderWorkers; i++ {
+		go func() {
+			for m := range inbox {
+				var reply []byte
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("NATS responder panic (%s): %v", subject, r)
+							reply = []byte(`{"error":"internal panic"}`)
+						}
+					}()
+					reply = fn(m.Data)
+				}()
+				if m.Reply != "" && reply != nil {
+					if err := m.Respond(reply); err != nil {
+						log.Printf("NATS reply failed (%s): %v", subject, err)
+					}
 				}
-			}()
-			reply = fn(m.Data)
-		}()
-		if m.Reply != "" && reply != nil {
-			if err := m.Respond(reply); err != nil {
-				log.Printf("NATS reply failed (%s): %v", subject, err)
 			}
-		}
+		}()
+	}
+	_, err := p.nc.Subscribe(subject, func(m *nats.Msg) {
+		inbox <- m
 	})
 	return err
 }

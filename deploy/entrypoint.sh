@@ -6,5 +6,5 @@ set -e
 mkdir -p /recording
 IP=$(hostname -i | awk '{print $1}')
 exec rtpengine --interface "$IP" --listen-ng 2223 \
-    --log-level 6 --foreground --delete-delay 0 --timeout 60 \
+    --log-level 6 --foreground --delete-delay 10 --timeout 60 \
     --recording-dir /recording --recording-method pcap --recording-format eth
