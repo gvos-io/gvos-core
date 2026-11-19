@@ -278,3 +278,52 @@ func TestAdmissionUnderRedisAuthority(t *testing.T) {
 		t.Fatalf("third start over chain cap = %d, want 429", c)
 	}
 }
+
+// TestAXBPrivacyCall: bind a pair, dial the virtual X number, verify
+// the start answer carries rewrite_dest (the edge's R-URI rewrite
+// instruction) and billing followed B's rate prefix.
+func TestAXBPrivacyCall(t *testing.T) {
+	s := NewServer()
+	srv := httptest.NewServer(MuxFor(s))
+	defer srv.Close()
+
+	adminPost := func(path string, body any) (int, map[string]any) {
+		t.Helper()
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest("POST", srv.URL+path, bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var m map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&m)
+		return resp.StatusCode, m
+	}
+
+	// Bind A to B=8615770000000 (rate prefix differs from the demo
+	// 8613 table → rate lookup must follow B).
+	code, m := adminPost("/v1/admin/axb/bindings", map[string]any{
+		"a_number": "13800001111", "b_number": "8615770000000", "ttl_hours": 1,
+	})
+	if code != 201 {
+		t.Fatalf("bind: %d %v", code, m)
+	}
+	xnum := m["x_number"].(string)
+
+	// Dial X (the caller's payload dest = virtual number).
+	b, _ := json.Marshal(map[string]string{
+		"call_id": "axb-1", "from_user": "1000", "to_user": xnum,
+	})
+	if code, m := postInternal(t, srv.URL+"/v1/call/start", b); code != 200 {
+		t.Fatalf("start on X: %d %v", code, m)
+	} else {
+		if m["rewrite_dest"] != "8615770000000" {
+			t.Errorf("rewrite_dest = %v", m["rewrite_dest"])
+		}
+	}
+	if _, ok := s.calls.Info("axb-1"); !ok {
+		t.Fatal("call state missing")
+	}
+}

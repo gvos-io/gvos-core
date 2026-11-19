@@ -68,12 +68,22 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 		})
 	}
 
-	now := time.Now()
-	entry := s.rates.Lookup(req.To, int(now.Weekday()), now.Hour()*60+now.Minute())
-	if entry == nil {
-		return 404, map[string]string{"error": "no rate for destination " + req.To}
+	// AXB privacy resolution: dialing a virtual X number rewrites the
+	// destination to the bound B number (billing + routing follow B;
+	// the edge rewrites the R-URI from the rewrite_dest instruction).
+	actualDest := req.To
+	if s.axb != nil {
+		if bd, ok := s.axb.Resolve(req.To); ok {
+			actualDest = bd.BNumber
+		}
 	}
-	if err := s.calls.Start(req.CallID, accID, req.To, entry, 60, s.recordEnabled); err != nil {
+
+	now := time.Now()
+	entry := s.rates.Lookup(actualDest, int(now.Weekday()), now.Hour()*60+now.Minute())
+	if entry == nil {
+		return 404, map[string]string{"error": "no rate for destination " + actualDest}
+	}
+	if err := s.calls.Start(req.CallID, accID, actualDest, entry, 60, s.recordEnabled); err != nil {
 		// Insufficient balance is a 403 for the caller; account limits
 		// are a 429 (retry later); unknown account a 404.
 		var limit *callcore.ErrLimit
@@ -89,7 +99,7 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	// can attach even before the first RTP chunk.
 	s.media.Open(req.CallID)
 
-	return 200, map[string]any{
+	answer := map[string]any{
 		"call_id":     req.CallID,
 		"rate_prefix": entry.Prefix,
 		"price":       entry.Price,
@@ -97,6 +107,12 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 		// Recording opt-in: Kamailio calls start_recording() when true.
 		"record": s.recordEnabled,
 	}
+	if actualDest != req.To {
+		// AXB rewrite instruction: the edge replaces the R-URI user
+		// part with the real destination before relaying to the gateway.
+		answer["rewrite_dest"] = actualDest
+	}
+	return 200, answer
 }
 
 // callAnswer switches the call from lock to live.

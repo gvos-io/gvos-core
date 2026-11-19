@@ -19,6 +19,7 @@ import (
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/rate"
 	"github.com/lixuanqun/gvos-core/internal/callcore"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/axb"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/gateway"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/ipallow"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/regtable"
@@ -48,6 +49,7 @@ type Server struct {
 	pkg           *pkgplan.Engine      // subscription packages (allowance/discount/min-spend)
 	gws           *gateway.List        // outbound gateway directory (API-authoritative)
 	regs          *regtable.Table      // SIP registration mirror (fed by gvos.reg.event)
+	axb           *axb.Store           // privacy-number bindings (AXB module)
 	acl           *acl.Store           // API-key registry (Phase B; nil = keys off, legacy fallback)
 	idem          *idemStore           // Idempotency-Key registry for money routes
 	rds           *rds.Client          // Redis runtime-state authority (nil = off, memory authoritative)
@@ -137,7 +139,7 @@ func (s *Server) rebuildRates() {
 
 // NewServer builds the in-memory demo server (dev/test mode).
 func NewServer() *Server {
-	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), axb: axb.NewStore(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now()}
 	s.userIndex = map[string]string{}
 
 	// Demo seed: one tenant chain and a small rate table. The tenant
@@ -166,7 +168,7 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), axb: axb.NewStore(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now()}
 	n, err := pg.LoadAccounts(ctx, s.store)
 	if err != nil {
 		pg.Close()
@@ -495,6 +497,12 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("POST /v1/admin/reports/rollup", s.handleReports)
 	mux.HandleFunc("GET /v1/admin/reports", s.handleReportList)
 	mux.HandleFunc("GET /v1/admin/reports/views", s.handleReportViews)
+	// AXB privacy numbers (VOS module equivalent).
+	mux.HandleFunc("POST /v1/admin/axb/bindings", s.handleAXBBind)
+	mux.HandleFunc("GET /v1/admin/axb/bindings", s.handleAXBList)
+	mux.HandleFunc("DELETE /v1/admin/axb/bindings/{x}", s.handleAXBDel)
+	mux.HandleFunc("GET /v1/admin/axb/stats", s.handleAXBStats)
+
 	// Recording pipeline (R2/R3).
 	mux.HandleFunc("GET /v1/recording/{call_id}", s.handleRecordingList)
 	mux.HandleFunc("GET /v1/recording/{call_id}/{track}", s.handleRecordingPlay)
