@@ -26,6 +26,7 @@ import (
 	"github.com/lixuanqun/gvos-core/internal/shared/acl"
 	"github.com/lixuanqun/gvos-core/internal/mediamain/mediastream"
 	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/lixuanqun/gvos-core/internal/shared/rds"
 	"github.com/lixuanqun/gvos-core/internal/shared/store"
 )
 
@@ -47,6 +48,7 @@ type Server struct {
 	regs          *regtable.Table      // SIP registration mirror (fed by gvos.reg.event)
 	acl           *acl.Store           // API-key registry (Phase B; nil = keys off, legacy fallback)
 	idem          *idemStore           // Idempotency-Key registry for money routes
+	rds           *rds.Client          // Redis runtime-state authority (nil = off, memory authoritative)
 	events        *events.Publisher    // NATS event bus (nil = publishing off)
 	webhookURL    string               // webhook dispatcher target ("" = off)
 	asyncCdr      bool                 // CDRW worker owns CDR persistence
@@ -345,6 +347,10 @@ func (s *Server) statsBody() map[string]any {
 		resp["webhook"] = "on"
 	}
 	resp["workers"] = s.workerNames
+	resp["redis"] = "off"
+	if s.rds != nil {
+		resp["redis"] = "on"
+	}
 	if bal, err := account.Balance(s.store, "1000"); err == nil {
 		resp["caller_bal"] = bal
 	}
@@ -626,3 +632,7 @@ func (s *Server) routeRiskLegacy(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/v1/admin/risk-rules", http.StatusTemporaryRedirect)
 }
+
+// AttachRedis wires the Redis runtime-state authority (Phase 0
+// wiring; domain packages adopt it in Phases 1-5).
+func AttachRedis(s *Server, c *rds.Client) { s.rds = c }

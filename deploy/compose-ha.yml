@@ -58,6 +58,17 @@ services:
     image: nats:2-alpine
     command: ["-js", "-m", "8222"]
 
+  # Runtime-state authority (Phase 0 wiring; balances move in with
+  # Phase 1 — until then gv-core just requires a reachable redis).
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   gv-core:
     build:
       context: ..
@@ -65,11 +76,14 @@ services:
     depends_on:
       pg-primary:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       nats:
         condition: service_started
     environment:
       GVOS_DB_DSN: "postgres://gvos:gvos_dev@pg-primary:5432/gvos?sslmode=disable"
       GVOS_NATS_URL: "nats://nats:4222"
+      GVOS_REDIS_URL: "redis://redis:6379"
       GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
       GVOS_LISTEN: ":8080"
 

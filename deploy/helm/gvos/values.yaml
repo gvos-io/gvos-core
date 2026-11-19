@@ -23,6 +23,12 @@ database:
 nats:
   url: ""        # e.g. nats://nats-client.gvos.svc:4222
 
+# Runtime-state authority (balances/admission/risk windows). External
+# by default — the same SLA philosophy as the database. Empty = off
+# (single-replica memory authority).
+redis:
+  url: ""        # e.g. redis://redis.gvos.svc:6379
+
 api:
   service:
     type: ClusterIP

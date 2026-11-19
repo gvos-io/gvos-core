@@ -14,12 +14,14 @@ import (
 	"time"
 
 	"github.com/lixuanqun/gvos-core/internal/api"
+	"github.com/lixuanqun/gvos-core/internal/shared/rds"
 	"github.com/lixuanqun/gvos-core/internal/shared/events"
 )
 
 func main() {
 	listen := flag.String("listen", ":8080", "HTTP listen address")
 	dsn := flag.String("dsn", "", "PostgreSQL DSN; empty = in-memory demo mode")
+	redisURL := flag.String("redis", "", "Redis URL (runtime-state authority); empty = off, memory authoritative")
 	natsURL := flag.String("nats", "", "NATS server URL; empty = event bus off")
 	webhook := flag.String("webhook", "", "Webhook endpoint URL (cdr.completed events; requires -nats)")
 	tlsCert := flag.String("tls-cert", os.Getenv("GVOS_TLS_CERT"), "TLS cert (enables HTTPS)")
@@ -32,6 +34,10 @@ func main() {
 	if dsnVal == "" {
 		dsnVal = os.Getenv("GVOS_DB_DSN")
 	}
+	redisVal := *redisURL
+	if redisVal == "" {
+		redisVal = os.Getenv("GVOS_REDIS_URL")
+	}
 	natsVal := *natsURL
 	if natsVal == "" {
 		natsVal = os.Getenv("GVOS_NATS_URL")
@@ -41,6 +47,14 @@ func main() {
 		webhookVal = os.Getenv("GVOS_WEBHOOK_URL")
 	}
 
+	var rc *rds.Client
+	if redisVal != "" {
+		var err error
+		rc, err = rds.New(redisVal)
+		if err != nil {
+			log.Fatalf("redis configured but unreachable (%v) — the money authority does not start degraded", err)
+		}
+	}
 	var s *api.Server
 	if dsnVal != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -56,6 +70,9 @@ func main() {
 	// First admin API key (Phase B): derived from GVOS_ADMIN_TOKEN or
 	// generated + printed once. Runs before the HTTP server starts.
 	api.BootstrapKey(s)
+	if rc != nil {
+		api.AttachRedis(s, rc)
+	}
 	// Event bus is auxiliary, not authority: a missing/unreachable
 	// broker must not take the control plane down (it reconnects on
 	// its own; publishes just log until the broker appears).
@@ -88,7 +105,8 @@ func main() {
 	if webhookConsumer != nil {
 		webhookConsumer.Stop() // drain in-flight webhook deliveries
 	}
-	api.Shutdown(s) // drain workers, close the event bus
+	api.Shutdown(s)   // drain workers, close the event bus
+	_ = rc.Close()  // then the redis authority (rc nil-safe)
 	if webhookConsumer != nil {
 		webhookConsumer.Stop()
 	}
