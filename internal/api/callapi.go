@@ -76,12 +76,12 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 		// are a 429 (retry later); unknown account a 404.
 		var limit *callcore.ErrLimit
 		if errors.As(err, &limit) {
-			return 429, map[string]string{"error": err.Error()}
+			return 429, map[string]errorEnvelope{"error": {Code: "RATE_LIMITED", Message: err.Error()}}
 		}
 		if strings.Contains(err.Error(), "not found") {
 			return 404, map[string]string{"error": err.Error()}
 		}
-		return 403, map[string]string{"error": err.Error()}
+		return 403, map[string]errorEnvelope{"error": {Code: "INSUFFICIENT_CREDIT", Message: err.Error()}}
 	}
 	// Media plane: open the bidirectional stream so AI subscribers
 	// can attach even before the first RTP chunk.

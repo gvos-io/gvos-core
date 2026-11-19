@@ -89,7 +89,7 @@ docker exec -i gvos-postgres-1 psql -U gvos < migrations/00N_xxx.sql
 
 | 现象 | 排查顺序 |
 |---|---|
-| 呼叫全部 403 | gv-core stats 余额 → 账户 credit；风控规则（`GET /v1/admin/risk`）；黑名单 |
+| 呼叫全部 403 | gv-core stats 余额 → 账户 credit；风控规则（`GET /v1/admin/risk-rules`）；黑名单 |
 | 呼叫 503 No Gateway | `kamcmd dispatcher.list` 看网关 FLAGS（IP=探测失败）→ 检查网关容器/网络；恢复后探测自动恢复 |
 | bill-lock REJECTED rc=3 | Kamailio→gv-core 网络断（`docker ps` 看 gv-core 状态） |
 | live_calls 持续增长 | UAS/网关不发 BYE；10 分钟后清扫器自动结算；持续增长=泄漏，报研发 |

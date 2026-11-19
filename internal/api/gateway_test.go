@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/lixuanqun/gvos-core/internal/shared/events"
@@ -34,6 +35,7 @@ func TestGatewayAdminAPI(t *testing.T) {
 		}
 		req, _ := http.NewRequest(method, srv.URL+path, rd)
 		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 		resp, err := srv.Client().Do(req)
 		if err != nil {
 			t.Fatal(err)

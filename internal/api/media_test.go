@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -197,7 +198,9 @@ func postEnd(t *testing.T, srv *httptest.Server, callID string, dur int) (int, m
 func postJSONpath(t *testing.T, srv *httptest.Server, path string, body any) (int, map[string]any) {
 	t.Helper()
 	b, _ := json.Marshal(body)
-	resp, err := http.Post(srv.URL+path, "application/json", bytes.NewReader(b))
+	req, _ := http.NewRequest("POST", srv.URL+path, bytes.NewReader(b))
+	req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

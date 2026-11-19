@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
@@ -243,7 +244,28 @@ func demoRates() []rate.Rate {
 // handleStart is the pre-answer lock: Kamailio calls it on INVITE.
 // Thin wrapper — the logic lives in callStart (shared with the NATS
 // service endpoint).
+// requireInternal enforces the X-GVOS-Internal token on the signaling
+// event face (Phase A, fail-closed): no token configured means the
+// call plane refuses new events rather than accepting unauthenticated
+// billing traffic. Kamailio cfg sends the header on every call
+// event once GVOS_INTERNAL_TOKEN is set.
+func requireInternal(w http.ResponseWriter, r *http.Request) bool {
+	want := os.Getenv("GVOS_INTERNAL_TOKEN")
+	if want == "" {
+		httpErrorC(w, 503, "INTERNAL_AUTH_UNSET", "signaling face disabled (GVOS_INTERNAL_TOKEN unset)")
+		return false
+	}
+	if r.Header.Get("X-GVOS-Internal") != want {
+		httpErrorC(w, 401, "UNAUTHORIZED", "bad internal token")
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
+	if !requireInternal(w, r) {
+		return
+	}
 	if !requirePOST(w, r) {
 		return
 	}
@@ -261,6 +283,9 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 
 // handleAnswer switches the call from lock to live.
 func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
+	if !requireInternal(w, r) {
+		return
+	}
 	if !requirePOST(w, r) {
 		return
 	}
@@ -277,6 +302,9 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 
 // handleEnd finalizes billing and returns the CDR.
 func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request) {
+	if !requireInternal(w, r) {
+		return
+	}
 	if !requirePOST(w, r) {
 		return
 	}
@@ -326,34 +354,115 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// errorEnvelope is the Phase A error contract (api-conventions §3):
+// {"error":{"code","message"}}. Codes are stable, machine-readable
+// SCREAMING_SNAKE strings the callers branch on; message is the
+// human detail.
+type errorEnvelope struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// errCodeFor maps HTTP status codes to the stable error code set.
+// 403 keeps three distinct causes (balance/blocklist/risk) which the
+// specific callers raise via httpErrorC.
+func errCodeFor(code int) string {
+	switch code {
+	case 400:
+		return "BAD_REQUEST"
+	case 401:
+		return "UNAUTHORIZED"
+	case 403:
+		return "FORBIDDEN"
+	case 404:
+		return "NOT_FOUND"
+	case 405:
+		return "METHOD_NOT_ALLOWED"
+	case 429:
+		return "RATE_LIMITED"
+	case 500:
+		return "INTERNAL"
+	case 503:
+		return "UNAVAILABLE"
+	}
+	return "ERROR"
+}
+
 func httpError(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]string{"error": msg})
+	writeJSON(w, code, map[string]errorEnvelope{"error": {Code: errCodeFor(code), Message: msg}})
+}
+
+// httpErrorC raises an explicit error code that differs from the
+// status-derived default (403 insufficient-balance vs blocklist vs
+// risk-blocked).
+func httpErrorC(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, map[string]errorEnvelope{"error": {Code: code, Message: msg}})
 }
 
 func MuxFor(s *Server) *http.ServeMux {
 	mux := http.NewServeMux()
-	// Kamailio event plane.
-	mux.HandleFunc("/v1/call/start", s.handleStart)
-	mux.HandleFunc("/v1/call/answer", s.handleAnswer)
-	mux.HandleFunc("/v1/call/end", s.handleEnd)
-	mux.HandleFunc("/v1/stats", s.handleStats)
-	// Admin plane (bearer token guarded).
-	mux.HandleFunc("/v1/admin/accounts", s.routeAccounts)
-	mux.HandleFunc("/v1/admin/topup", s.handleTopUp)
-	mux.HandleFunc("/v1/admin/rates", s.routeRates)
-	mux.HandleFunc("/v1/admin/cdrs", s.handleCDRList)
-	mux.HandleFunc("/v1/admin/record", s.handleRecordToggle)
-	mux.HandleFunc("/v1/admin/blocklist", s.handleBlocklist)
-	mux.HandleFunc("/v1/admin/risk", s.handleRiskRules)
-	mux.HandleFunc("/v1/admin/ipallow", s.handleIPAllow)
-	mux.HandleFunc("/v1/internal/ipallow-snapshot", s.handleIPAllowSnapshot)
-	mux.HandleFunc("/v1/admin/gateways", s.routeGateways)
-	mux.HandleFunc("/v1/admin/registrations", s.handleRegList)
-	mux.HandleFunc("/v1/admin/stream-push", s.handleStreamPush)
-	mux.HandleFunc("/v1/admin/reports", s.handleReports)
-	mux.HandleFunc("/v1/admin/packages", s.handlePackages)
-	mux.HandleFunc("/v1/admin/packages/usage", s.handlePackageUsage)
+
+	// Signaling event plane (internal token, fail-closed — Phase A).
+	mux.HandleFunc("POST /v1/call/start", s.handleStart)
+	mux.HandleFunc("POST /v1/call/answer", s.handleAnswer)
+	mux.HandleFunc("POST /v1/call/end", s.handleEnd)
+	mux.HandleFunc("GET /v1/stats", s.handleStats)
+
+	// Admin plane: resource routes (Go 1.22 method patterns). The
+	// verb-dispatcher routes are gone; 405/404 come from net/http.
+	mux.HandleFunc("POST /v1/admin/accounts", s.handleAccountCreate)
+	mux.HandleFunc("GET /v1/admin/accounts", s.handleAccountList)
+	mux.HandleFunc("POST /v1/admin/accounts/{id}/topup", s.handleTopUp)
+	mux.HandleFunc("GET /v1/admin/rates", s.handleRateList)
+	mux.HandleFunc("PUT /v1/admin/rates", s.handleRateUpsert)
+	mux.HandleFunc("GET /v1/admin/risk-rules", s.handleRiskRules)
+	mux.HandleFunc("PUT /v1/admin/risk-rules", s.handleRiskRules)
+	mux.HandleFunc("GET /v1/admin/gateways", s.handleGatewayList)
+	mux.HandleFunc("PUT /v1/admin/gateways", s.handleGatewaySet)
+	mux.HandleFunc("DELETE /v1/admin/gateways/{id}", s.handleGatewayDelete)
+	mux.HandleFunc("GET /v1/admin/registrations", s.handleRegList)
+	mux.HandleFunc("GET /v1/admin/cdrs", s.handleCDRList)
+	mux.HandleFunc("POST /v1/admin/recording", s.handleRecordToggle)
+	mux.HandleFunc("GET /v1/admin/recording", s.handleRecordToggle)
+	mux.HandleFunc("GET /v1/admin/blocklist-entries", s.handleBlocklistList)
+	mux.HandleFunc("POST /v1/admin/blocklist-entries", s.handleBlocklist)
+	mux.HandleFunc("DELETE /v1/admin/blocklist-entries/{id}", s.handleBlocklistDelete)
+	mux.HandleFunc("GET /v1/admin/ipallow/rules", s.handleIPAllowList)
+	mux.HandleFunc("POST /v1/admin/ipallow/rules", s.handleIPAllow)
+	mux.HandleFunc("DELETE /v1/admin/ipallow/rules/{id}", s.handleIPAllowDelete)
+	mux.HandleFunc("GET /v1/admin/packages", s.handlePackages)
+	mux.HandleFunc("PUT /v1/admin/packages", s.handlePackages)
+	mux.HandleFunc("GET /v1/admin/packages/usage", s.handlePackageUsage)
+	mux.HandleFunc("POST /v1/admin/reports/rollup", s.handleReports)
+	mux.HandleFunc("GET /v1/admin/reports", s.handleReportList)
+	mux.HandleFunc("GET /v1/admin/reports/views", s.handleReportViews)
+	// Test hook; x-internal, stays out of the public OpenAPI.
+	mux.HandleFunc("POST /v1/admin/stream-push", s.handleStreamPush)
+
+	// Internal control plane (SIP edge pollers).
+	mux.HandleFunc("GET /v1/internal/ipallow-snapshot", s.handleIPAllowSnapshot)
+
+	// Media stream (WebSocket).
 	mux.HandleFunc("/v1/stream/", s.handleMediaStream)
+
+	// Deprecated spike routes (Phase A migration window): 307 to the
+	// resource form; removed next version. Deprecation header set.
+	deprecated := func(target string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Deprecation", "true")
+			w.Header().Set("Sunset", "0")
+			http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+		}
+	}
+	mux.HandleFunc("/v1/admin/topup", deprecated("/v1/admin/accounts/{id}/topup"))
+	mux.HandleFunc("/v1/admin/rates", s.routeRatesLegacy)
+	mux.HandleFunc("/v1/admin/record", deprecated("/v1/admin/recording"))
+	mux.HandleFunc("/v1/admin/blocklist", s.handleBlocklistLegacy)
+	mux.HandleFunc("/v1/admin/risk", s.routeRiskLegacy)
+	mux.HandleFunc("/v1/admin/ipallow", s.handleIPAllowLegacy)
+	mux.HandleFunc("/v1/admin/gateways", s.routeGatewaysLegacy)
+	mux.HandleFunc("/v1/admin/reports", s.routeReportsLegacy)
+
 	// Static admin console (token entered in the UI).
 	mux.HandleFunc("/ui", s.handleUI)
 	mux.HandleFunc("/ui/", s.handleUI)
@@ -366,6 +475,10 @@ func MuxFor(s *Server) *http.ServeMux {
 
 // GET /v1/admin/cdrs?limit=50 - latest CDRs (in-memory ring; PG mode
 // reads would come from the DB, same shape).
+// handleCDRList serves GET /v1/admin/cdrs with cursor pagination
+// (api-conventions §4): newest first, cursor = index into the
+// in-memory ring (PG mode later switches to keyset on
+// start_time,call_id). Default limit 50, max 500.
 func (s *Server) handleCDRList(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -376,11 +489,26 @@ func (s *Server) handleCDRList(w http.ResponseWriter, r *http.Request) {
 			limit = int(n)
 		}
 	}
+	// cursor = ring index one past the last returned row (0 = start
+	// from newest). Page i returns [len-cursor-limit, len-cursor).
+	cursor := 0
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		if n, err := json.Number(c).Int64(); err == nil && n >= 0 && int(n) <= len(s.cdrs) {
+			cursor = int(n)
+		} else {
+			httpErrorC(w, 400, "BAD_CURSOR", "cursor out of range")
+			return
+		}
+	}
 	out := []*callcore.CDR{}
-	for i := len(s.cdrs) - 1; i >= 0 && len(out) < limit; i-- {
+	for i := len(s.cdrs) - 1 - cursor; i >= 0 && len(out) < limit; i-- {
 		out = append(out, s.cdrs[i])
 	}
-	writeJSON(w, 200, map[string]any{"cdrs": out, "count": len(out)})
+	next := ""
+	if cursor+len(out) < len(s.cdrs) {
+		next = json.Number(fmt.Sprintf("%d", cursor+len(out))).String()
+	}
+	writeJSON(w, 200, map[string]any{"cdrs": out, "count": len(out), "next_cursor": next})
 }
 
 // handleUI serves the embedded single-file admin console.
@@ -468,3 +596,25 @@ func Shutdown(s *Server) {
 
 // SetClock overrides the call manager's clock (test seam).
 func SetClock(s *Server, now func() time.Time) { s.calls.SetClock(now) }
+
+// routeRatesLegacy: old verb route (POST=upsert, GET=list) kept for
+// the deprecation window.
+func (s *Server) routeRatesLegacy(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		s.handleRateUpsert(w, r)
+	case http.MethodGet:
+		s.handleRateList(w, r)
+	default:
+		httpError(w, 405, "POST or GET")
+	}
+}
+
+// routeRiskLegacy: old POST-only route; GET goes to risk-rules.
+func (s *Server) routeRiskLegacy(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		s.handleRiskRules(w, r)
+		return
+	}
+	http.Redirect(w, r, "/v1/admin/risk-rules", http.StatusTemporaryRedirect)
+}

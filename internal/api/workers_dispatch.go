@@ -20,13 +20,13 @@ import (
 	"time"
 
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
-	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
+	"github.com/lixuanqun/gvos-core/internal/billingdomain/pkgplan"
 	"github.com/lixuanqun/gvos-core/internal/callcore"
-	"github.com/lixuanqun/gvos-core/internal/shared/events"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/gateway"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/ipallow"
-	"github.com/lixuanqun/gvos-core/internal/billingdomain/pkgplan"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/riskctrl"
+	"github.com/lixuanqun/gvos-core/internal/shared/events"
 )
 
 // startAsyncWorkers launches the durable write/exec workers. Each
@@ -390,9 +390,9 @@ func StartCallSvc(s *Server) {
 	// call_id rides along for log correlation on the resume side).
 	lockReply := func(code int, body any, req []byte) []byte {
 		var suspend struct {
-			CallID  string `json:"call_id"`
-			TIndex  int64  `json:"tindex"`
-			TLabel  int64  `json:"tlabel"`
+			CallID string `json:"call_id"`
+			TIndex int64  `json:"tindex"`
+			TLabel int64  `json:"tlabel"`
 		}
 		_ = json.Unmarshal(req, &suspend)
 		if suspend.TIndex == 0 && suspend.TLabel == 0 {
@@ -658,9 +658,9 @@ func (s *Server) handleIPAllowSnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, map[string]any{
-		"version":    fmt.Sprintf("%016x", h.Sum64()),
-		"count":      len(rules),
-		"rules":      rules,
+		"version":     fmt.Sprintf("%016x", h.Sum64()),
+		"count":       len(rules),
+		"rules":       rules,
 		"allow_cidrs": allows,
 		"deny_cidrs":  denies,
 	})

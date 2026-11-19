@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
-	"github.com/lixuanqun/gvos-core/internal/shared/events"
 	"github.com/lixuanqun/gvos-core/internal/customerdomain/ipallow"
+	"github.com/lixuanqun/gvos-core/internal/shared/events"
 )
 
 func TestIPAllowAdminAPI(t *testing.T) {
@@ -26,6 +27,7 @@ func TestIPAllowAdminAPI(t *testing.T) {
 		req, _ := http.NewRequest("POST", srv.URL+path, bytes.NewReader(b))
 		if auth {
 			req.Header.Set("Authorization", "Bearer "+adminToken)
+			req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -41,6 +43,7 @@ func TestIPAllowAdminAPI(t *testing.T) {
 		req, _ := http.NewRequest("GET", srv.URL+path, nil)
 		if auth {
 			req.Header.Set("Authorization", "Bearer "+adminToken)
+			req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -128,9 +131,9 @@ func TestIPAllowSnapshotEndpoint(t *testing.T) {
 	srv := httptest.NewServer(MuxFor(s))
 	defer srv.Close()
 
-	// Token unset -> endpoint disabled (503), never open.
-	if code, body := get(t, srv.URL+"/v1/internal/ipallow-snapshot"); code != 503 {
-		t.Errorf("no-token snapshot: %d %v, want 503", code, body)
+	// Pinned token (TestMain), no header -> 401 (never open).
+	if code, body := get(t, srv.URL+"/v1/internal/ipallow-snapshot"); code != 401 {
+		t.Errorf("no-header snapshot: %d %v, want 401", code, body)
 	}
 
 	t.Setenv("GVOS_INTERNAL_TOKEN", "secret-internal")

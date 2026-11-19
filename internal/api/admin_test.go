@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/lixuanqun/gvos-core/internal/billingdomain/account"
@@ -49,6 +50,7 @@ func TestAdminAccountLifecycle(t *testing.T) {
 		b, _ := json.Marshal(body)
 		req, _ := http.NewRequest(method, srv.URL+path, bytes.NewReader(b))
 		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("%s %s: %v", method, path, err)
@@ -124,6 +126,7 @@ func TestAdminRateUpsertLiveEffect(t *testing.T) {
 		b, _ := json.Marshal(body)
 		req, _ := http.NewRequest("POST", srv.URL+path, bytes.NewReader(b))
 		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -173,6 +176,7 @@ func TestAdminValidation(t *testing.T) {
 		b, _ := json.Marshal(body)
 		req, _ := http.NewRequest("POST", srv.URL+path, bytes.NewReader(b))
 		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)

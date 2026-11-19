@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -28,14 +29,7 @@ func TestEndToEndCallFlow(t *testing.T) {
 	post := func(path string, body any) (int, map[string]any) {
 		t.Helper()
 		b, _ := json.Marshal(body)
-		resp, err := http.Post(srv.URL+path, "application/json", bytes.NewReader(b))
-		if err != nil {
-			t.Fatalf("POST %s: %v", path, err)
-		}
-		defer resp.Body.Close()
-		var m map[string]any
-		_ = json.NewDecoder(resp.Body).Decode(&m)
-		return resp.StatusCode, m
+		return postInternal(t, srv.URL+path, b)
 	}
 
 	// 1. INVITE to a CN mobile number (prefix 8613, 0.05/min, 60+6).
@@ -94,13 +88,8 @@ func TestInsufficientBalance403(t *testing.T) {
 	b, _ := json.Marshal(map[string]string{
 		"call_id": "call-x", "from_user": "1000", "to_user": "8613800138000",
 	})
-	resp, err := http.Post(srv.URL+"/v1/call/start", "application/json", bytes.NewReader(b))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 403 {
-		t.Errorf("start code = %d, want 403", resp.StatusCode)
+	if code, _ := postInternal(t, srv.URL+"/v1/call/start", b); code != 403 {
+		t.Errorf("start code = %d, want 403", code)
 	}
 }
 
@@ -113,13 +102,8 @@ func TestUnknownDestination404(t *testing.T) {
 	b, _ := json.Marshal(map[string]string{
 		"call_id": "call-y", "from_user": "1000", "to_user": "9999999",
 	})
-	resp, err := http.Post(srv.URL+"/v1/call/start", "application/json", bytes.NewReader(b))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 404 {
-		t.Errorf("start code = %d, want 404", resp.StatusCode)
+	if code, _ := postInternal(t, srv.URL+"/v1/call/start", b); code != 404 {
+		t.Errorf("start code = %d, want 404", code)
 	}
 }
 
@@ -154,12 +138,8 @@ func TestBlocklistRejectsCall(t *testing.T) {
 		b, _ := json.Marshal(map[string]string{
 			"call_id": "bl-" + dest, "from_user": "1000", "to_user": dest,
 		})
-		resp, err := http.Post(srv.URL+"/v1/call/start", "application/json", bytes.NewReader(b))
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		return resp.StatusCode
+		code, _ := postInternal(t, srv.URL+"/v1/call/start", b)
+		return code
 	}
 
 	// Baseline: the number is routable.
@@ -171,6 +151,7 @@ func TestBlocklistRejectsCall(t *testing.T) {
 	b, _ := json.Marshal(map[string]any{"kind": "black", "scope": "dest", "pattern": "86139"})
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/blocklist", bytes.NewReader(b))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != 201 {
 		t.Fatalf("blocklist add: %v code=%d", err, resp.StatusCode)
@@ -214,6 +195,7 @@ func TestRiskEngineBlocksBurst(t *testing.T) {
 	})
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/risk", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("risk rules set: %v %d", err, resp.StatusCode)
@@ -224,7 +206,7 @@ func TestRiskEngineBlocksBurst(t *testing.T) {
 		b, _ := json.Marshal(map[string]string{
 			"call_id": id, "from_user": "1000", "to_user": "8613800138000",
 		})
-		r, err := http.Post(srv.URL+"/v1/call/start", "application/json", bytes.NewReader(b))
+		r, err := postInternalRaw(t, srv.URL+"/v1/call/start", b)
 		if err != nil {
 			t.Fatal(err)
 		}

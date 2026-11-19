@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -70,6 +71,7 @@ func TestEventBusCallAndAdminEvents(t *testing.T) {
 		if auth {
 			req.Header.Set("Authorization", "Bearer "+adminToken)
 		}
+		req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("POST %s: %v", path, err)
@@ -135,7 +137,9 @@ func TestEventBusTeardown(t *testing.T) {
 	b, _ := json.Marshal(map[string]string{
 		"call_id": "ev-td", "from_user": "1001", "to_user": "8613800138000",
 	})
-	resp, err := http.Post(srv.URL+"/v1/call/start", "application/json", bytes.NewReader(b))
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/call/start", bytes.NewReader(b))
+	req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("start: %v code=%d", err, resp.StatusCode)
 	}
@@ -149,8 +153,10 @@ func TestEventBusTeardown(t *testing.T) {
 
 	// BYE arrives: the torn-down call still settles into a CDR.
 	cur = base.Add(66 * time.Second)
-	resp2, err := http.Post(srv.URL+"/v1/call/end", "application/json",
+	req2, _ := http.NewRequest("POST", srv.URL+"/v1/call/end",
 		bytes.NewReader([]byte(`{"call_id":"ev-td","duration":66}`)))
+	req2.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
+	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil || resp2.StatusCode != 200 {
 		t.Fatalf("end: %v code=%d", err, resp2.StatusCode)
 	}
@@ -196,6 +202,7 @@ func TestEventBusCfgReloadBroadcast(t *testing.T) {
 		b, _ := json.Marshal(body)
 		req, _ := http.NewRequest("POST", srv.URL+path, bytes.NewReader(b))
 		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("POST %s: %v", path, err)
