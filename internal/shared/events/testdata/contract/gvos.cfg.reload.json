@@ -1,0 +1,16 @@
+{
+  "entity": "gateway",
+  "gateways": [
+    {
+      "cost_rate": "demo",
+      "enabled": true,
+      "id": "g1",
+      "name": "one",
+      "prefixes": [
+        "86"
+      ],
+      "priority": 0,
+      "sip_addr": "10.0.0.1:5060"
+    }
+  ]
+}

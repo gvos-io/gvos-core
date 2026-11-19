@@ -35,7 +35,7 @@ internal/
 2. BC 内自由;
 3. `customerdomain` → `billingdomain` ✅ 单向(风控日费用读账户树);
 4. `billingdomain` → `customerdomain` ❌(风控/网关配置经 shared/events 注入);
-5. `mediamain` → `billingdomain` ✅;6. 所有域 → `shared` ✅;`shared` → 域 ❌(共享内核不得知域);
+5. `mediamain` → `billingdomain` ✅;6. 所有域 → `shared` ✅;`shared` → 域 ❌(共享内核不得知域)——**修订(2026-11-20,deprules 测试首跑裁决)**:`shared/store` 是持久化适配器,投影域类型是功能性需求,登记为**认可例外**;`shared/events`、`shared/acl`、`shared/rds`、`shared/migrate` 仍不得知域。强制方式:`internal/deprules`(go list 直接 import 检查,进 `go test ./...` 主门禁);
 7. `cmd/*` 只装配不含业务。
 
 **演进为服务的触发器(满足其一方可拆进程)**:独立扩容需求 / 故障隔离需求 / 团队边界(多人各持一 BC)。拆分顺序:media(内存隔离收益最直观)→ 计费域(Redis 收口+容量到顶后)。拆分的实现形态 = BC 包移出 + 边界换 NATS 调用,域内代码不动——这正是 BC 隔离要买的东西。

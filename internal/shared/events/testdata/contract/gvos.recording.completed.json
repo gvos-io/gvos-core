@@ -1,0 +1,8 @@
+{
+  "backend": "local",
+  "call_id": "c-1",
+  "format": "mp3",
+  "object_key": "recordings/x/agent.mp3",
+  "size_bytes": 12345,
+  "track": "agent"
+}

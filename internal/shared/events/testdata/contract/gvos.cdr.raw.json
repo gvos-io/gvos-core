@@ -1,0 +1,9 @@
+{
+  "call_id": "c-1",
+  "duration": 66,
+  "event": "end",
+  "pdd_ms": 20,
+  "qos": "",
+  "release": "normal",
+  "sip_code": 200
+}

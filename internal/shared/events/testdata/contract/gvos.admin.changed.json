@@ -1,0 +1,11 @@
+{
+  "action": "create",
+  "after": {
+    "credit": "10"
+  },
+  "before": null,
+  "entity": "account",
+  "entity_id": "acc-1",
+  "operator": "gvos_admin_ab12",
+  "tenant_id": "t1"
+}

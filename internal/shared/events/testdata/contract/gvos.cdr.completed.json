@@ -1,0 +1,15 @@
+{
+  "AccountID": "acc-1",
+  "BilledSecs": 66,
+  "CallID": "c-1",
+  "Cost": "0.0550",
+  "Dest": "8613800138000",
+  "Duration": 66,
+  "FreeSecs": 0,
+  "PDDMs": 20,
+  "Price": "0.0500",
+  "RatePrefix": "8613",
+  "Recorded": false,
+  "Release": "normal",
+  "SIPCode": 200
+}
