@@ -303,3 +303,13 @@ func (s *Server) handleIPAllowDelete(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleIPAllowLegacy(w http.ResponseWriter, r *http.Request) {
 	s.handleIPAllow(w, r)
 }
+
+
+// handleBlocklistSources serves GET /v1/admin/blocklist-sources:
+// entry counts per source (api / static / feed tags).
+func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	writeJSON(w, 200, map[string]any{"sources": blocklist.SourceStats(s.blocklist)})
+}

@@ -497,6 +497,9 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("POST /v1/admin/reports/rollup", s.handleReports)
 	mux.HandleFunc("GET /v1/admin/reports", s.handleReportList)
 	mux.HandleFunc("GET /v1/admin/reports/views", s.handleReportViews)
+	// Dynamic blocklist feeds (source statistics).
+	mux.HandleFunc("GET /v1/admin/blocklist-sources", s.handleBlocklistSources)
+
 	// AXB privacy numbers (VOS module equivalent).
 	mux.HandleFunc("POST /v1/admin/axb/bindings", s.handleAXBBind)
 	mux.HandleFunc("GET /v1/admin/axb/bindings", s.handleAXBList)

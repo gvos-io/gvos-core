@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lixuanqun/gvos-core/internal/api"
+	"github.com/lixuanqun/gvos-core/internal/customerdomain/blocklist"
 	"github.com/lixuanqun/gvos-core/internal/shared/rds"
 	"github.com/lixuanqun/gvos-core/internal/shared/events"
 )
@@ -72,6 +73,18 @@ func main() {
 	api.BootstrapKey(s)
 	if rc != nil {
 		api.AttachRedis(s, rc)
+	}
+	// Dynamic blocklist feeds (VOS multi-source blacklist equivalent):
+	// GVOS_BLOCKLIST_SOURCES="tag@url,..." re-fetches on an interval
+	// and applies TTL'd entries over the static API-owned set.
+	if spec := os.Getenv("GVOS_BLOCKLIST_SOURCES"); spec != "" {
+		feeds := blocklist.ParseFeedSpec(spec)
+		if len(feeds) > 0 {
+			feedCtx, feedCancel := context.WithCancel(context.Background())
+			defer feedCancel()
+			blocklist.RunFeedLoop(feedCtx, s.blocklist, feeds, s.blocklist.Snapshot(), 5*time.Minute, 15*time.Minute)
+			log.Printf("blocklist feeds on: %d sources", len(feeds))
+		}
 	}
 	// Recording pipeline (R2): on when GVOS_RECORDING_OUTPUT is set;
 	// artifacts archive to GVOS_RECORDING_ARCHIVE (LocalFS backend;

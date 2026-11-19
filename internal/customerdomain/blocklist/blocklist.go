@@ -10,6 +10,7 @@
 package blocklist
 
 import (
+	"time"
 	"regexp"
 	"sync"
 )
@@ -21,7 +22,18 @@ type Entry struct {
 	Scope    string // src | dest
 	Pattern  string
 	IsRegex  bool
-	re       *regexp.Regexp
+	// Dynamic-source fields (multi-source blocklists): Source names
+	// the feed an entry came from ("api", "static", or a feed URL
+	// tag); ExpiresAt bounds its life (zero = permanent). Expired
+	// entries are skipped on read and pruned lazily.
+	Source    string
+	ExpiresAt time.Time
+	re        *regexp.Regexp
+}
+
+// expired reports whether the entry's TTL ran out.
+func (e Entry) expired(now time.Time) bool {
+	return !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt)
 }
 
 // List is the compiled screening set. Prefix rules are indexed by
@@ -31,10 +43,10 @@ type Entry struct {
 type List struct {
 	mu sync.RWMutex
 	// black[scope][len] -> set of prefixes of that exact length
-	black map[string]map[int]map[string]bool
+	black map[string]map[int]map[string]Entry
 	// white[scope][len] -> set of prefixes; presence of any white for
 	// a scope puts it in default-deny mode
-	white map[string]map[int]map[string]bool
+	white map[string]map[int]map[string]Entry
 	// whiteAny[scope] -> whites configured (default-deny marker)
 	whiteAny map[string]bool
 	regexes  []Entry
@@ -42,20 +54,23 @@ type List struct {
 
 func New() *List {
 	return &List{
-		black:    map[string]map[int]map[string]bool{},
-		white:    map[string]map[int]map[string]bool{},
+		black:    map[string]map[int]map[string]Entry{},
+		white:    map[string]map[int]map[string]Entry{},
 		whiteAny: map[string]bool{},
 	}
 }
 
 func (l *List) reset() {
-	l.black = map[string]map[int]map[string]bool{}
-	l.white = map[string]map[int]map[string]bool{}
+	l.black = map[string]map[int]map[string]Entry{}
+	l.white = map[string]map[int]map[string]Entry{}
 	l.whiteAny = map[string]bool{}
 	l.regexes = nil
 }
 
 func (l *List) addEntry(e Entry) {
+	if e.expired(time.Now()) {
+		return // TTL ran out before it even landed (dynamic feeds re-add)
+	}
 	if e.IsRegex {
 		if re, err := regexp.Compile(e.Pattern); err == nil {
 			e.re = re
@@ -70,15 +85,15 @@ func (l *List) addEntry(e Entry) {
 	}
 	byLen := bucket[e.Scope]
 	if byLen == nil {
-		byLen = map[int]map[string]bool{}
+		byLen = map[int]map[string]Entry{}
 		bucket[e.Scope] = byLen
 	}
 	set := byLen[len(e.Pattern)]
 	if set == nil {
-		set = map[string]bool{}
+		set = map[string]Entry{}
 		byLen[len(e.Pattern)] = set
 	}
-	set[e.Pattern] = true
+	set[e.Pattern] = e
 }
 
 // Reload atomically replaces the rule set.
@@ -109,8 +124,9 @@ func (l *List) Snapshot() []Entry {
 	var out []Entry
 	for scope, byLen := range l.black {
 		for _, set := range byLen {
-			for pattern := range set {
-				out = append(out, Entry{Kind: "black", Scope: scope, Pattern: pattern})
+			for pattern, e := range set {
+				e.Kind, e.Scope, e.Pattern = "black", scope, pattern
+				out = append(out, e)
 			}
 		}
 	}
@@ -138,7 +154,10 @@ func (l *List) Remove(tenant, kind, scope, pattern string) int {
 		return 0
 	}
 	set := byLen[len(pattern)]
-	if set == nil || !set[pattern] {
+	if set == nil {
+		return 0
+	}
+	if _, hit := set[pattern]; !hit {
 		return 0
 	}
 	delete(set, pattern)
@@ -170,13 +189,19 @@ func (l *List) CheckScreen(number, scope string) (bool, string) {
 	defer l.mu.RUnlock()
 
 	// Prefix probes: longest first so the most specific rule wins.
+	// TTL'd entries that expired in place are skipped (dynamic feeds
+	// re-apply a fresh set each refresh).
 	for n := len(number); n > 0; n-- {
 		prefix := number[:n]
-		if set := l.white[scope][n]; set != nil && set[prefix] {
-			return true, prefix
+		if set := l.white[scope][n]; set != nil {
+			if e, hit := set[prefix]; hit && !e.expired(time.Now()) {
+				return true, prefix
+			}
 		}
-		if set := l.black[scope][n]; set != nil && set[prefix] {
-			return false, prefix
+		if set := l.black[scope][n]; set != nil {
+			if e, hit := set[prefix]; hit && !e.expired(time.Now()) {
+				return false, prefix
+			}
 		}
 	}
 	// Regex rules (linear by design - they are the rare case).
