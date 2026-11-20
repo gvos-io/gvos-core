@@ -97,14 +97,14 @@ CDR 载荷带 rtpengine QoS 统计（`$rtpstat` 转义入 JSON）。
 
 | # | 项 | 现状 | 原因 | 验证方法 | 优先级 |
 |---|---|---|---|---|---|
-| U1 | **NATS 宕机演练**（janitor 503 兜底） | ✅ **HTTP 档演练通过（2026-11-20）**：NATS 停机期间呼叫照常建立（bill-lock 不依赖总线）、log-and-continue 错误可见、恢复后 JetStream durable 追平 CDR 积压（19217 行）；RPC 档演练因 publish 静默吞问题（同环境已知）未执行 | — | — | ~~P0~~（HTTP 档口径完成；RPC 档随专项） |
+| U1 | **NATS 宕机演练** | ✅ **双档演练全部通过（2026-11-20 晚,3 节点集群）**：RPC 档——单停 nats-1(全互联 mesh 保持,kamailio 经集群 INFO 发现跨节点重连,呼叫照常);全停 3 节点——INVITE 于 +5.0s 收 408(t_set_fr(5000) 接管释放;原 janitor 503 方案废除:t_continue 不能从 timer route 调用,tmx 报 cannot get transaction index,janitor 降级纯 GC)。HTTP 桔演练(19217 行追平)此前已过 | 静默吞根因已定案修复:jsPoster 对无点 edge 别名(不在 stream 域)等 PubAck 挂满 5s+单 pump 串行→全事件堵死;别名改走 corePoster | — | ~~P0~~(双档完成) |
 | U2 | 风控封禁 e2e | 单测覆盖（TestCheckReg 等）；API/广播/htable 代码全就绪 | 同 U1 环境干扰（deny 规则反复被外部改写） | 配 freq 规则→连续两通→查 banned htable→第三通边缘 403 且 gv-core 无 /v1/call/start 调用 | P1 |
-| U3 | 拆线 e2e（<1s 验收硬指标） | ✅ **链路 80% 验证（2026-11-20）**：interim 扣减→余额耗尽→teardown 广播→边缘接收→dlg.terminate_dlg 3 参形态修复（需 callid+from-tag+to-tag，tag 在 INVITE/200 停车 htable）→无 dialog 节点 no-op 正确 | **遗留**：Kamailio dlg 管理器在 t_suspend/恢复流程下未跟踪 dialog（dlg.list 空）——RPC 找不到 call-id；独立调试项 | 修复 dlg 跟踪后复测 <1s | **P0→P1**（链路完成，跟踪问题独立） |
+| U3 | 拆线 e2e（<1s 验收硬指标） | ✅ **链路 80% 验证（2026-11-20）**：interim 扣减→余额耗尽→teardown 广播→边缘接收→dlg.terminate_dlg 3 参形态修复→无 dialog 节点 no-op 正确。⚠️ dlg.list 空的另一个候选根因当日修复:tear 路由 tag 查找用 $ci(NAT 事件路由无 SIP 上下文恒空→持有节点也 no-op)→改 $var(cid);t_newtan 补齐后 dlg 跟踪条件改善,复测待验证窗口 | **遗留**:dlg 管理器在 t_suspend 下跟踪问题(若 $var(cid) 修复即为全部根因则已闭合) | 复测 <1s | P1 |
 | U4 | 注册镜像 e2e + reg_freq 告警 | 单测覆盖 | 未跑 SIPp register 场景 | `sipp -sf register.xml` → `/v1/admin/registrations` 出现条目→配 reg_freq 规则连发注册→risk.alert 触发 | P1 |
 | U5 | 黑名单边缘拦截 e2e | 代码就绪（外部会话曾用它测过 86139 前缀） | 未系统验证 | POST blocklist add → SIPp 拨该前缀 → 边缘 403（无计费调用） | P1 |
 | U6 | **QoS 统计解析入库** | cdr.raw 载荷已带 `$rtpstat` 字符串 | cdr 表 mos/jitter/packet_loss 列存在但 Go 侧未解析填充 | CDRR 消费者解析 rtpstat 文本→填三列→报表可见 | P2 |
 | U7 | **compose 端口回归** | 主机端口临时改为 28080/15060/15432/14222（本机端口冲突） | 开发机与其他项目冲突 | 干净环境恢复默认端口或改用 .env 覆盖 | P2 |
-| U8 | 测试矩阵补 RPC 面 | go test 全绿但 bus req/reply 的 Kamailio 形状无集成测试 | 时间 | 用 nats-server testcontainer 模拟应答方测 lockReply envelope 形状 | P2 |
+| U8 | 测试矩阵补 RPC 面 | ✅ 一半(2026-11-20):rpc_envelope_test 改走生产 lockReply 闭包(envelope 坐标回显/纯客户端/拒绝形态三测);Kamailio 形状的 testcontainer 矩阵仍缺 | 时间 | nats-server testcontainer 模拟应答方 | P2 |
 
 ## 5. 整体升级排期（建议）
 

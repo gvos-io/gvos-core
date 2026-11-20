@@ -64,17 +64,27 @@
 
 ### 4.1 呼叫建立(计费锁定)——两种档位,部署时选择
 
-**档位 A(NATS RPC,compose 主力已开)**:INVITE → `nats_publish(gvos.svc.call.start,载荷带 tindex/tlabel,reply=节点唯一主题)` → `t_suspend()`(worker 释放)→ gv-core 计费锁定 → 应答回 `gvos-edge-reply-<node>` → `t_continue` 恢复(网关重选在恢复路由内)→ 403/中继。兜底:1s janitor 扫挂起 >2s 的锁定 → 503 Billing Unavailable。✅ e2e 实测通过(挂起→RPC→恢复→选路→计费闭环)。
+**档位 A(NATS RPC)**:INVITE → `nats_publish(gvos.svc.call.start,载荷带 tindex/tlabel,reply=节点唯一主题)` → `t_suspend()`(worker 释放)→ gv-core 计费锁定 → 应答回 `gvos-edge-reply-<node>` → `t_continue` 恢复(网关重选在恢复路由内)→ 403/中继。✅ **2026-11-20 晚:compose 单机已启用并全链验收**——SIPp 10/10 通话成功,suspend→resume→dispatch 全链 **4ms**(3 节点集群上含 req/reply 往返);宕机兜底 `t_set_fr(5000,5000)`:总线全死时 INVITE 在 5s 收到 408 有界失败(实测精确 5.0s)。历史:compose 曾因"nats publish 静默丢"回退(commit 40065a4)——**根因当日定案并修复**(见下方修复清单),并非 Kamailio nats 模块缺陷。
 
-**档位 B(HTTP 同步,compose-ha/Helm 当前形态)**:Kamailio 直接 HTTP 调 `/v1/call/start`,阻塞 worker。✅ 可用,但 worker 占用与 HTTP 失败语义不同档。
+**档位 B(HTTP 同步)**:Kamailio 直接 HTTP 调 `/v1/call/start`,阻塞 worker。✅ 可用,compose-ha/Helm 当前形态。children=16 / nats publish workers=4 为阻塞档位的容量缓解(300 CPS × 50ms 核心延迟 ≈ 15 worker-秒/秒);gv-core 侧热路径见 4.5。
 
-| 部署形态 | WITH_NATS | WITH_NATS_CDR | WITH_NATS_RPC |
-|---|---|---|---|
-| docker-compose(单机) | 1 | 1 | **1** |
-| compose-ha(双机主力) | 1 | 1 | **未开(档位 B)** |
-| Helm(K8s) | 1 | 1 | **未开(档位 B)** |
+| 部署形态 | WITH_NATS | WITH_NATS_CDR | WITH_NATS_RPC | NATS 拓扑 |
+|---|---|---|---|---|
+| docker-compose(单机) | 1 | 1 | **1(档位 A)** | **3 节点全互联,R3** |
+| compose-ha(双机主力) | 1 | 1 | 未开(档位 B) | 单节点(集群化后升档) |
+| Helm(K8s) | 1 | 1 | 未开(档位 B) | 外部 |
 
-**依赖声明(v0.2 收口口径,取代 v0.1 与 deployment-plan 的矛盾表述)**:gv-core → NATS 是**分档依赖**——RPC 档(档位 A)下 NATS 是呼叫建立关键依赖(宕机 = 新呼叫 2s 内 503 有界失败,不影响进行中通话);HTTP 档(档位 B)下 NATS 宕机只丢遥测/CDR 总线与配置镜像(60s 内收敛退化)。 compose-ha 选 HTTP 档是当前有意的保守选择(避免 HA 交付形态叠加 NATS 单点),NATS 3 节点集群化后升档(deployment-plan §3.2 缺口 1)。
+**RPC 档修复清单(2026-11-20,启用前置)**:
+1. **静默丢根因(40065a4 的真身)**:gv-core 的 jsPoster 对无点边缘别名(`gvos-edge-*`,不在 stream subject 域)做 JetStream 发布 → 服务器不回 PubAck → 每条挂满 5s publishBudget,而单个 pump goroutine 串行排空队列 → 全部事件(含 CDR)堵在其后,"publisher 假死/静默吞"即此。修复:别名在 pump 内改走 corePoster(events.go `IsEdgeAlias`)——at-most-once 本就是别名的文档语义。
+2. **Kamailio 缺 t_newtran()**:鉴权后的 re-INVITE 无事务上下文(`$T(id_index)=0:0`,挂起簿记不可用、请求载荷拼出非法 JSON)。修复:INVITE 路径在 BILL_LOCK 前显式建事务。
+3. **t_continue 不能从 timer route 调用**(tmx 要求 SIP 消息上下文;实测 'cannot get transaction index'):janitor 从"503 释放者"降级为纯 GC(清 marker/ci/ans 家族),释放兜底移交 tm 自身 `t_set_fr(5000,5000)`。`t_set_fr_inv`(1 参)在此构建为 KEMI-only,`t_set_fr(fr, fr_inv)` 是脚本层形态。
+4. 语法/逻辑小修:Kamailio 脚本无 `continue`、`else` 须独立行、if 块不能只含注释;`pv_www_authenticate` flags "0"→"2"(否则 HA1 被当明文密码再哈希,缓存鉴权 401 死循环——旧"stale-entry trap"的真相)+ 失败清缓存;tear 路由 `$ci`→`$var(cid)`(NAT 事件路由无 SIP 上下文,tag 查找永远落空)。
+
+**NATS 3 节点集群(compose,2026-11-20 交付)**:**全互联路由**——星型(全部拨同一 seed)在 hub 死时脑裂(实测:nats-1 停后 nats-2/3 零路由、跨节点 RPC 无响应);全互联后 hub-down 演练通过、RPC 正常。JetStream 加 volume 持久化(此前容器重建即丢 durable 历史);stream R3(`GVOS_JS_REPLICAS`,对既有流 UpdateStream 收敛)。**Kamailio 边缘拨 DNS 轮询别名 `nats`**:模块 nats_url 只认单服务器字符串(逗号列表被当成一个主机名——实测;libnats natsOptions_SetServers 是唯一入口),集群 INFO 握手会把 mesh 作为 discovered servers 下发,单点重连即跨节点;别名重连时 DNS 再解析轮换成员(冷启动容错实测通过)。**运维注意:改 --routes 重启会孤儿化 R3 stream 状态 → 需全集群重启 + gv-core 重建流**(实测踩坑)。
+
+**依赖声明(v0.2 收口口径,取代 v0.1 与 deployment-plan 的矛盾表述)**:gv-core → NATS 是**分档依赖**——RPC 档(档位 A)下 NATS 是呼叫建立关键依赖(宕机 = 新呼叫 5s 内 408 有界失败,不影响进行中通话);HTTP 档(档位 B)下 NATS 宕机只丢遥测/CDR 总线与配置镜像(60s 内收敛退化)。compose-ha 选 HTTP 档是历史保守选择;**升档前置已全部满足**(3 节点集群 + RPC 档 drill 通过,compose 单机已运行该形态),compose-ha 下一批次开闸。
+
+**dev/生产形态(2026-11-20 晚修订)**:compose 单机 = 生产最小副本(3 节点集群 + 档位 A)——升档验证发生在 dev,交付物直接复用;此前"dev 停留在档位 B"的终态判断作废(升档验证需要真实形态承载)。
 
 ### 4.2 计费与拆线
 
@@ -89,6 +99,29 @@
 ### 4.4 风控与注册的边缘联动 ✅(代码就绪,e2e 待验证窗口)
 
 风控告警(载荷带 SIP username)→ banned htable(1h 过期)→ 边缘 403 零控制面往返;注册事件 → gv-core 镜像 + reg_freq 规则;黑名单前缀 → bl htable 边缘 403(正则/白名单语义留控制面,双层防御)。Kamailio 订阅点号 subject 的词法限制:走 gv-core 双发无点别名(gvos-edge-cfg/-risk/-tear)。
+
+### 4.5 呼叫建立热路径性能(2026-11-20 优化交付)
+
+**问题**:`Manager.mu` 全局互斥锁内执行 4 次 Redis 往返(AdmitConcurrent/AdmitCPS 两 pipeline + Reserve Lua + StartChain pipeline),单副本 call-start 吞吐天花板 ≈ 1/锁持有时长;且准入检查与注册是两次独立往返,多副本下并发上限可超卖 1 路(TOCTOU)。
+
+**交付**:
+1. **AdmitCall 原子准入**(admission_redis.go):单 Lua 脚本一次往返完成"链上并发检查(带 cap 的 ZCARD+1)→ CPS INCR 检查 → 全链 ZADD 注册"。拒绝时不注册、并发拒绝不烧 CPS 槽(与旧两步语义一致);Redis 故障 = 准入整体失败(旧 StartChain 失败仅 log-and-continue,共享账本下语义收紧)。
+2. **锁重构**(callstate.go Start/End):全部 Redis 往返移出 `m.mu`,临界区只剩 map 插入;Chain 只走一次,链错误(账户环)fail-closed;Reserve 失败回滚注册(EndChain,失败则 15min 僵尸 TTL 兜底);End 的账本清理同样出锁。
+3. **CDR 环形缓冲**(api/callapi.go + server.go):`s.cdrs` 加 `cdrsMu`(修数据竞争——16 个 NATS responder 与 HTTP 读并发)且封顶 10000 条(PG 是历史权威,内存环是近期视图;U1 演练曾无界攒 19217 条)。
+4. **Kamailio worker 扩容**(kamailio.cfg):children=4→16、nats publish workers=2→4(4.1 档位 B 注记)。
+
+**基准**(loadgen 直打 gv-core /v1/call/start+end,compose 单机,i7-13700H,3 轮中位):
+
+| 指标 | 基线 | 优化后 | 变化 |
+|---|---|---|---|
+| 微基准 Start+End(ledger 路径) | ~348µs/op(≈2,820 ops/s) | ~226µs/op(≈4,290 ops/s) | **-35% 延迟 / +52% 吞吐** |
+| 端到端 300 CPS 档 p99 | 165.9ms | 136.1ms | -18% |
+| 端到端 600 CPS 档 p99 | 350.6ms | 271.4ms | -23% |
+| 端到端吞吐 | 268/476 CPS | 267/478 CPS | 持平(瓶颈已移出 gv-core 锁) |
+
+注:端到端吞吐持平不是"无提升"——miniredis 微基准放大了锁收益的可见性,真实 Redis RTT 亚毫秒级;端到端 p99 的 18-23% 改善即锁队列消除的直接签名,剩余尾延迟来自 loadgen 自身 pacing 与 NATS JetStream 事件队列(1024 深,满载丢 CDR 事件,见 5 容量注记)。**单点锁天花板从 ~470 CPS 抬到 ~4,300 ops/s(微基准口径)**,多副本水平扩展(Redis 收口后)不再受此锁约束。
+
+**验证**:`go test ./...` 全绿;容器内 `go test -race ./internal/...` 全绿(顺带修复 TestSweeperLoop 既有假时钟 race——基线同样报,非本次引入);新增测试:AdmitCall 语义 5 断言组、32 协程超卖回归(原子性)、reserve 失败回滚、CDR 环容量/并发。
 
 ## 5. 容量与性能预算
 

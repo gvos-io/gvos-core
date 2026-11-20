@@ -28,16 +28,50 @@ services:
       timeout: 3s
       retries: 10
 
-  nats:
-    # Event bus (JetStream): CDR stream, teardown/risk alerts, admin
-    # change feed — see internal/events for the subject scheme.
-    # gv-core does NOT gate on NATS health: it tolerates the broker
-    # being down (RetryOnFailedConnect) and starts before NATS.
+  # --- NATS 3-node cluster (JetStream R3) ------------------------------
+  # The bill-lock RPC (WITH_NATS_RPC) makes the bus call-setup-critical,
+  # so the broker must survive a node loss. Three members route-linked
+  # FULL MESH: every node solicits routes to both peers — a star (all
+  # nodes dialing one seed) splits in two when the hub dies, a full
+  # mesh stays one island. The GVOS stream is created with replicas=3
+  # (GVOS_JS_REPLICAS on gv-core). Aliases: each node also answers to
+  # the service name "nats" (network alias below) so the edge dials
+  # "nats://" and DNS round-robins the pool.
+  nats-1:
     image: nats:2-alpine
-    command: ["-js", "-m", "8222"]
+    command: ["-js", "-m", "8222", "--cluster_name", "gvos", "-n", "nats-1",
+              "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222"]
+    volumes:
+      - nats1-data:/data
     ports:
       - "${GVOS_NATS_PORT:-14222}:4222"
-      - "18222:8222" # monitoring endpoint
+      - "18222:8222" # monitoring endpoint (node 1)
+    networks:
+      default:
+        aliases: [nats]
+
+  nats-2:
+    image: nats:2-alpine
+    command: ["-js", "-m", "8222", "--cluster_name", "gvos", "-n", "nats-2",
+              "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222"]
+    volumes:
+      - nats2-data:/data
+    networks:
+      default:
+        aliases: [nats]
+
+  nats-3:
+    image: nats:2-alpine
+    command: ["-js", "-m", "8222", "--cluster_name", "gvos", "-n", "nats-3",
+              "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222"]
+    volumes:
+      - nats3-data:/data
+    networks:
+      default:
+        aliases: [nats]
 
   redis:
     # Runtime-state authority (balances/admission/risk windows).
@@ -60,11 +94,21 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      nats:
+      nats-1:
+        condition: service_started
+      nats-2:
+        condition: service_started
+      nats-3:
         condition: service_started
     environment:
       GVOS_DB_DSN: "postgres://gvos:gvos_dev@postgres:5432/gvos?sslmode=disable"
-      GVOS_NATS_URL: "nats://nats:4222"
+      # Multi-server URL: the Go client fails over between cluster
+      # members transparently.
+      GVOS_NATS_URL: "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222"
+      # JetStream stream replicas (R3 on the cluster; 1 for a
+      # single-node broker). The publisher converges an existing
+      # stream to this value at boot (UpdateStream).
+      GVOS_JS_REPLICAS: "3"
       GVOS_REDIS_URL: "redis://redis:6379"
       GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
       GVOS_LISTEN: ":8080"
@@ -84,7 +128,11 @@ services:
     depends_on:
       gv-core:
         condition: service_started
-      nats:
+      nats-1:
+        condition: service_started
+      nats-2:
+        condition: service_started
+      nats-3:
         condition: service_started
     volumes:
       - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
@@ -95,6 +143,14 @@ services:
       # Per-node identity: builds the unique NATS queue group name
       # (broadcast semantics across the signaling pool).
       GVOS_NODE_HOST: kamailio-1
+      # Broker dial for the edge: the round-robin DNS alias "nats"
+      # (compose network alias on ALL cluster members). The module
+      # passes one server string to libnats (no comma lists — a comma
+      # list is treated as one unresolvable host); the alias re-resolves
+      # on every reconnect attempt, so a dead member cycles out, and
+      # the cluster-INFO handshake adds the full mesh as discovered
+      # servers once connected.
+      GVOS_NATS_URL: "nats://nats:4222,nats://nats-2:4222,nats://nats-3:4222"
       # NATS publish routes on: registration events + CDR over bus.
       WITH_NATS: "1"
       WITH_NATS_CDR: "1"
@@ -157,3 +213,6 @@ volumes:
   pgdata:
   recout:
   recdata:
+  nats1-data:
+  nats2-data:
+  nats3-data:

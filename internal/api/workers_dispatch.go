@@ -446,7 +446,14 @@ func StartCallSvc(s *Server) {
 		events.SubjectCallStart: func(req []byte) []byte {
 			var r callStartReq
 			if err := json.Unmarshal(req, &r); err != nil || r.CallID == "" || r.To == "" {
-				return callReply(400, map[string]string{"error": "call_id and to_user required"})
+				// Malformed/short request: the reply still goes through
+				// lockReply (suspend coordinates echoed from the request
+				// when parseable) — a bare callReply envelope has no
+				// tindex/tlabel, the edge reply route classifies it as a
+				// plain ack, and the suspended INVITE then hangs until
+				// the janitor. A 400 the edge can act on (403 to the
+				// caller) beats a silent drop.
+				return lockReply(400, map[string]string{"error": "call_id and to_user required"}, req)
 			}
 			code, body := s.callStart(r)
 			return lockReply(code, body, req)

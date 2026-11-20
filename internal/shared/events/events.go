@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +70,10 @@ const (
 	SubjectEdgeCfgReload = "gvos-edge-cfg"   // alias of gvos.cfg.reload
 	SubjectEdgeRiskAlert = "gvos-edge-risk"  // alias of gvos.risk.alert
 	SubjectEdgeTeardown  = "gvos-edge-tear"  // alias of gvos.call.teardown
+
+	// edgePrefix is the IsEdgeAlias discriminator for the pump's
+	// poster routing (see IsEdgeAlias).
+	edgePrefix = "gvos-edge-"
 )
 
 // Service request/reply subjects (outside the stream domains — see
@@ -132,9 +138,13 @@ type Publisher struct {
 	done   chan struct{}
 
 	poster Poster
-	nc     *nats.Conn            // nil for stub transports
-	js     nats.JetStreamContext // nil in core mode / stubs
-	mode   string                // "jetstream" | "core" (surface in /v1/stats)
+	// core posts edge aliases (unmapped subjects) without JetStream
+	// semantics; nil for stub transports, where aliases are dropped
+	// with the rest.
+	core Poster
+	nc   *nats.Conn            // nil for stub transports
+	js   nats.JetStreamContext // nil in core mode / stubs
+	mode string                // "jetstream" | "core" (surface in /v1/stats)
 }
 
 // New connects to NATS and returns a publisher. Connection is
@@ -177,6 +187,15 @@ func New(url string) (*Publisher, error) {
 		js:     js,
 		mode:   mode,
 	}
+	// Edge aliases (dot-free transport copies, see IsEdgeAlias) are
+	// OUTSIDE the stream's subject domains by design. A JetStream
+	// publish to an unmapped subject gets no PubAck and burns the full
+	// publishBudget (5s) per message; with the single serialized pump
+	// goroutine those timeouts stall every queued event behind them —
+	// the "publisher looks zombied / silently swallows" signature seen
+	// in the field. Route them through the plain core connection
+	// instead: at-most-once, which is the documented alias semantics.
+	p.core = &corePoster{nc: nc}
 	go p.pump()
 	return p, nil
 }
@@ -196,19 +215,33 @@ func NewWithPoster(p Poster) *Publisher {
 }
 
 // ensureStream creates the GVOS stream idempotently and converges its
-// subject list: builds before the svc-exclusion created gvos.> (which
-// swallowed req/reply subjects), so an existing stream whose subjects
-// differ is updated in place. Already-exists counts as success so
-// restarts and replicas converge.
+// subject list and replica count: builds before the svc-exclusion
+// created gvos.> (which swallowed req/reply subjects), and builds
+// before GVOS_JS_REPLICAS existed (single-node R1), so an existing
+// stream whose config differs is updated in place. Already-exists
+// counts as success so restarts and replicas converge.
+//
+// Replica convergence (R1 -> R3) requires every cluster member to be
+// reachable at boot: the server rejects a replica raise it cannot
+// place. On a single-node broker leave GVOS_JS_REPLICAS unset (1).
 func ensureStream(js nats.JetStreamContext) error {
+	replicas := 1
+	if v := os.Getenv("GVOS_JS_REPLICAS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 5 {
+			replicas = n
+		} else {
+			log.Printf("NATS GVOS_JS_REPLICAS=%q invalid (1-5), using 1", v)
+		}
+	}
 	info, err := js.StreamInfo(streamName)
 	if err == nil {
-		if !sameSubjects(info.Config.Subjects, streamSubjects) {
+		if !sameSubjects(info.Config.Subjects, streamSubjects) || info.Config.Replicas != replicas {
 			cfg := info.Config
 			cfg.Subjects = streamSubjects
+			cfg.Replicas = replicas
 			_, err = js.UpdateStream(&cfg)
 			if err == nil {
-				log.Printf("NATS stream %s subjects converged to %v", streamName, streamSubjects)
+				log.Printf("NATS stream %s converged (subjects, replicas=%d)", streamName, replicas)
 			}
 			return err
 		}
@@ -220,6 +253,7 @@ func ensureStream(js nats.JetStreamContext) error {
 		Name:     streamName,
 		Subjects: streamSubjects,
 		Storage:  nats.FileStorage,
+		Replicas: replicas,
 	})
 	// Already-exists counts as success: restarts and replicas converge.
 	if err != nil && (errors.Is(err, nats.ErrStreamNameAlreadyInUse) ||
@@ -246,6 +280,15 @@ func sameSubjects(a, b []string) bool {
 	return true
 }
 
+// IsEdgeAlias reports whether subject is a dot-free edge transport
+// alias (the Kamailio nats-module lexer cannot express dots). Alias
+// publishes must NOT go through the JetStream poster: they are outside
+// the stream domains, and a JS publish to an unmapped subject waits
+// the full publishBudget for a PubAck that never comes.
+func IsEdgeAlias(subject string) bool {
+	return strings.HasPrefix(subject, edgePrefix)
+}
+
 // Publish enqueues payload as JSON on subject. Non-blocking: a full
 // queue drops the event loudly (media-pump semantics) instead of
 // stalling the billing answer.
@@ -269,11 +312,18 @@ func (p *Publisher) Publish(subject string, payload any) {
 
 // pump drains the queue onto the transport. One goroutine per
 // publisher: ordering per subject is preserved, slow JetStream acks
-// are absorbed by the queue, not by callers.
+// are absorbed by the queue, not by callers. Edge aliases bypass the
+// JetStream poster (see IsEdgeAlias) — in jetstream mode they go on
+// the plain connection, in core mode they use the same poster as
+// everything else.
 func (p *Publisher) pump() {
 	defer close(p.done)
 	for q := range p.ch {
-		if err := p.poster.Post(q.subject, q.data); err != nil {
+		poster := p.poster
+		if IsEdgeAlias(q.subject) && p.core != nil {
+			poster = p.core
+		}
+		if err := poster.Post(q.subject, q.data); err != nil {
 			log.Printf("NATS publish failed (%s): %v", q.subject, err)
 		}
 	}
