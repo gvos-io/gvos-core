@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
@@ -452,7 +453,27 @@ func errCodeFor(code int) string {
 }
 
 func httpError(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]errorEnvelope{"error": {Code: errCodeFor(code), Message: msg}})
+	writeJSON(w, code, map[string]errorEnvelope{"error": {Code: errCodeFor(code), Message: scrubInternal(msg)}})
+}
+
+// scrubInternal strips backend error internals (SQLSTATE, constraint
+// names, file paths) from operator-facing messages — pentest finding:
+// raw DB errors leaked dialect and schema details. The full error
+// still goes to the server log.
+func scrubInternal(msg string) string {
+	if i := strings.Index(msg, "SQLSTATE"); i > 0 {
+		// keep the action prefix (e.g. "create account:"), drop the rest
+		if j := strings.LastIndex(msg[:i], ":"); j > 0 {
+			return msg[:j] + ": database constraint violated"
+		}
+		return "database error"
+	}
+	if strings.Contains(msg, "duplicate key") {
+		if j := strings.Index(msg, ":"); j > 0 {
+			return msg[:j] + ": duplicate entry"
+		}
+	}
+	return msg
 }
 
 // httpErrorC raises an explicit error code that differs from the

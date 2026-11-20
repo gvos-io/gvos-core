@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"strings"
 	"log"
 	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
 	"encoding/json"
@@ -58,6 +59,10 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		id, err = s.pg.CreateAccountWithHA1(r.Context(), demoTenant, req.ParentID,
 			req.Name, req.Username, ha1, req.RateGroup, req.Postpaid, creditAmt)
 		if err != nil {
+			if strings.Contains(err.Error(), "duplicate key") {
+				httpErrorC(w, 409, "DUPLICATE", "username already exists")
+				return
+			}
 			httpError(w, 500, err.Error())
 			return
 		}
