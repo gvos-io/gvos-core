@@ -15,8 +15,13 @@ printf "%-8s %-7s %-8s %-7s %-8s\n" "rate" "calls" "success" "failed" "setup(ms)
 for R in $STEPS; do
   N=$(( R * 10 ))   # 10 seconds of traffic per step
   echo "--- rate $R cps, $N calls ---" >&2
+  # Unique -cid_str per step: SIPp call-ids are "%u-%p@%s" by default; reusing
+  # the default across steps collides with the gateway dead-call table
+  # (gw saw the call-id complete last step, drops the new INVITE, the
+  # edge locks the gw 5m -> "no routable gateway" for everything after).
   RAW=$(MSYS_NO_PATHCONV=1 docker run --rm --network gvos_default \
     -v "${SCENDIR}:/scen:ro" ctaloi/sipp:latest \
+    -cid_str "%u-r${R}-$(date +%s)@%s" \
     -sf /scen/load.xml -inf /scen/dest.csv -m $N -r $R -timeout 30s $DEST 2>&1)
   SUCC=$(echo "$RAW" | grep "Successful call" | tail -1 | awk '{print $NF}')
   FAIL=$(echo "$RAW" | grep "Failed call" | tail -1 | awk '{print $NF}')
