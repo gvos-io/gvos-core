@@ -1,7 +1,7 @@
 package account
 
 import (
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"strings"
 	"testing"
 )

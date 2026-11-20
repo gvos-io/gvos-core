@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fastvoip/gvos-core/internal/mediamain/dashscope"
-	"github.com/fastvoip/gvos-core/internal/mediamain/mediastream"
+	"github.com/gvos-io/gvos-core/internal/mediamain/dashscope"
+	"github.com/gvos-io/gvos-core/internal/mediamain/mediastream"
 )
 
 func main() {

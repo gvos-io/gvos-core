@@ -1,13 +1,13 @@
 package callcore
 
 import (
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"errors"
 	"testing"
 	"time"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/rate"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/rate"
 )
 
 func limitSetup(t *testing.T) (*Manager, *account.Store) {

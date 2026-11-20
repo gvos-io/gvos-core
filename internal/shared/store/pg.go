@@ -4,7 +4,7 @@
 package store
 
 import (
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,11 +13,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/blocklist"
-	"github.com/fastvoip/gvos-core/internal/callcore"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/gateway"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/rate"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
+	"github.com/gvos-io/gvos-core/internal/callcore"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/gateway"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/rate"
 )
 
 // PG wraps the connection pool.

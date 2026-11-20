@@ -8,18 +8,23 @@ package callcore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/fastvoip/gvos-core/internal/shared/rds"
+	"github.com/gvos-io/gvos-core/internal/shared/rds"
 )
 
 const (
 	// ZombiTTL bounds how long a crashed replica's calls linger in the
 	// ledger before any replica's sweeper settles them.
 	ZombieTTL = 15 * time.Minute
+	// ZombieTTLSeconds is the Lua-side spelling of ZombiTTL (the script
+	// body is concatenated, not parameterised — EXPIRE takes the number
+	// verbatim).
+	ZombieTTLSeconds = int(ZombieTTL / time.Second)
 )
 
 // AdmissionR is the Redis admission face.
@@ -82,6 +87,95 @@ func (a *AdmissionR) LiveConcurrent(ctx context.Context, accountID string) (int,
 	defer cancel()
 	n, err := a.rdb.Raw().ZCard(ctx, callsKey(accountID)).Result()
 	return int(n), err
+}
+
+// AdmitCall is the atomic single-round-trip admission+registration.
+// One Lua script over the whole chain key set: the concurrent check
+// (ZCARD+1 <= cap on every capped key), the CPS INCR check, then the
+// ZADD registration onto every chain key — the check and the write
+// execute back-to-back inside Redis, closing the TOCTOU oversell that
+// the two-step AdmitConcurrent→StartChain pair leaves between replicas.
+//
+// KEYS   = chain calls keys, in chain order (own first)
+// ARGV   = [callID, startUnix, unused pad, cpsKey, cpsCap,
+//          then per-KEYS: cap (0 = uncapped)]
+// Return = 0 admitted; a KEYS index i (>0) when KEYS[i] is over its
+// cap; -1 when the CPS cap rejected.
+var admitScript = rds.NewScript(`
+local cid = ARGV[1]
+local score = tonumber(ARGV[2])
+local cps = ARGV[4]
+local cpsCap = tonumber(ARGV[5])
+for i = 1, #KEYS do
+  local cap = tonumber(ARGV[5 + i])
+  if cap > 0 then
+    local live = redis.call('ZCARD', KEYS[i])
+    if live + 1 > cap then
+      return i
+    end
+  end
+end
+if cpsCap > 0 then
+  local n = redis.call('INCR', cps)
+  if n == 1 then redis.call('EXPIRE', cps, 1) end
+  if n > cpsCap then
+    return -1
+  end
+end
+for i = 1, #KEYS do
+  redis.call('ZADD', KEYS[i], score, cid)
+  redis.call('EXPIRE', KEYS[i], ` + fmt.Sprint(ZombieTTLSeconds) + `)
+end
+return 0
+`)
+
+// AdmitCall runs admitScript. chain = account IDs (own first, then
+// ancestors), caps maps account ID -> concurrent cap (0/absent =
+// uncapped). Errors: *ErrLimit carries which chain key or the CPS
+// window rejected. Redis failure is admission failure — the merged
+// path is money-adjacent, so "could not check" must refuse the call
+// (the old two-step path logged and continued on StartChain errors,
+// which under-counted a shared ledger).
+func (a *AdmissionR) AdmitCall(ctx context.Context, chain []string, caps map[string]int, callID string, start time.Time, cpsCap int) error {
+	if len(chain) == 0 {
+		return errors.New("admit: empty chain")
+	}
+	keys := make([]string, 0, len(chain))
+	args := make([]any, 0, len(chain)+6)
+	args = append(args, callID, start.Unix())
+	// Pad ARGV[3] (unused by the script's current form, kept so the
+	// KEYS/ARGV contract above stays stable).
+	args = append(args, 0)
+	args = append(args, cpsKey(chain[0], start.Unix()), cpsCap)
+	for _, id := range chain {
+		keys = append(keys, callsKey(id))
+		args = append(args, caps[id])
+	}
+	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)
+	defer cancel()
+	res, err := admitScript.Run(ctx, a.rdb, keys, args...)
+	if err != nil {
+		return fmt.Errorf("admission authority unavailable: %w", err)
+	}
+	v, _ := res.(int64)
+	switch {
+	case v == 0:
+		return nil
+	case v == -1:
+		return &ErrLimit{AccountID: chain[0], Kind: "cps",
+			Detail: "starts this second (ledger) over cap"}
+	default:
+		i := int(v) - 1 // KEYS index -> chain index
+		if i < 0 || i >= len(chain) {
+			return fmt.Errorf("admit: bad script result %d", v)
+		}
+		if i == 0 {
+			return &ErrLimit{AccountID: chain[i], Kind: "concurrent",
+				Detail: "live (ledger) over cap"}
+		}
+		return &ErrLimit{AccountID: chain[i], Kind: "concurrent",
+			Detail: "sub-tree live (ledger) over cap"}
+	}
 }
 
 // AdmitConcurrent checks "own live < cap" for the exact account and

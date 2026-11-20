@@ -98,6 +98,11 @@ services:
       # NATS publish routes on: registration events + CDR over bus.
       WITH_NATS: "1"
       WITH_NATS_CDR: "1"
+      # Async bill-lock RPC (tier A): publish gvos.svc.call.start +
+      # t_suspend instead of the blocking http_connect. NOTE: "0" is
+      # still defined for trydefenv — disabling means removing this
+      # line, never setting it to zero.
+      WITH_NATS_RPC: "1"
     ports:
       - "${GVOS_SIP_PORT:-15060}:5060/udp"
       - "${GVOS_SIP_PORT:-15060}:5060/tcp"

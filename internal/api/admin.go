@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/fastvoip/gvos-core/internal/shared/acl"
-	"github.com/fastvoip/gvos-core/internal/shared/events"
+	"github.com/gvos-io/gvos-core/internal/shared/acl"
+	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
 
 // identity is the authenticated caller bound into the request

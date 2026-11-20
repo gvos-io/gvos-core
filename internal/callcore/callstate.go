@@ -6,16 +6,17 @@ package callcore
 
 import (
 	"context"
-	"strings"
-	"strconv"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
 	"fmt"
+	"log"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/billing"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/rate"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/billing"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/rate"
 )
 
 // TeardownFunc is invoked when a live call must be torn down (balance
@@ -217,6 +218,15 @@ func (m *Manager) sweep(timeout time.Duration) {
 // Start reserves the estimate and registers the call, after checking
 // the account's concurrent and CPS limits. Errors: account.ErrLimit
 // (HTTP 429), insufficient balance (403), no account (404).
+//
+// Locking: every Redis round trip (the atomic admission script, the
+// balance reserve) runs OUTSIDE m.mu — the critical section is only
+// the map insert. With the ledger wired the admission script does
+// check+register in one atomic round trip; if the reserve then fails,
+// the registration is rolled back by EndChain (a failed rollback
+// falls to the 15m zombie TTL — logged, never blocking the answer).
+// Chain errors (account cycles) fail closed: a chain that cannot be
+// walked cannot be billed.
 func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedSecs int, recorded bool) error {
 	acc, err := m.store.Get(accountID)
 	if err != nil {
@@ -225,50 +235,65 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 
 	est := m.charger.EstimatedCost(e, expectedSecs)
 
-	m.mu.Lock()
-
-	// Admission: with the Redis ledger wired (multi-replica), caps
-	// count the shared truth; locally (single replica) the map walk
-	// below. Ledger errors fail closed — admission is money-adjacent.
 	if m.adm != nil {
-		chain, _ := m.store.Chain(accountID)
+		// Shared ledger path (multi-replica). Walk the chain once: the
+		// caps and the registration keys both derive from it.
+		chain, err := m.store.Chain(accountID)
+		if err != nil {
+			return err
+		}
 		caps := map[string]int{}
-		ids := []string{accountID} // own key first; chain adds ancestors
+		keys := []string{accountID} // own key first; chain adds ancestors
 		for _, a := range append(chain, acc) {
 			if a.Concurrent > 0 {
 				caps[a.ID] = a.Concurrent
 			}
 			if a.ID != accountID {
-				ids = append(ids, a.ID) // dedup: Chain includes the account itself
+				keys = append(keys, a.ID) // dedup: Chain includes the account itself
 			}
 		}
-		if err := m.adm.AdmitConcurrent(context.Background(), ids, accountID, caps); err != nil {
-			m.mu.Unlock()
+		start := m.now()
+		if err := m.adm.AdmitCall(context.Background(), keys, caps, callID, start, acc.CPS); err != nil {
 			return err
 		}
-		if err := m.adm.AdmitCPS(context.Background(), accountID, m.now().Unix(), acc.CPS); err != nil {
-			m.mu.Unlock()
+		if err := m.reserve(context.Background(), accountID, est); err != nil {
+			// Roll the ledger registration back out; a failed rollback
+			// self-heals via the zombie TTL (logged, never blocks).
+			if err2 := m.adm.EndChain(context.Background(), callID, keys); err2 != nil {
+				log.Printf("admission rollback failed for %s (zombie TTL will reclaim): %v", callID, err2)
+			}
 			return err
 		}
-	} else {
-		// Concurrent limit: live calls of this account (chain ancestors
-		// each carry their own limit — the whole chain must admit it).
-		if err := m.admitConcurrent(accountID, acc); err != nil {
-			m.mu.Unlock()
-			return err
+		c := &Call{
+			ID:          callID,
+			AccountID:   accountID,
+			Destination: dest,
+			Rate:        e,
+			Start:       start,
+			Lock:        est,
+			Recorded:    recorded,
 		}
-		// CPS limit: start events in the current second for this account.
-		if err := m.admitCPS(accountID, acc); err != nil {
-			m.mu.Unlock()
-			return err
-		}
+		m.mu.Lock()
+		m.calls[callID] = c
+		m.mu.Unlock()
+		return nil
 	}
 
-	if err := m.reserve(context.Background(), accountID, est); err != nil {
-		m.mu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Local admission (single replica): the map walks are microsecond
+	// scale, so they stay under the lock that already guards the map.
+	if err := m.admitConcurrent(accountID, acc); err != nil {
 		return err
 	}
-	c := &Call{
+	if err := m.admitCPS(accountID, acc); err != nil {
+		return err
+	}
+	if err := m.reserve(context.Background(), accountID, est); err != nil {
+		return err
+	}
+	m.calls[callID] = &Call{
 		ID:          callID,
 		AccountID:   accountID,
 		Destination: dest,
@@ -277,23 +302,6 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 		Lock:        est,
 		Recorded:    recorded,
 	}
-	m.calls[callID] = c
-	if m.adm != nil {
-		chain, _ := m.store.Chain(accountID)
-		keys := []string{accountID}
-		for _, a := range chain {
-			if a.ID != accountID {
-				keys = append(keys, a.ID)
-			}
-		}
-		if err := m.adm.StartChain(context.Background(), callID, keys, c.Start); err != nil {
-			// Ledger registration failed after local admit: log and
-			// continue — the local map still owns runtime detail, and
-			// the sweeper's zombie scan tolerates stragglers.
-			_ = err
-		}
-	}
-	m.mu.Unlock()
 	return nil
 }
 
@@ -470,7 +478,9 @@ func (m *Manager) markRelease(callID, reason string) {
 }
 
 // End finalizes the call: charges the real duration, releases the
-// remainder of the pre-answer lock, and returns the CDR record.
+// remainder of the pre-answer lock, and returns the CDR record. The
+// ledger removal (a Redis round trip) runs outside m.mu: a BYE storm
+// must not serialize on the map lock.
 func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 	m.mu.Lock()
 	c, ok := m.calls[callID]
@@ -479,22 +489,24 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 		return nil, fmt.Errorf("unknown call %q", callID)
 	}
 	delete(m.calls, callID)
-	if m.adm != nil {
-		chain, _ := m.store.Chain(c.AccountID)
-		keys := []string{c.AccountID}
-		for _, a := range chain {
-			if a.ID != c.AccountID {
-				keys = append(keys, a.ID)
-			}
-		}
-		_ = m.adm.EndChain(context.Background(), callID, keys)
-	}
+	accountID := c.AccountID
 	entry := c.Rate
 	lock := c.Lock
 	accrued := c.Accrued
 	start := c.Start
 	recorded := c.Recorded
 	m.mu.Unlock()
+
+	if m.adm != nil {
+		chain, _ := m.store.Chain(accountID)
+		keys := []string{accountID}
+		for _, a := range chain {
+			if a.ID != accountID {
+				keys = append(keys, a.ID)
+			}
+		}
+		_ = m.adm.EndChain(context.Background(), callID, keys)
+	}
 
 	billedSecs, cost, err := m.charger.ChargeFor(entry, seconds)
 	release := "normal"

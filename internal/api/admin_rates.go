@@ -2,12 +2,12 @@
 package api
 
 import (
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"encoding/json"
 	"net/http"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/rate"
-	"github.com/fastvoip/gvos-core/internal/shared/events"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/rate"
+	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
 
 func (s *Server) handleRateUpsert(w http.ResponseWriter, r *http.Request) {

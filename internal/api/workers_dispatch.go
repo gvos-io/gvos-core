@@ -19,16 +19,16 @@ import (
 	"os"
 	"time"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
-	"github.com/fastvoip/gvos-core/internal/shared/rds"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/pkgplan"
-	"github.com/fastvoip/gvos-core/internal/callcore"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/blocklist"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/gateway"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/ipallow"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/riskctrl"
-	"github.com/fastvoip/gvos-core/internal/shared/events"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/shared/rds"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/pkgplan"
+	"github.com/gvos-io/gvos-core/internal/callcore"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/gateway"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/ipallow"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/riskctrl"
+	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
 
 // startAsyncWorkers launches the durable write/exec workers. Each
@@ -400,38 +400,48 @@ func StartCfgRebroadcaster(s *Server) {
 	}()
 }
 
-// startCallSvc exposes the call lifecycle over NATS request/reply —
-// the same core logic as the HTTP face (callStart/callAnswer/callEnd),
-// reply envelope {code, body} carries the HTTP status so bus clients
-// see identical semantics. The start subject serves two audiences:
-// bus-native clients and the Kamailio async bill-lock (WITH_NATS_RPC:
-// the request carries tindex/tlabel; the reply envelope echoes them
-// plus the call_id so the signaling node can t_continue the suspended
-// INVITE from its node-unique reply subject).
+// lockReply wraps the start answer with the suspend coordinates the
+// Kamailio edge needs (tindex/tlabel are opaque pass-throughs; call_id
+// rides along for log correlation on the resume side). The reply
+// envelope {code, body} carries the HTTP status so bus clients see
+// identical semantics. The shape is contract-tested in
+// rpc_envelope_test.go (U8).
+func lockReply(code int, body any, req []byte) []byte {
+	var suspend struct {
+		CallID string `json:"call_id"`
+		TIndex int64  `json:"tindex"`
+		TLabel int64  `json:"tlabel"`
+	}
+	_ = json.Unmarshal(req, &suspend)
+	if suspend.TIndex == 0 && suspend.TLabel == 0 {
+		return callReply(code, body) // plain bus client: no suspend to resume
+	}
+	b, _ := json.Marshal(map[string]any{
+		"code": code, "body": body,
+		"call_id": suspend.CallID, "tindex": suspend.TIndex, "tlabel": suspend.TLabel,
+	})
+	// Bill-lock observability point: every RPC reply (including
+	// rejects) is one line. Gap between "suspended" (edge log) and
+	// this line = bus transit + admission time; a missing line with
+	// the edge showing suspended = the silent-drop signature.
+	log.Printf("SVC-CALL-START call=%s tx=%d:%d code=%d", suspend.CallID, suspend.TIndex, suspend.TLabel, code)
+	return b
+}
+
+// callReply builds the plain {code, body} envelope.
+func callReply(code int, body any) []byte {
+	b, _ := json.Marshal(map[string]any{"code": code, "body": body})
+	return b
+}
+
+// StartCallSvc serves the call-lifecycle endpoints over NATS
+// request/reply — the same core logic as the HTTP face
+// (callStart/callAnswer/callEnd) for bus-native clients and the
+// Kamailio async bill-lock (WITH_NATS_RPC: the request carries
+// tindex/tlabel; the reply envelope echoes them plus the call_id so
+// the signaling node can t_continue the suspended INVITE from its
+// node-unique reply subject).
 func StartCallSvc(s *Server) {
-	callReply := func(code int, body any) []byte {
-		b, _ := json.Marshal(map[string]any{"code": code, "body": body})
-		return b
-	}
-	// lockReply wraps the start answer with the suspend coordinates
-	// the Kamailio edge needs (tindex/tlabel are opaque pass-throughs;
-	// call_id rides along for log correlation on the resume side).
-	lockReply := func(code int, body any, req []byte) []byte {
-		var suspend struct {
-			CallID string `json:"call_id"`
-			TIndex int64  `json:"tindex"`
-			TLabel int64  `json:"tlabel"`
-		}
-		_ = json.Unmarshal(req, &suspend)
-		if suspend.TIndex == 0 && suspend.TLabel == 0 {
-			return callReply(code, body) // plain bus client: no suspend to resume
-		}
-		b, _ := json.Marshal(map[string]any{
-			"code": code, "body": body,
-			"call_id": suspend.CallID, "tindex": suspend.TIndex, "tlabel": suspend.TLabel,
-		})
-		return b
-	}
 	for subject, serve := range map[string]func(req []byte) []byte{
 		events.SubjectCallStart: func(req []byte) []byte {
 			var r callStartReq

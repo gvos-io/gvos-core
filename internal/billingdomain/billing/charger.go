@@ -3,8 +3,8 @@ package billing
 import (
 	"fmt"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/rate"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/rate"
 )
 
 // Charger applies a rate.Entry to call durations. It implements the

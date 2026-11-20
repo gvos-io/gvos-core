@@ -5,7 +5,7 @@ G-VOS 处理计费与话务数据，安全问题的处理优先级最高。
 ## 报告漏洞
 
 **不要通过公开 Issue 报告安全漏洞。** 请使用 GitHub 的
-[Private vulnerability reporting](https://github.com/fastvoip/gvos-core/security/advisories/new)
+[Private vulnerability reporting](https://github.com/gvos-io/gvos-core/security/advisories/new)
 私下报告，包含：受影响版本、复现步骤、影响评估。我们承诺在 72 小时内响应。
 
 ## 范围

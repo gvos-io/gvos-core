@@ -11,7 +11,7 @@ package riskctrl
 
 import (
 	"context"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"fmt"
 	"strings"
 	"sync"

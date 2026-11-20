@@ -1,7 +1,7 @@
 package api
 
 import (
-	"github.com/fastvoip/gvos-core/internal/recpipe"
+	"github.com/gvos-io/gvos-core/internal/recpipe"
 	"context"
 	"os"
 	"path/filepath"

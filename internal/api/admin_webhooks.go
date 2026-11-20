@@ -12,8 +12,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/fastvoip/gvos-core/internal/shared/store"
-	"github.com/fastvoip/gvos-core/internal/webhook"
+	"github.com/gvos-io/gvos-core/internal/shared/store"
+	"github.com/gvos-io/gvos-core/internal/webhook"
 )
 
 // PG webhook subscription storage face (store.PG implements; memory

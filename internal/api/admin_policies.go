@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/fastvoip/gvos-core/internal/customerdomain/blocklist"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/ipallow"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/riskctrl"
-	"github.com/fastvoip/gvos-core/internal/shared/events"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/ipallow"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/riskctrl"
+	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
 
 func (s *Server) emitListOp(op string, e blocklist.Entry) {

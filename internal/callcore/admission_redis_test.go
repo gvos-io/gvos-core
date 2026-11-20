@@ -2,15 +2,18 @@ package callcore
 
 import (
 	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/rate"
-	"github.com/fastvoip/gvos-core/internal/shared/rds"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/rate"
+	"github.com/gvos-io/gvos-core/internal/shared/rds"
 )
 
 func newAdm(t *testing.T) *AdmissionR {
@@ -158,4 +161,104 @@ func TestManagerUsesAdmissionLedger(t *testing.T) {
 
 func testEntry() *rate.Entry {
 	return &rate.Entry{Prefix: "86", Price: money.MustFromYuan(0.06), InitDur: 60, StepDur: 6}
+}
+
+func TestAdmitCallSemantics(t *testing.T) {
+	a := newAdm(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	// Chain end1 -> agent1 (own first, ancestor second).
+	chain := []string{"end1", "agent1"}
+
+	// 1) Admitted: registers on every chain key.
+	if err := a.AdmitCall(ctx, chain, map[string]int{"agent1": 2, "end1": 5}, "c1", now, 0); err != nil {
+		t.Fatalf("first admit: %v", err)
+	}
+	for _, id := range chain {
+		if n, _ := a.LiveConcurrent(ctx, id); n != 1 {
+			t.Fatalf("%s live = %d, want 1", id, n)
+		}
+	}
+	// ZADD re-registration of the same call-id must not double-count.
+	if err := a.AdmitCall(ctx, chain, nil, "c1", now, 0); err != nil {
+		t.Fatalf("re-admit same id: %v", err)
+	}
+	if n, _ := a.LiveConcurrent(ctx, "end1"); n != 1 {
+		t.Fatalf("after re-admit live = %d, want 1", n)
+	}
+
+	// 2) Own cap refuses and registers nothing.
+	if err := a.AdmitCall(ctx, chain, map[string]int{"end1": 1}, "c2", now, 0); err == nil {
+		t.Fatal("own cap must refuse")
+	}
+	if n, _ := a.LiveConcurrent(ctx, "end1"); n != 1 {
+		t.Fatalf("refused call must not register: live = %d, want 1", n)
+	}
+
+	// 3) Ancestor sub-tree cap refuses; the OWN key counts the reject
+	// candidate (live+1 check), the whole registration never happens.
+	if err := a.AdmitCall(ctx, chain, map[string]int{"agent1": 1, "end1": 5}, "c3", now, 0); err == nil {
+		t.Fatal("sub-tree cap must refuse")
+	}
+	for _, id := range chain {
+		if n, _ := a.LiveConcurrent(ctx, id); n != 1 {
+			t.Fatalf("refused call must not register (%s live = %d)", id, n)
+		}
+	}
+
+	// 4) CPS: the reject still burns a slot in the second's window.
+	if err := a.AdmitCall(ctx, chain, nil, "c4", now, 1); err != nil {
+		t.Fatalf("cps first admit: %v", err)
+	}
+	if err := a.AdmitCall(ctx, chain, nil, "c5", now, 1); err == nil {
+		t.Fatal("cps over cap must refuse")
+	}
+	// c5's failed attempt consumed the slot: the next second admits.
+	if err := a.AdmitCall(ctx, chain, nil, "c6", now.Add(time.Second), 1); err != nil {
+		t.Fatalf("fresh window: %v", err)
+	}
+
+	// 5) Concurrent-reject must NOT burn the CPS slot (check order).
+	now2 := now.Add(2 * time.Second)
+	if err := a.AdmitCall(ctx, chain, map[string]int{"end1": 1}, "c7", now2, 1); err == nil {
+		t.Fatal("cap reject")
+	}
+	// Same second, still under CPS cap — proves the reject did not INCR.
+	if err := a.AdmitCall(ctx, chain, nil, "c8", now2, 1); err != nil {
+		t.Fatalf("cap reject must not consume the CPS slot: %v", err)
+	}
+}
+
+func TestAdmitCallAtomicOversell(t *testing.T) {
+	// The TOCTOU regression: N goroutines race the cap edge; the atomic
+	// script must admit exactly cap and register no more.
+	a := newAdm(t)
+	ctx := context.Background()
+	now := time.Now()
+	chain := []string{"end1", "agent1"}
+	const cap = 5
+	const racers = 32
+
+	var wg sync.WaitGroup
+	var admitted atomic.Int32
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := a.AdmitCall(ctx, chain, map[string]int{"end1": cap, "agent1": cap}, fmt.Sprintf("race-%d", i), now, 0); err == nil {
+				admitted.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if got := admitted.Load(); got != cap {
+		t.Fatalf("admitted %d, want exactly %d", got, cap)
+	}
+	if n, _ := a.LiveConcurrent(ctx, "end1"); int(n) != cap {
+		t.Fatalf("ledger live = %d, want %d", n, cap)
+	}
+	if n, _ := a.LiveConcurrent(ctx, "agent1"); int(n) != cap {
+		t.Fatalf("ancestor ledger live = %d, want %d", n, cap)
+	}
 }

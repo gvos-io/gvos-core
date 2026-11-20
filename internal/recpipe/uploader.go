@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fastvoip/gvos-core/internal/shared/events"
+	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
 
 // PGERecordIndex is the PG-facing index seam (satisfied by store.PG

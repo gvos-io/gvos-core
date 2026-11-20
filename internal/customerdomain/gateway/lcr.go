@@ -8,7 +8,7 @@ package gateway
 import (
 	"sort"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 )
 
 // Rater is the rate lookup the LCR needs (the api Server's per-group

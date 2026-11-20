@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
 )
 
 // TestAdminAuth guards all admin routes.

@@ -5,13 +5,13 @@ import (
 	"context"
 	"strings"
 	"log"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"encoding/json"
 	"net/http"
 	"time"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
-	"github.com/fastvoip/gvos-core/internal/shared/events"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
 
 func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {

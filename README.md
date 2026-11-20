@@ -4,7 +4,7 @@
 
 **云原生话务运营平台 — 软交换编排 · 实时精确计费 · NATS 事件总线 · 内置风控**
 
-[![CI](https://github.com/fastvoip/gvos-core/actions/workflows/ci.yml/badge.svg)](https://github.com/fastvoip/gvos-core/actions/workflows/ci.yml)
+[![CI](https://github.com/gvos-io/gvos-core/actions/workflows/ci.yml/badge.svg)](https://github.com/gvos-io/gvos-core/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.21%2B-00ADD8.svg)](go.mod)
 

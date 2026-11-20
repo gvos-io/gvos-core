@@ -10,8 +10,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/fastvoip/gvos-core/internal/customerdomain/ipallow"
-	"github.com/fastvoip/gvos-core/internal/shared/events"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/ipallow"
+	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
 
 func TestIPAllowAdminAPI(t *testing.T) {

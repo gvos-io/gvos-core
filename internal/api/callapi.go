@@ -8,16 +8,16 @@ package api
 
 import (
 	"math"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"context"
 	"errors"
 	"log"
 	"strings"
 	"time"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
-	"github.com/fastvoip/gvos-core/internal/callcore"
-	"github.com/fastvoip/gvos-core/internal/shared/events"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/callcore"
+	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
 
 type callStartReq struct {
@@ -141,6 +141,29 @@ type callEndReq struct {
 	QoS     string `json:"qos"`     // rtpengine $rtpstat text (U6)
 }
 
+// maxInMemoryCDRs caps the recent-CDR ring: the CDR list API is a
+// "what just happened" view, PG is the history authority. The cap
+// bounds the memory a long-lived replica burns (the U1 drill
+// accumulated 19k rows in-memory for nothing).
+const maxInMemoryCDRs = 10000
+
+// storeCdr appends into the bounded, lock-guarded ring. Callers run
+// on both the HTTP face and the 16 NATS responder workers — the
+// lock is what keeps handleCDRList/statsBody racing them safe.
+func (s *Server) storeCdr(cdr *callcore.CDR) {
+	s.cdrsMu.Lock()
+	defer s.cdrsMu.Unlock()
+	if len(s.cdrs) >= maxInMemoryCDRs {
+		// Drop from the head: copy the newest max-1 forward, then
+		// overwrite the last slot. Steady-state cost is one memmove,
+		// not a realloc.
+		copy(s.cdrs, s.cdrs[1:])
+		s.cdrs[len(s.cdrs)-1] = cdr
+		return
+	}
+	s.cdrs = append(s.cdrs, cdr)
+}
+
 // callEnd finalizes billing and returns the CDR. ctx drives the
 // persistence block (HTTP request ctx / background for the bus face);
 // persistence failures log but never block the billing answer.
@@ -192,7 +215,7 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 	if req.QoS != "" {
 		cdr.Mos, cdr.JitterMs, cdr.PacketLoss = callcore.ParseRTPStat(req.QoS)
 	}
-	s.cdrs = append(s.cdrs, cdr)
+	s.storeCdr(cdr)
 	// Event bus: the fully-stamped CDR fans out in both modes (the
 	// in-memory demo is a valid publisher target for downstream tests).
 	s.emit(events.SubjectCDRCompleted, cdr)

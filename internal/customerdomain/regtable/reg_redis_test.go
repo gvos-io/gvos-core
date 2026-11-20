@@ -7,7 +7,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 
-	"github.com/fastvoip/gvos-core/internal/shared/rds"
+	"github.com/gvos-io/gvos-core/internal/shared/rds"
 )
 
 func newRegR(t *testing.T) (*Table, *RegR) {

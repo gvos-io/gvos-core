@@ -1,4 +1,4 @@
-module github.com/fastvoip/gvos-core
+module github.com/gvos-io/gvos-core
 
 go 1.26.0
 

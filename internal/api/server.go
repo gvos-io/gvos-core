@@ -13,26 +13,27 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/pkgplan"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/rate"
-	"github.com/fastvoip/gvos-core/internal/callcore"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/blocklist"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/axb"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/gateway"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/ipallow"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/regtable"
-	"github.com/fastvoip/gvos-core/internal/customerdomain/riskctrl"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
-	"github.com/fastvoip/gvos-core/internal/shared/acl"
-	"github.com/fastvoip/gvos-core/internal/mediamain/mediastream"
-	"github.com/fastvoip/gvos-core/internal/recpipe"
-	"github.com/fastvoip/gvos-core/internal/shared/events"
-	"github.com/fastvoip/gvos-core/internal/shared/rds"
-	"github.com/fastvoip/gvos-core/internal/webhook"
-	"github.com/fastvoip/gvos-core/internal/shared/store"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/pkgplan"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/rate"
+	"github.com/gvos-io/gvos-core/internal/callcore"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/axb"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/gateway"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/ipallow"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/regtable"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/riskctrl"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/shared/acl"
+	"github.com/gvos-io/gvos-core/internal/mediamain/mediastream"
+	"github.com/gvos-io/gvos-core/internal/recpipe"
+	"github.com/gvos-io/gvos-core/internal/shared/events"
+	"github.com/gvos-io/gvos-core/internal/shared/rds"
+	"github.com/gvos-io/gvos-core/internal/webhook"
+	"github.com/gvos-io/gvos-core/internal/shared/store"
 )
 
 type Server struct {
@@ -41,6 +42,7 @@ type Server struct {
 	rateList      []rate.Rate // memory-mode source of truth for the table
 	calls         *callcore.Manager
 	cdrs          []*callcore.CDR
+	cdrsMu        sync.Mutex // guards cdrs (NATS responders append concurrently with HTTP reads)
 	pg            *store.PG            // nil in memory mode
 	userIndex     map[string]string    // SIP username -> account ID (PG mode)
 	recordEnabled bool                 // global recording opt-in (admin toggle)
@@ -384,9 +386,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) statsBody() map[string]any {
+	s.cdrsMu.Lock()
+	cdrCount := len(s.cdrs)
+	s.cdrsMu.Unlock()
 	resp := map[string]any{
 		"live_calls": s.calls.Live(),
-		"cdrs":       len(s.cdrs),
+		"cdrs":       cdrCount,
 		"uptime_s":   int(time.Since(s.startAt).Seconds()),
 		"mode":       "memory",
 	}
@@ -584,6 +589,11 @@ func MuxFor(s *Server) http.Handler {
 // (api-conventions §4): newest first, cursor = index into the
 // in-memory ring (PG mode later switches to keyset on
 // start_time,call_id). Default limit 50, max 500.
+//
+// The ring is capped (see maxInMemoryCDRs); when the head is trimmed a
+// cursor issued before the trim slides forward one row per dropped
+// entry — pagination through a live, bounded ring is best-effort by
+// design. PG is the history authority; this ring is the recent view.
 func (s *Server) handleCDRList(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -594,25 +604,29 @@ func (s *Server) handleCDRList(w http.ResponseWriter, r *http.Request) {
 			limit = int(n)
 		}
 	}
+	s.cdrsMu.Lock()
+	n := len(s.cdrs)
 	// cursor = ring index one past the last returned row (0 = start
 	// from newest). Page i returns [len-cursor-limit, len-cursor).
 	cursor := 0
 	if c := r.URL.Query().Get("cursor"); c != "" {
-		if n, err := json.Number(c).Int64(); err == nil && n >= 0 && int(n) <= len(s.cdrs) {
-			cursor = int(n)
+		if v, err := json.Number(c).Int64(); err == nil && v >= 0 && int(v) <= n {
+			cursor = int(v)
 		} else {
+			s.cdrsMu.Unlock()
 			httpErrorC(w, 400, "BAD_CURSOR", "cursor out of range")
 			return
 		}
 	}
-	out := []*callcore.CDR{}
-	for i := len(s.cdrs) - 1 - cursor; i >= 0 && len(out) < limit; i-- {
+	out := make([]*callcore.CDR, 0, limit)
+	for i := n - 1 - cursor; i >= 0 && len(out) < limit; i-- {
 		out = append(out, s.cdrs[i])
 	}
 	next := ""
-	if cursor+len(out) < len(s.cdrs) {
+	if cursor+len(out) < n {
 		next = json.Number(fmt.Sprintf("%d", cursor+len(out))).String()
 	}
+	s.cdrsMu.Unlock()
 	writeJSON(w, 200, map[string]any{"cdrs": out, "count": len(out), "next_cursor": next})
 }
 

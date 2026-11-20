@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fastvoip/gvos-core/internal/billingdomain/account"
-	"github.com/fastvoip/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 )
 
 // TestEndToEndCallFlow simulates the exact Kamailio event sequence for

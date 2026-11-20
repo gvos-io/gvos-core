@@ -13,9 +13,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/fastvoip/gvos-core/internal/api"
-	"github.com/fastvoip/gvos-core/internal/shared/rds"
-	"github.com/fastvoip/gvos-core/internal/shared/events"
+	"github.com/gvos-io/gvos-core/internal/api"
+	"github.com/gvos-io/gvos-core/internal/shared/rds"
+	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
 
 func main() {

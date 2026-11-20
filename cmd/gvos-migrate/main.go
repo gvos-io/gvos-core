@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fastvoip/gvos-core/internal/shared/migrate"
+	"github.com/gvos-io/gvos-core/internal/shared/migrate"
 )
 
 func main() {
