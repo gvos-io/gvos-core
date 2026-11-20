@@ -130,7 +130,7 @@
 | SIP TLS | 全默认开启 | kamailio.cfg:4444 WSS TLSv1.2 ✅;5060 明文 UDP 仍是主通道 | ⚠️ |
 | SRTP/DTLS | 全默认开启 | rtpengine 支持但未见端到端验证与显式配置 | ⚠️ 待验证 |
 | Digest 认证 | Password | ha1 MD5(SIP Digest 协议约束,auth_db)| ✅ |
-| IP 准入 | 白名单 | CIDR 规则+默认拒绝;⚠️ 首轮快照到达前短暂 fail-open | ✅/⚠️ |
+| IP 准入 | 白名单 | CIDR 规则+默认拒绝;清空白名单需 `confirm_empty:true`(409 守卫,防手滑全网断话);冷启动 fail-open 有界:默认 90s(`GVOS_IPALLOW_BOOT_GRACE`)后翻 fail-closed,超时后每 60s 打 L_ERR 面包屑 | ✅ |
 | **管理面鉴权** | API Key(Phase B) | `internal/shared/acl`,key 绑 (tenant,role),sha256 落库,一次性明文,bootstrap 从 GVOS_ADMIN_TOKEN;legacy 常量仅无 key 时回退(警告) | ✅ |
 | **信令计费面鉴权** | (隐含可用) | `/v1/call/*` 仅 requirePOST,`main.go:251` | ❌ F4 |
 | 密码存储 argon2id | 有 | **无此实现**(管理面无密码存储;ha1 是协议内 MD5)| v0.1 失实,删除 |

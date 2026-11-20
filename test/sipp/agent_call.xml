@@ -12,7 +12,7 @@
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       From: "1000" <sip:1000@[remote_ip]:[remote_port]>;tag=[call_number]
       To: <sip:[field0]@[remote_ip]:[remote_port]>
-      Call-ID: [call_id]
+      Call-ID: agent-spike-[pid]-[call_number]@gvos.spike
       CSeq: 1 INVITE
       Contact: sip:1000@[local_ip]:[local_port]
       Content-Type: application/sdp
@@ -39,7 +39,7 @@
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       From: "1000" <sip:1000@[remote_ip]:[remote_port]>;tag=[call_number]
       To: <sip:[field0]@[remote_ip]:[remote_port]>[peer_tag_param]
-      Call-ID: [call_id]
+      Call-ID: agent-spike-[pid]-[call_number]@gvos.spike
       CSeq: 1 ACK
       Content-Length: 0
     ]]>
@@ -51,7 +51,7 @@
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       From: "1000" <sip:1000@[remote_ip]:[remote_port]>;tag=[call_number]
       To: <sip:[field0]@[remote_ip]:[remote_port]>
-      Call-ID: [call_id]
+      Call-ID: agent-spike-[pid]-[call_number]@gvos.spike
       CSeq: 2 INVITE
       Contact: sip:1000@[local_ip]:[local_port]
       [authentication username=1000 password=demo1000]
@@ -84,7 +84,7 @@
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       From: "1000" <sip:1000@[remote_ip]:[remote_port]>;tag=[call_number]
       To: <sip:[field0]@[remote_ip]:[remote_port]>[peer_tag_param]
-      Call-ID: [call_id]
+      Call-ID: agent-spike-[pid]-[call_number]@gvos.spike
       CSeq: 2 ACK
       Content-Length: 0
     ]]>
@@ -98,7 +98,7 @@
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       From: "1000" <sip:1000@[remote_ip]:[remote_port]>;tag=[call_number]
       To: <sip:[field0]@[remote_ip]:[remote_port]>[peer_tag_param]
-      Call-ID: [call_id]
+      Call-ID: agent-spike-[pid]-[call_number]@gvos.spike
       CSeq: 3 BYE
       Content-Length: 0
     ]]>

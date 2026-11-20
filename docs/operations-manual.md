@@ -139,13 +139,20 @@ curl -H "Authorization: Bearer <token>" http://<gv-core>:8080/v1/admin/ipallow
 
 # 删除单条
 curl -X POST -H "Authorization: Bearer <token>"   -d '{"remove_id":"quarantine"}' http://<gv-core>:8080/v1/admin/ipallow
+
+# 有意清空（全量拒绝）：必须显式确认，否则 409 CONFIRM_REQUIRED
+curl -X POST -H "Authorization: Bearer <token>"   -d '{"rules":[],"confirm_empty":true}' http://<gv-core>:8080/v1/admin/ipallow
 ```
 
 语义与传播路径：
 
 - **默认拒绝**：未命中任何 allow 规则的源一律 403；deny 规则优先于 allow（例外语义）
+- **清空守卫**：把非空规则集置空（`rules:[]`、删除最后一条、`remove_id` 删到空）需要
+  `confirm_empty:true`，否则 409 拒绝——空集秒级广播到边缘，一次手滑就是全网 SIP 断话
 - 变更即时广播到所有 gv-core 副本（`gvos.cfg.reload`）；Kamailio 信令节点每 30s 经
-  `/v1/internal/ipallow-snapshot` 拉取版本化快照到内存 htable，快照未加载前 fail-open（日志可见）
+  `/v1/internal/ipallow-snapshot` 拉取版本化快照到内存 htable；快照未加载前 fail-open
+  **有界**：进程启动后 `GVOS_IPALLOW_BOOT_GRACE`（默认 90s，3 个轮询周期）内放行等待同步，
+  超时仍未同步则翻 fail-closed 并每 60s 打 L_ERR（查 `GVOS_INTERNAL_TOKEN` / `GVOS_CORE_HOST` / NATS）
 - 规则持久化在 `settings` 表（`ip_allowlist` key），重启恢复
 - Kamailio 侧需设置环境变量：`GVOS_CORE_HOST`（gv-core 地址）与 `GVOS_INTERNAL_TOKEN`
   （内部快照令牌，必须与 gv-core 一致；生产环境更换默认值）

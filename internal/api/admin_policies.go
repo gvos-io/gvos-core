@@ -132,7 +132,10 @@ func (s *Server) handleRiskRules(w http.ResponseWriter, r *http.Request) {
 // POST /v1/admin/ipallow {"rules":[{"id","cidr","action","note"}]}
 // replaces the source-IP allowlist (full-set semantics, same as risk
 // rules); {"remove_id":"x"} removes one rule instead. GET lists the
-// current set. Empty set = default-deny (no SIP source is admitted).
+// current set. Empty set = default-deny (no SIP source is admitted) —
+// and emptying a non-empty set requires {"confirm_empty":true}: the
+// broadcast propagates in seconds, so an unconfirmed empty set is a
+// full-network SIP outage wearing a 200 response.
 
 func (s *Server) handleIPAllow(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -141,8 +144,9 @@ func (s *Server) handleIPAllow(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		var req struct {
-			Rules    []ipallow.Rule `json:"rules"`
-			RemoveID string         `json:"remove_id"`
+			Rules         []ipallow.Rule `json:"rules"`
+			RemoveID      string         `json:"remove_id"`
+			ConfirmEmpty  bool           `json:"confirm_empty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, 400, "body required")
@@ -161,6 +165,10 @@ func (s *Server) handleIPAllow(w http.ResponseWriter, r *http.Request) {
 			}
 			if !removed {
 				httpError(w, 404, "rule not found: "+req.RemoveID)
+				return
+			}
+			if len(kept) == 0 && !req.ConfirmEmpty {
+				httpErrorC(w, 409, "CONFIRM_REQUIRED", "removing the last rule empties the allowlist (default-deny: every SIP source gets 403); retry with confirm_empty:true")
 				return
 			}
 			before := current
@@ -182,6 +190,11 @@ func (s *Server) handleIPAllow(w http.ResponseWriter, r *http.Request) {
 				httpError(w, 400, err.Error())
 				return
 			}
+		}
+		// Emptying a non-empty set needs the explicit confirmation.
+		if len(req.Rules) == 0 && s.ipallow.Count() > 0 && !req.ConfirmEmpty {
+			httpErrorC(w, 409, "CONFIRM_REQUIRED", "empty ruleset default-denies every SIP source (403 at the edge within seconds); retry with confirm_empty:true")
+			return
 		}
 		before := s.ipallow.Rules()
 		if s.pg != nil {
@@ -289,6 +302,13 @@ func (s *Server) handleIPAllowDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if !removed {
 		httpError(w, 404, "rule not found: "+id)
+		return
+	}
+	// Emptying via DELETE takes the same confirmation as the POST
+	// forms (409 CONFIRM_REQUIRED): the semantics of an empty
+	// allowlist are the same however it got there.
+	if len(kept) == 0 {
+		httpErrorC(w, 409, "CONFIRM_REQUIRED", "removing the last rule empties the allowlist (default-deny: every SIP source gets 403); re-POST an empty ruleset with confirm_empty:true")
 		return
 	}
 	// Persist the plain rules array, before touching memory: the

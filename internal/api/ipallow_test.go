@@ -207,6 +207,122 @@ func TestIPAllowDeleteRoute(t *testing.T) {
 	}
 }
 
+// TestIPAllowEmptyGuard: emptying a non-empty allowlist needs
+// confirm_empty:true on all three write paths — POST replace,
+// POST remove_id, and the resource DELETE. Without it a slip of the
+// hand is a full-network SIP outage in seconds (default-deny is
+// broadcast to the edge immediately). Confirmed empties succeed;
+// empty->empty and non-empty writes are untouched.
+func TestIPAllowEmptyGuard(t *testing.T) {
+	s := NewServer()
+	s.ipallow.Reload([]ipallow.Rule{
+		{ID: "last", CIDR: "192.168.1.0/24", Action: "allow"},
+	})
+	cap := &capturePoster{}
+	s.events = events.NewWithPoster(cap)
+	srv := httptest.NewServer(MuxFor(s))
+	defer srv.Close()
+	defer flush(s)
+
+	post := func(body string) (int, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/ipallow/rules", bytes.NewReader([]byte(body)))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var m map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&m)
+		return resp.StatusCode, m
+	}
+	delete := func(id string) (int, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest("DELETE", srv.URL+"/v1/admin/ipallow/rules/"+id, nil)
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var m map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&m)
+		return resp.StatusCode, m
+	}
+
+	// 1. Full-set replace to empty without confirm -> 409, state kept.
+	if code, m := post(`{"rules":[]}`); code != 409 {
+		t.Fatalf("replace-to-empty unconfirmed: %d %v, want 409", code, m)
+	}
+	if got := s.ipallow.Count(); got != 1 {
+		t.Fatalf("state after rejected replace: %d rules, want 1", got)
+	}
+
+	// 2. remove_id that would empty the set -> 409.
+	if code, m := post(`{"remove_id":"last"}`); code != 409 {
+		t.Fatalf("remove-last unconfirmed: %d %v, want 409", code, m)
+	}
+	if got := s.ipallow.Count(); got != 1 {
+		t.Fatalf("state after rejected remove: %d rules, want 1", got)
+	}
+
+	// 3. DELETE the last rule -> 409 (no confirm field on this route:
+	// the message points at the POST form).
+	if code, m := delete("last"); code != 409 {
+		t.Fatalf("DELETE last unconfirmed: %d %v, want 409", code, m)
+	}
+	if got := s.ipallow.Count(); got != 1 {
+		t.Fatalf("state after rejected DELETE: %d rules, want 1", got)
+	}
+
+	// No broadcast from any rejected write.
+	subjects, bodies := cap.snapshot()
+	for i, name := range subjects {
+		if name == events.SubjectCfgReload && bodies[i]["entity"] == "ip_allowlist" {
+			t.Errorf("rejected write still broadcast: %v", bodies[i])
+		}
+	}
+
+	// 4. Confirmed empty replace succeeds and lands.
+	if code, m := post(`{"rules":[],"confirm_empty":true}`); code != 200 {
+		t.Fatalf("confirmed empty replace: %d %v, want 200", code, m)
+	}
+	if got := s.ipallow.Count(); got != 0 {
+		t.Fatalf("count after confirmed empty: %d, want 0", got)
+	}
+	subjects, bodies = cap.snapshot()
+	broadcast := 0
+	for i, name := range subjects {
+		if name == events.SubjectCfgReload && bodies[i]["entity"] == "ip_allowlist" {
+			broadcast++
+		}
+	}
+	if broadcast != 1 {
+		t.Errorf("confirmed empty broadcasts = %d, want 1", broadcast)
+	}
+
+	// 5. Empty->empty replace is a no-op, not a guard trip (already
+	// empty: nothing to lose, no confirmation needed).
+	if code, m := post(`{"rules":[]}`); code != 200 {
+		t.Fatalf("empty->empty replace: %d %v, want 200", code, m)
+	}
+
+	// 6. Non-empty replace never trips the guard.
+	if code, m := post(`{"rules":[{"id":"a","cidr":"10.0.0.0/8","action":"allow"}]}`); code != 200 {
+		t.Fatalf("non-empty replace: %d %v, want 200", code, m)
+	}
+	if code, m := post(`{"remove_id":"a"}`); code != 409 {
+		t.Fatalf("remove-last again unconfirmed: %d %v, want 409", code, m)
+	}
+	if code, m := post(`{"remove_id":"a","confirm_empty":true}`); code != 200 {
+		t.Fatalf("confirmed remove-last: %d %v, want 200", code, m)
+	}
+	if got := s.ipallow.Count(); got != 0 {
+		t.Fatalf("final count = %d, want 0", got)
+	}
+}
+
 func TestIPAllowSnapshotEndpoint(t *testing.T) {
 	s := NewServer()
 	// Configure one allow rule directly (engine API — the admin API is
