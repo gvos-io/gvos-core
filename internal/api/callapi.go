@@ -133,12 +133,14 @@ func (s *Server) callAnswer(callID string) (int, any) {
 }
 
 type callEndReq struct {
-	CallID  string `json:"call_id"`
-	DurSecs int    `json:"duration"` // optional: defaulted from call start
-	PDDMs   int    `json:"pdd_ms"`   // post-dial delay measured by Kamailio
-	SIPCode int    `json:"sip_code"`
-	Release string `json:"release"` // normal | balance-exhausted | ...
-	QoS     string `json:"qos"`     // rtpengine $rtpstat text (U6)
+	CallID     string `json:"call_id"`
+	DurSecs    int    `json:"duration"`    // optional: defaulted from call start
+	DurMs      int    `json:"duration_ms"` // µs-clock duration from the edge (sub-second precision; the $TS second-granular field truncated 11% of calls to 0)
+	AnswerTsMs int64  `json:"answer_ts"`  // epoch-ms of the 200 answer (0 = unanswered)
+	PDDMs      int    `json:"pdd_ms"`     // post-dial delay measured by Kamailio
+	SIPCode    int    `json:"sip_code"`
+	Release    string `json:"release"` // normal | balance-exhausted | ...
+	QoS        string `json:"qos"`     // rtpengine $rtpstat text (U6)
 }
 
 // maxInMemoryCDRs caps the recent-CDR ring: the CDR list API is a
@@ -169,6 +171,13 @@ func (s *Server) storeCdr(cdr *callcore.CDR) {
 // persistence failures log but never block the billing answer.
 func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 	seconds := req.DurSecs
+	if req.DurMs > 0 {
+		// Edge-measured µs-clock duration: ceil to whole seconds so
+		// billing never undercounts the partial second (the 60+6
+		// first step absorbs it anyway; this keeps second-grid
+		// semantics while escaping the $TS truncation).
+		seconds = (req.DurMs + 999) / 1000
+	}
 	if seconds == 0 {
 		// Kamailio sends the BYE without duration: derive it from the
 		// call's start time (SIPp's failed call lasted ~0s, real calls
@@ -205,6 +214,9 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 	}
 	if req.PDDMs > 0 {
 		cdr.PDDMs = req.PDDMs
+	}
+	if req.AnswerTsMs > 0 {
+		cdr.AnswerTime = time.UnixMilli(req.AnswerTsMs)
 	}
 	if req.SIPCode > 0 {
 		cdr.SIPCode = req.SIPCode

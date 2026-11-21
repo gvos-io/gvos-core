@@ -280,9 +280,23 @@ func (s *Server) newCallManager() *callcore.Manager {
 		}
 	}, 10*time.Second)
 	// Zombie sweeper: calls whose BYE never arrives (SIPp timeout
-	// kills, gateway drops) settle after 10 minutes instead of
-	// leaking their pre-answer locks.
-	m.StartSweeper(10*time.Minute, 30*time.Second)
+	// kills, gateway drops) settle instead of leaking their
+	// pre-answer locks. Timeout is env-tunable: the 10-minute default
+	// is the production stance (slow, billing-friendly); a bench or
+	// an edge with BYE-loss under load collapses live_calls fast —
+	// every zombie rides the 10s Interim/Redis loop, and thousands
+	// of them starve the RPC responders (measured: live_calls 21829
+	// -> SVC-CALL-START throughput to zero).
+	if t := os.Getenv("GVOS_ZOMBIE_TIMEOUT"); t != "" {
+		if d, err := time.ParseDuration(t); err == nil {
+			m.StartSweeper(d, 30*time.Second)
+			log.Printf("zombie sweeper: timeout=%s (env)", d)
+		} else {
+			m.StartSweeper(10*time.Minute, 30*time.Second)
+		}
+	} else {
+		m.StartSweeper(10*time.Minute, 30*time.Second)
+	}
 	// Interim driver: the 10s deduction slices of the architecture doc.
 	// In-process time slices until RTPengine activity events replace
 	// them; teardown rides the gvos.call.teardown event queue.

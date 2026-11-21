@@ -65,15 +65,17 @@ func TestSweeperIgnoresFreshCalls(t *testing.T) {
 }
 
 // TestSweeperLoop: the background goroutine settles without manual
-// sweep calls, and stop() halts it.
+// sweep calls, and stop() halts it. The fake clock hands the time over
+// a channel (a shared `cur` variable would be a data race between the
+// test goroutine and the sweeper goroutine reading it).
 func TestSweeperLoop(t *testing.T) {
 	store := account.NewStore()
 	store.Put(&account.Account{ID: "u1", Credit: money.MustFromYuan(100), RateGroup: "g"})
 	m := NewManager(store, nil, 10*time.Millisecond)
 
-	base := time.Unix(1_700_000_000, 0)
-	cur := base
-	m.SetClock(func() time.Time { return cur })
+	nowCh := make(chan time.Time, 1)
+	nowCh <- time.Unix(1_700_000_000, 0)
+	m.SetClock(func() time.Time { return <-nowCh })
 
 	m.Start("loop1", "u1", "86", entry2(), 60, false)
 
@@ -84,7 +86,12 @@ func TestSweeperLoop(t *testing.T) {
 		case <-deadline:
 			t.Fatalf("sweeper never settled the zombie, live = %d", m.Live())
 		default:
-			cur = time.Now() // real time advances past the fake start
+			// Real time advances past the fake start (buffered: the
+			// next clock read by any goroutine picks it up).
+			select {
+			case nowCh <- time.Now():
+			default: // a value is still parked: the sweeper has not read it yet
+			}
 			time.Sleep(5 * time.Millisecond)
 		}
 	}

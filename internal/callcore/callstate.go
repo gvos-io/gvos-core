@@ -495,6 +495,13 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 	accrued := c.Accrued
 	start := c.Start
 	recorded := c.Recorded
+	// Read-and-clear the release reason under the same lock: the old
+	// post-unlock read raced driveInterim's snapshot pass (both touch
+	// m.lastRelease unlocked) and crashed the whole process under
+	// load ("fatal error: concurrent map read and map write",
+	// observed at 200CPS with concurrent BYE storm + interim tick).
+	release := m.lastRelease[callID]
+	delete(m.lastRelease, callID)
 	m.mu.Unlock()
 
 	if m.adm != nil {
@@ -509,7 +516,9 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 	}
 
 	billedSecs, cost, err := m.charger.ChargeFor(entry, seconds)
-	release := "normal"
+	if release == "" {
+		release = "normal"
+	}
 	if err != nil {
 		// Unratable connected call: treat as zero cost but keep CDR.
 		billedSecs, cost, release = seconds, 0, "unratable"
@@ -519,11 +528,8 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 	if entry != nil {
 		price = entry.Price
 	}
-	// If the manager tore the call down for balance exhaustion, mark it.
-	if m.lastRelease[callID] != "" {
-		release = m.lastRelease[callID]
-		delete(m.lastRelease, callID)
-	}
+	// (release was read-and-cleared under m.mu above; the old
+	// unlocked read here was the concurrent-map crash site.)
 	// Final settle against what was already taken (pre-answer lock plus
 	// interim accruals): top up when the call cost more, refund when it
 	// cost less. Delta is signed; Commit applies +delta as a refund and
@@ -561,16 +567,17 @@ type CDR struct {
 	AccountID  string
 	Dest       string
 	StartTime  time.Time
-	Duration   int // connected seconds
-	BilledSecs int // billed seconds
+	AnswerTime time.Time // 200-answer moment (zero = unanswered); edge-measured epoch-ms
+	Duration   int       // connected seconds
+	BilledSecs int       // billed seconds
 	Cost       money.Amount
 	RatePrefix string
 	Price      money.Amount // per-minute price applied
-	Release    string  // normal | balance-exhausted | unratable
-	PDDMs      int     // post-dial delay (INVITE -> first 200), Kamailio-measured
-	SIPCode    int     // final SIP response on the release path
-	Recorded   bool    // rtpengine recording was engaged (file named by call-id)
-	FreeSecs   int     // package allowance seconds applied at settlement
+	Release    string       // normal | balance-exhausted | unratable
+	PDDMs      int          // post-dial delay (INVITE -> first 200), Kamailio-measured
+	SIPCode    int          // final SIP response on the release path
+	Recorded   bool         // rtpengine recording was engaged (file named by call-id)
+	FreeSecs   int          // package allowance seconds applied at settlement
 	// QoS from rtpengine's $rtpstat (U6: parsed at the CDRR consumer,
 	// columns already exist in the cdr table).
 	Mos        float64

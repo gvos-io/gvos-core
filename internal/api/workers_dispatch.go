@@ -328,6 +328,17 @@ func cdrRawHandler(s *Server) func(data []byte) error {
 		}
 		code, body := s.callEnd(context.Background(), req)
 		if code >= 400 {
+			// 404 NOT_FOUND = the call already finalized (a BYE
+			// retransmission re-published cdr.raw after End deleted the
+			// call, or a duplicated delivery). That is an idempotent
+			// terminal state, not a retryable failure: ack instead of
+			// NAK so the poison redelivery loop (measured 7381
+			// redeliveries at 40CPS) cannot monopolize the single
+			// CDRR worker. Anything else (4xx/5xx) stays retryable.
+			if code == 404 {
+				log.Printf("CDRR dup end acked call=%s (already finalized)", req.CallID)
+				return nil
+			}
 			return fmt.Errorf("callEnd rejected call=%s: %v", req.CallID, body)
 		}
 		return nil

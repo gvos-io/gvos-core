@@ -152,9 +152,12 @@ func TestCdrRawConsumerHandler(t *testing.T) {
 	if len(s.cdrs) != 1 || s.cdrs[0].CallID != "cdrr-1" {
 		t.Fatalf("CDR ring = %v", s.cdrs)
 	}
-	// Unknown call: error surfaces for redelivery.
-	if err := handler([]byte(`{"call_id":"ghost","duration":1}`)); err == nil {
-		t.Fatal("unknown call_id must error (redelivery path)")
+	// Unknown call: idempotent terminal — acked (nil), because a BYE
+	// retransmission re-publishing cdr.raw after finalization is the
+	// expected duplicate shape, not a retryable failure (the NAK loop
+	// measured 7381 redeliveries at 40CPS×10).
+	if err := handler([]byte(`{"call_id":"ghost","duration":1}`)); err != nil {
+		t.Fatalf("unknown call_id must ack (idempotent duplicate): %v", err)
 	}
 	// Malformed payload: error, state intact.
 	if err := handler([]byte(`{not json`)); err == nil {
