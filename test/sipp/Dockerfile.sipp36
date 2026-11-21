@@ -1,0 +1,7 @@
+FROM debian:bookworm-slim AS b
+RUN apt-get update -qq && apt-get install -y -qq build-essential libncurses5-dev >/dev/null 2>&1
+COPY sipp380.tar.gz /s.tgz
+RUN tar xzf /s.tgz && cd sipp-3.8.0 && ./configure --with-pcapplay --prefix=/usr >/dev/null 2>&1 && make -j4 >/dev/null 2>&1 && make install >/dev/null 2>&1
+FROM debian:bookworm-slim
+COPY --from=b /usr/bin/sipp /usr/bin/sipp
+ENTRYPOINT ["sipp"]

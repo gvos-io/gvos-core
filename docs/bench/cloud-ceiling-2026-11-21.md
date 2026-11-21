@@ -50,3 +50,18 @@
 - loadgen 分离：公网 UDP 直打（需安全组开 5060）或专用压测机同 VPC；
 - 8 核+ ECS 纵扩或 2 副本横向；
 - K8s 形态验证（sysctl initContainer + hostNetwork，见 ceiling-report-2026-11-21.md K8s 清单）。
+
+## 补充（2026-11-22）：20 万注册压测（GA 缺口 #5）
+
+**方法**：自研 Go 注册压测器 `test/sipp/regload.go` 入仓（修复"loadgen 不在仓库"的可复现性缺口）——SIPp 3.5/3.7 均无法逐 call 替换鉴权用户名（3.5 嵌套关键字 bug、3.7 需 -auth_file 但 ctaloi 镜像是 3.5、自建 3.7.9 走 CMake+pugixml 子模块已入仓 Dockerfile.sipp379）。
+
+**结果**：**199,552/200,000 = 99.78%**，36/s 稳定持续 95 分钟，authFail 104（0.05%）、timeout 344（0.17%）。资源：Kamailio 内存 107MB（22.8k 注册时 ≈600B/AOR 外推 200k≈125MB）、PG 213MB、Redis 33MB——20 万注册的 usrloc/authcache/账户表全部稳态承载。
+
+**过程发现（已修/已记录）**：
+- regload 初版 Via 用虚构 IP → 回复黑洞（Kamailio 按 Via 回包，必须写 socket 真实地址）
+- 401 行解析 `\r\n` 混合分隔符 → challenge 取空（TrimSpace + 兼容 \n）
+- `ul.dump`/`ul.lookup` RPC 在 20 万条目下报 "Internal error creating aor struct" / "AOR not found"——**RPC 面缺陷**（重注册 200 证明数据在），记录为已知限制，运维口径用 ul.db_ 系列（需 db_mode≥1）
+- SIPp 3.5.1 的 `[authentication username=[field0]]` 嵌套关键字不展开（parse 失败）——3.7 同样；200k 级注册压测必须用真实 Digest 客户端
+- PG 375% CPU 在 10 万账户 auth 回退高峰（authcache 预热前），预热后回落——生产建议 authcache 预加载或加大 size
+
+**媒体面大规模压测**：4 核同机无法分离 loadgen 与 rtpengine 负载，本轮不做；结论在 ceiling 报告（用户态转发、独立节点、万级并发需多节点实测）。
