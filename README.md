@@ -28,8 +28,12 @@
 | **计费引擎** | 前缀最长匹配（10 万条费率 133ns/次）、时段窗口（节假日/夜间）、步长 60+6 / 6+6 / 1+1 / N+M、首步价/增量价 |
 | **账户体系** | 租户→多级代理→账户树、全链路原子预锁定（all-or-nothing 回滚）、后付账户、并发/CPS 限额 |
 | **实时风控** | 频次/日成本/地区准入规则（block/alert）、黑白名单（前缀索引 220ns/次）、余额耗尽强制拆线 |
-| **IP 准入** | 源 IP 白名单（CIDR、默认拒绝、deny 例外）：HTTP API 管理 → NATS 广播同步 → Kamailio htable 内存匹配（信令边缘零 DB 查询）；Digest HA1 同样走 htable 缓存 |
-| **事件总线** | NATS JetStream：CDR 流、审计流、拆线指令队列、Webhook 分发（NAK 重投 + MaxDeliver 防毒丸）、多副本配置广播 |
+| **信令边缘** | Kamailio 6.0 + nats 模块：鉴权 htable 缓存、IP 准入、异步 bill-lock RPC（suspend/resume 4 分片回复消费）、重传吸收、网关门限故障切换 |
+| **媒体面** | RTPengine 用户态转发（端口池 30k）、录音管道（pcap→MP3→OSS）、20 万注册实测承载 |
+| **事件总线** | NATS JetStream 3 节点 R3：CDR 流、审计流、拆线指令队列、Webhook 分发（NAK 重投 + MaxDeliver 防毒丸）、多副本配置广播 |
+| **租户自助面** | `/v1/tenant/*`：me/accounts/cdrs/stats/packages/webhooks——API key 按 tenant_id 强制过滤（逃逸测试覆盖） |
+| **Webhook 契约** | v1 版本化信封（{v,event,occurred_at,tenant,seq,data}）、Stripe 风格 HMAC 签名、at-least-once + 幂等键、SSRF 门（https+公网强制） |
+| **可观测** | Prometheus `/metrics`（呼叫/RPC 直方图/账务写入/总线健康）+ Grafana 预置面板 + 告警规则（计费停滞/zombie/总线故障） |
 | **套餐引擎** | 日/月免费额度、折扣、最低消费，按周期计数 |
 | **AI 语音** | 通话媒体流 WebSocket 出站 + DashScope ASR 桥接（实时转写） |
 | **迁移工具** | `gvos-migrate` 四步流水线（extract/validate/plan/load），从旧系统 CSV 导入账户/费率 |
@@ -69,15 +73,17 @@ go test ./...
 
 ## 实测基准
 
-Windows 开发机（i7-13700H，双副本 + 真 PG/NATS），方法与原始数据见 [capacity report](docs/bench/capacity-report-2026-11-19.md)：
+**开发机**（Windows Docker Desktop，全栈含信令+媒体+计费）与**阿里云 ECS 4 核**（同机 loadgen 口径），方法与原始数据见 [docs/bench/](docs/bench/)：
 
-| 指标 | 实测 |
-|---|---|
-| 呼叫建立（锁定路径） | **p50 = 0.8ms / p99 = 2.9ms** @ 100 CPS 稳态 |
-| 瞬时冲击 | **1,245 CPS** burst 零失败（1,000 通 / 0.8s） |
-| 并发通话 | 1,000 并发 × 30s 零失败，内存线性（+9MB），无泄漏 |
-| CDR 事件落库 | burst 冲击 2.4s 追平积压（≈300 events/s）；稳态零滞后 |
-| 对账 | 6,714 行 CDR vs 账本，**369.78 = 369.78 逐分零漂移** |
+| 指标 | 开发机 | 云 ECS 4 核 |
+|---|---|---|
+| 全栈 100CPS × 1 万通 | **10000/10000**（PDD p99 5ms） | **100%**（PDD p99 4ms） |
+| bill-lock RPC | p50 2.8ms（3 节点 R3） | p99 4-6ms |
+| 并发通话 | **9,853 同时在线**（CPU 余量大） | **2,000 精确保持**（duration=61s 全对） |
+| 20 万注册 | — | **199,552/200,000 = 99.78%** @36/s × 95min |
+| 对账 | CDR = ledger 逐分零漂移（多轮 1 万通级验证） | 同左 |
+
+> 200CPS+ 的测量上限是压测机（SIPp/桥接）自限——栈侧计数器全绿、CPU<30%。生产 Linux 节点 + 横向扩展的完整容量矩阵见 [云上天花板报告](docs/bench/cloud-ceiling-2026-11-21.md)。
 
 ## 事件总线（NATS）
 
@@ -93,20 +99,26 @@ Windows 开发机（i7-13700H，双副本 + 真 PG/NATS），方法与原始数�
 
 ## 已知限制（诚实声明）
 
-- SIP 数据面配置（Kamailio cfg / rtpengine）为 spike 级：单节点可用，生产级调优与大规模验证在进行中
+- 信令边缘已过 100CPS 全栈/2000 并发/20 万注册压测（本轮修复 11+ 个压测暴露的 bug，见 [docs/bench/](docs/bench/)）；300CPS+ 的 PRD 目标需 loadgen 与被测栈分离复测（4 核单机上 loadgen 是测量上限）
 - 多副本运行时状态（余额/并发/CPS/风控滑窗/套餐用量/注册镜像）已收口 Redis（配置 `GVOS_REDIS_URL`，未配置 = 单副本内存语义）；计费门 fail-closed，其余 fail-open
-- 管理令牌默认 `dev-admin-token`、DB 密码 `gvos_dev`——均为演示默认值，**生产部署必须更换**（见 [operations manual](docs/operations-manual.md)）
-- IP 白名单空表 = 默认拒绝（Kamailio 首个快照加载前短暂 fail-open）；演示环境内部令牌 `dev-internal-token`，生产必须更换 `GVOS_INTERNAL_TOKEN`
+- **gv-core 多副本语义待定**：呼叫态在内存（m.calls），多副本需要队列组粘滞或呼叫态外置 Redis——K8s 化的最后一个结构项
+- 管理令牌默认 `dev-admin-token`、DB 密码 `gvos_dev`——均为演示默认值，**生产部署必须更换**（见 [operations manual](docs/operations-manual.md)）；生产节点需设 `net.core.rmem_default=4MB`（UDP 缓冲，实测 416KB 在 200CPS 丢 401）
+- K8s 形态清单：RTPengine/Kamailio hostNetwork、节点 sysctl initContainer、安全组收敛 28080/Grafana
 - TLS 证书未随仓库分发，部署时自签：`openssl req -x509 -newkey rsa:2048 -nodes -keyout kamailio-key.pem -out kamailio-cert.pem -days 365 -subj "/CN=gvos.local"`
-- PRD 中 20 万注册、媒体面大规模压测为进行中目标
+- SRTP/DTLS：rtpengine 编译内置、配置面就绪，E2E 验证待媒体客户端（pjsua 或 WebRTC 软电话，规程见 [docs/srtp-dtls-verification-plan.md](docs/srtp-dtls-verification-plan.md)）
+- admin API 无速率限制（建议 ingress 层做）；`ul.dump/ul.lookup` RPC 在 20 万条目下有缺陷（重注册数据完好）
 
 ## 文档
 
-- [架构设计](docs/02-architecture.md) · [部署规划](docs/deployment-plan.md) · [运维手册](docs/operations-manual.md)
+- [架构设计](docs/02-architecture.md) · [部署规划](docs/deployment-plan.md) · [运维手册](docs/operations-manual.md) · [API 约定](docs/api-conventions.md)（含 Webhook 契约与版本规则）
 - [竞品对标（昆石 VOS/SBC）](docs/competitive-analysis-vos-sbc.md)（功能差距 + 排期输入）
-- [Redis 收口方案](docs/redis-adoption-plan.md)（规划稿）
+- [Redis 收口方案](docs/redis-adoption-plan.md)（已实施 Phase 0-5）
 - [Voice Agent 接入：Pipecat 原生 SIP（主路径）](docs/pipecat-integration-plan.md) · [LiveKit SIP（WebRTC/多方）](docs/livekit-integration-plan.md)（规划稿）
-- [自测报告（130 项）](docs/bench/selftest-report-2026-11-19.md) · [容量报告 v0.4](docs/bench/capacity-report-2026-11-19.md) · [验收报告 v0.3](docs/bench/acceptance-report-2026-10-07.md)
+- 压测与容量：
+  - [自测报告（130 项）](docs/bench/selftest-report-2026-11-19.md) · [验收报告 v0.3](docs/bench/acceptance-report-2026-10-07.md) · [RPC 档验收](docs/bench/rpc-tier-verification-2026-11-20.md)
+  - [10 轮缺陷压测](docs/bench/bench10-report-2026-11-20.md) · [100CPS 修复收官](docs/bench/bench100-report-2026-11-20.md)
+  - [容量基线 vs 裸 Kamailio](docs/bench/capacity-baseline-2026-11-20.md) · [天花板报告](docs/bench/ceiling-report-2026-11-21.md) · [云 ECS 天花板 + 20 万注册](docs/bench/cloud-ceiling-2026-11-21.md)
+  - [渗透自测](docs/bench/pentest-selfaudit-2026-11-21.md) · [SRTP/DTLS 验证规程](docs/srtp-dtls-verification-plan.md)
 
 ## 参与
 
