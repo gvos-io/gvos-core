@@ -30,6 +30,10 @@ type callStartReq struct {
 // risk, rate, and reserve. Status: 200 locked, 403 blocked/broke,
 // 404 unratable/unknown, 429 limits (Retry-After on the HTTP face).
 func (s *Server) callStart(req callStartReq) (int, any) {
+	start := time.Now()
+	defer func() {
+		mRPCSeconds.Observe(time.Since(start).Seconds())
+	}()
 	// Caller resolution first: the risk engine and billing both need
 	// the final account ID.
 	accID := req.From
@@ -122,6 +126,7 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 		// part with the real destination before relaying to the gateway.
 		answer["rewrite_dest"] = actualDest
 	}
+	mCallsStarted.Inc(1)
 	return 200, answer
 }
 
@@ -249,5 +254,6 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 			log.Printf("ledger persist failed (call %s): %v", cdr.CallID, err)
 		}
 	}
+	mCallsEnded.Inc(1)
 	return 200, cdr
 }

@@ -336,6 +336,7 @@ func cdrRawHandler(s *Server) func(data []byte) error {
 			// redeliveries at 40CPS) cannot monopolize the single
 			// CDRR worker. Anything else (4xx/5xx) stays retryable.
 			if code == 404 {
+				mCDRDupAcked.Inc(1)
 				log.Printf("CDRR dup end acked call=%s (already finalized)", req.CallID)
 				return nil
 			}

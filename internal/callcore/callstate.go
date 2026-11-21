@@ -17,7 +17,14 @@ import (
 	"github.com/gvos-io/gvos-core/internal/billingdomain/billing"
 	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"github.com/gvos-io/gvos-core/internal/billingdomain/rate"
+	"github.com/gvos-io/gvos-core/internal/shared/metrics"
 )
+
+// zombieSwept feeds the /metrics exposition (gvos_zombie_swept_total):
+// a rising rate means BYE-loss at the edge, the input to the Interim
+// starvation loop measured on the cloud bench.
+var zombieSwept = metrics.Default.Counter("gvos_zombie_swept_total",
+	"calls force-settled by the zombie sweeper (BYE never arrived)")
 
 // TeardownFunc is invoked when a live call must be torn down (balance
 // exhausted). In production this sends CANCEL/BYE via Kamailio.
@@ -211,6 +218,7 @@ func (m *Manager) sweep(timeout time.Duration) {
 		m.markRelease(v.id, "zombie-timeout")
 		if _, err := m.End(v.id, v.d); err == nil {
 			// settled fine
+			zombieSwept.Inc(1)
 		}
 	}
 }

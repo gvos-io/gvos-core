@@ -10,19 +10,78 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 // Subscription is one customer endpoint (PG-backed in the api wiring;
-// this face is the worker's view).
+// this face is the worker's view). Tenant rides the contract envelope.
 type Subscription struct {
 	ID     string
 	URL    string
 	Secret string
 	Events []string
 	Active bool
+	Tenant string
+}
+
+// SSRF guard: subscription URLs are customer input, and the deliverer
+// POSTs to them from INSIDE the cluster — an unrestricted URL turns
+// every webhook into an internal-network prober (the classic
+// webhook-as-SSRF hole, aimed at 169.254.169.254 metadata or
+// localhost:6379). Rules: https only, no literal-IP hosts in private
+// or loopback ranges, no localhost names, no names resolving to
+// private addresses. DNS rebinding between this check and the dial is
+// the documented residual, covered by the egress policy note in the
+// operations manual.
+func validateWebhookURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("unparseable url: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("scheme %q not allowed (https only)", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("empty host")
+	}
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return fmt.Errorf("host %q not allowed", lower)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isPrivateOrLoopback(ip) {
+			return fmt.Errorf("ip %q not allowed (private/loopback)", host)
+		}
+		return nil
+	}
+	addrs, err := net.LookupHost(host)
+	if err != nil {
+		return fmt.Errorf("resolve %q: %w", host, err)
+	}
+	for _, a := range addrs {
+		if ip := net.ParseIP(a); ip != nil && isPrivateOrLoopback(ip) {
+			return fmt.Errorf("host %q resolves to private %q", host, a)
+		}
+	}
+	return nil
+}
+
+func isPrivateOrLoopback(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsUnspecified() || ip.Equal(net.IPv4bcast)
+}
+
+// ValidateSubscription is the admin-plane gate: create/update paths
+// call this before persisting (see admin_webhooks.go).
+func ValidateSubscription(raw string) error {
+	return validateWebhookURL(raw)
 }
 
 // Deliverer posts signed payloads to subscriptions.
@@ -51,6 +110,7 @@ func (d *Deliverer) deliverOnce(ctx context.Context, sub Subscription, subject s
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GVOS-Event", subject)
+	req.Header.Set("X-GVOS-Version", strconv.Itoa(EnvelopeVersion))
 	req.Header.Set("X-GVOS-Signature", Sign(sub.Secret, time.Now(), body))
 	resp, err := d.Client.Do(req)
 	if err != nil {
@@ -64,9 +124,31 @@ func (d *Deliverer) deliverOnce(ctx context.Context, sub Subscription, subject s
 }
 
 // Deliver drives one (subscription, event) with the full retry
-// schedule. Returns the final attempt count (5 = dead-lettered).
-func (d *Deliverer) Deliver(ctx context.Context, sub Subscription, subject string, payload any) int {
-	body, err := json.Marshal(payload)
+// schedule. payload is the CONTRACT data (not the envelope — the
+// envelope is built here so seq/timestamp are assigned at delivery
+// time, not publish time). Returns the final attempt count
+// (5 = dead-lettered).
+func (d *Deliverer) Deliver(ctx context.Context, sub Subscription, subject string, seq int64, payload any) int {
+	at := time.Now()
+	envelope := Envelope{
+		V:          EnvelopeVersion,
+		Event:      subject,
+		OccurredAt: at.UTC().Format(time.RFC3339Nano),
+		Tenant:     sub.Tenant,
+		Seq:        seq,
+	}
+	if subject == EventCDRCompleted {
+		if d0, err := json.Marshal(payload); err == nil {
+			envelope.Data = json.RawMessage(d0)
+		}
+	} else {
+		// Non-contract events (e.g. internal probes) pass through as
+		// raw data; contract events get their typed projections.
+		if d0, err := json.Marshal(payload); err == nil {
+			envelope.Data = json.RawMessage(d0)
+		}
+	}
+	body, err := json.Marshal(envelope)
 	if err != nil {
 		log.Printf("webhook %s marshal: %v", sub.URL, err)
 		return 0
@@ -94,6 +176,7 @@ func (d *Deliverer) Deliver(ctx context.Context, sub Subscription, subject strin
 type Dispatcher struct {
 	mu    sync.RWMutex
 	subs  []Subscription
+	seq   map[string]int64 // per-subscription contract seq (Envelope.Seq)
 	d     *Deliverer
 	ctx   context.Context
 	events chan eventJob
@@ -107,7 +190,7 @@ type eventJob struct {
 // NewDispatcher wires the fan-out loop (buffered jobs; delivery runs
 // in its own goroutine per event so the NATS consumer never blocks).
 func NewDispatcher(ctx context.Context, d *Deliverer) *Dispatcher {
-	dsp := &Dispatcher{d: d, ctx: ctx, events: make(chan eventJob, 256)}
+	dsp := &Dispatcher{d: d, ctx: ctx, seq: map[string]int64{}, events: make(chan eventJob, 256)}
 	go dsp.loop()
 	return dsp
 }
@@ -139,11 +222,19 @@ func (dsp *Dispatcher) loop() {
 			dsp.mu.RLock()
 			subs := dsp.subs
 			dsp.mu.RUnlock()
-			for _, sub := range subs {
+			for i := range subs {
+				sub := subs[i]
 				if !sub.Active || !WantsEvent(sub.Events, job.subject) {
 					continue
 				}
-				go dsp.deliverLogged(sub, job.subject, job.payload)
+				// Per-subscription monotonic seq (contract: gaps = missed
+				// events; redeliveries repeat the same seq). Assigned here
+				// under the loop so ordering follows event arrival.
+				dsp.mu.Lock()
+				dsp.seq[sub.ID]++
+				seq := dsp.seq[sub.ID]
+				dsp.mu.Unlock()
+				go dsp.deliverLogged(sub, job.subject, seq, job.payload)
 			}
 		}
 	}
@@ -151,8 +242,8 @@ func (dsp *Dispatcher) loop() {
 
 // deliverLogged runs the retry schedule and logs the outcome (the
 // PG delivery-log write is the api wiring's PG seam).
-func (dsp *Dispatcher) deliverLogged(sub Subscription, subject string, payload any) {
-	attempts := dsp.d.Deliver(dsp.ctx, sub, subject, payload)
+func (dsp *Dispatcher) deliverLogged(sub Subscription, subject string, seq int64, payload any) {
+	attempts := dsp.d.Deliver(dsp.ctx, sub, subject, seq, payload)
 	if attempts >= len(Backoff) {
 		log.Printf("webhook %s DEAD-LETTERED after %d attempts (%s)", sub.URL, attempts, subject)
 	}

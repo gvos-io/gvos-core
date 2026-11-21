@@ -18,6 +18,15 @@ import (
 	"github.com/gvos-io/gvos-core/internal/callcore"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/gateway"
 	"github.com/gvos-io/gvos-core/internal/billingdomain/rate"
+	"github.com/gvos-io/gvos-core/internal/shared/metrics"
+)
+
+// Write-path counters for the /metrics exposition: the billing loss
+// alarm is CDR/ledger write-rate dropping to zero, so these two are
+// the most operationally valuable series on the dashboard.
+var (
+	cdrWritten    = metrics.Default.Counter("gvos_cdr_written_total", "CDR rows persisted to PostgreSQL")
+	ledgerWritten = metrics.Default.Counter("gvos_ledger_written_total", "balance_ledger rows persisted to PostgreSQL")
 )
 
 // PG wraps the connection pool.
@@ -198,6 +207,9 @@ func (p *PG) InsertCDR(ctx context.Context, c *callcore.CDR) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("insert cdr: %w", err)
 	}
+	if tag.RowsAffected() > 0 {
+		cdrWritten.Inc(1)
+	}
 	return tag.RowsAffected() > 0, nil
 }
 
@@ -207,6 +219,9 @@ func (p *PG) AppendLedger(ctx context.Context, accountID string, delta, balance 
         INSERT INTO balance_ledger (account_id, delta, balance, reason, call_id)
         VALUES ($1::uuid, $2::numeric, $3::numeric, $4, $5)`,
 		accountID, delta, balance, reason, callID)
+	if err == nil {
+		ledgerWritten.Inc(1)
+	}
 	return err
 }
 

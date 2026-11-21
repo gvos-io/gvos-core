@@ -62,7 +62,7 @@ func TestDeliverRetriesThenSucceeds(t *testing.T) {
 
 	d := NewDeliverer()
 	sub := Subscription{ID: "s1", URL: srv.URL, Secret: "sec9", Events: []string{"gvos.cdr.completed"}, Active: true}
-	attempts := d.Deliver(context.Background(), sub, "gvos.cdr.completed", map[string]string{"call_id": "c-1"})
+	attempts := d.Deliver(context.Background(), sub, "gvos.cdr.completed", 7, map[string]string{"call_id": "c-1"})
 	if attempts != 3 {
 		t.Errorf("attempts = %d, want 3", attempts)
 	}

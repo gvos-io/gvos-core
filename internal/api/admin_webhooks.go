@@ -49,6 +49,23 @@ func (s *Server) handleWebhookCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// SSRF gate (contract §security): the deliverer POSTs from inside
+	// the cluster, so customer URLs must be https + public. Validated
+	// at create AND update; delivery-time DNS check is the second
+	// layer (webhook.ValidateSubscription).
+	if err := webhook.ValidateSubscription(req.URL); err != nil {
+		httpErrorC(w, 400, "BAD_REQUEST", "webhook url rejected: "+err.Error())
+		return
+	}
+	// Contract events ride the v1 envelope (contract.go): the enum is
+	// closed — cdr.completed + call.teardown.
+	allowed := map[string]bool{"gvos.cdr.completed": true, "gvos.call.teardown": true}
+	for _, e := range req.Events {
+		if !allowed[e] {
+			httpErrorC(w, 400, "BAD_REQUEST", "unknown contract event "+e)
+			return
+		}
+	}
 	secret := genWebhookSecret()
 	var id string
 	if s.whStore != nil {

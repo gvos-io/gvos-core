@@ -1,0 +1,29 @@
+{
+  "title": "G-VOS Platform",
+  "uid": "gvos-main",
+  "refresh": "15s",
+  "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {"id": 1, "title": "Live calls", "type": "stat", "gridPos": {"x":0,"y":0,"w":4,"h":6},
+     "targets": [{"expr": "gvos_calls_live"}]},
+    {"id": 2, "title": "Call rate (start/end per sec)", "type": "timeseries", "gridPos": {"x":4,"y":0,"w":10,"h":6},
+     "targets": [{"expr": "rate(gvos_calls_started_total[1m])", "legendFormat": "started"},
+                 {"expr": "rate(gvos_calls_ended_total[1m])", "legendFormat": "ended"}]},
+    {"id": 3, "title": "Bill-lock latency (p50/p95)", "type": "timeseries", "gridPos": {"x":14,"y":0,"w":10,"h":6},
+     "targets": [{"expr": "histogram_quantile(0.50, sum(rate(gvos_callstart_seconds_bucket[5m])) by (le))", "legendFormat": "p50"},
+                 {"expr": "histogram_quantile(0.95, sum(rate(gvos_callstart_seconds_bucket[5m])) by (le))", "legendFormat": "p95"}]},
+    {"id": 4, "title": "CDR / ledger write rate", "type": "timeseries", "gridPos": {"x":0,"y":6,"w":8,"h":6},
+     "targets": [{"expr": "rate(gvos_cdr_written_total[1m])", "legendFormat": "cdr"},
+                 {"expr": "rate(gvos_ledger_written_total[1m])", "legendFormat": "ledger"}]},
+    {"id": 5, "title": "CDR dup-ack (poison path)", "type": "timeseries", "gridPos": {"x":8,"y":6,"w":8,"h":6},
+     "targets": [{"expr": "rate(gvos_cdr_dup_acked_total[5m])", "legendFormat": "dup/s"}]},
+    {"id": 6, "title": "Zombie sweeps", "type": "timeseries", "gridPos": {"x":16,"y":6,"w":8,"h":6},
+     "targets": [{"expr": "rate(gvos_zombie_swept_total[5m])", "legendFormat": "swept/s"}]},
+    {"id": 7, "title": "NATS publish errors", "type": "stat", "gridPos": {"x":0,"y":12,"w":6,"h":5},
+     "targets": [{"expr": "increase(gvos_nats_publish_errors_total[5m])"}]},
+    {"id": 8, "title": "Bus mode", "type": "stat", "gridPos": {"x":6,"y":12,"w":6,"h":5},
+     "targets": [{"expr": "gvos_build_info"}]},
+    {"id": 9, "title": "Process (container, cAdvisor if present)", "type": "timeseries", "gridPos": {"x":12,"y":12,"w":12,"h":5},
+     "targets": [{"expr": "rate(container_cpu_usage_seconds_total{name=\"gvos-gv-core-1\"}[1m])", "legendFormat": "gv-core cpu"}]}
+  ]
+}

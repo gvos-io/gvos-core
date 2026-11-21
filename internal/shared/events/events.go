@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/gvos-io/gvos-core/internal/shared/metrics"
 )
 
 // Subjects published by gv-core. Payloads are plain JSON documents
@@ -324,6 +326,8 @@ func (p *Publisher) pump() {
 			poster = p.core
 		}
 		if err := poster.Post(q.subject, q.data); err != nil {
+			metrics.Default.Counter("gvos_nats_publish_errors_total",
+				"NATS publish failures (after in-process retries)").Inc(1)
 			log.Printf("NATS publish failed (%s): %v", q.subject, err)
 		}
 	}

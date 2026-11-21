@@ -1,0 +1,257 @@
+# G-VOS one-command deployment (spike stage).
+# Brings up: gv-core (billing control plane), Kamailio (signaling),
+# RTPengine (media), a demo SIP gateway, PostgreSQL, and NATS (event
+# bus: gvos.> subjects, JetStream enabled).
+#
+# Usage:
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# Then run the SIPp scenario against kamailio:5060:
+#   docker run --rm --network gvos_default ghcr.io/sipp/sipp:latest \
+#     -sf /scenarios/basic_call.xml -s 1000 kamailio   (see test/sipp/)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gvos
+      POSTGRES_PASSWORD: gvos_dev
+      POSTGRES_DB: gvos
+
+# Observability (M15 first slice): gv-core exposes /metrics;
+  # Prometheus scrapes it; Grafana serves the pre-provisioned panel.
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "gvos-admin"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/dashboards:/var/lib/grafana/dashboards:ro
+      - ./observability/dashboards/provider.yml:/etc/grafana/provisioning/dashboards/provider.yml:ro
+    ports:
+      - "33000:3000"
+    restart: unless-stopped
+
+volumes:
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${GVOS_PG_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gvos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- NATS 3-node cluster (JetStream R3) ------------------------------
+  # The bill-lock RPC (WITH_NATS_RPC) makes the bus call-setup-critical,
+  # so the broker must survive a node loss. Three members route-linked
+  # FULL MESH: every node solicits routes to both peers — a star (all
+  # nodes dialing one seed) splits in two when the hub dies, a full
+  # mesh stays one island. The GVOS stream is created with replicas=3
+  # (GVOS_JS_REPLICAS on gv-core). Aliases: each node also answers to
+  # the service name "nats" (network alias below) so the edge dials
+  # "nats://" and DNS round-robins the pool.
+  nats-1:
+    image: nats:2-alpine
+    command: ["-js", "-m", "8222", "--cluster_name", "gvos", "-n", "nats-1",
+              "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222"]
+    volumes:
+      - nats1-data:/data
+    ports:
+      - "${GVOS_NATS_PORT:-14222}:4222"
+      - "18222:8222" # monitoring endpoint (node 1)
+    networks:
+      default:
+        aliases: [nats]
+
+  nats-2:
+    image: nats:2-alpine
+    command: ["-js", "-m", "8222", "--cluster_name", "gvos", "-n", "nats-2",
+              "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222"]
+    volumes:
+      - nats2-data:/data
+    networks:
+      default:
+        aliases: [nats]
+
+  nats-3:
+    image: nats:2-alpine
+    command: ["-js", "-m", "8222", "--cluster_name", "gvos", "-n", "nats-3",
+              "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222"]
+    volumes:
+      - nats3-data:/data
+    networks:
+      default:
+        aliases: [nats]
+
+  redis:
+    # Runtime-state authority (balances/admission/risk windows).
+    # Ephemeral on purpose in the demo: persistence is PG's job;
+    # a redis restart just re-seeds from the hour rollback.
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gv-core:
+    build:
+      context: ..
+      dockerfile: deploy/gv-core.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats-1:
+        condition: service_started
+      nats-2:
+        condition: service_started
+      nats-3:
+        condition: service_started
+    environment:
+      # Bench: BYE-loss zombies sweeped after 90s (prod default 10m —
+      # every zombie rides the 10s Interim/Redis loop and thousands
+      # starve the RPC responders; measured live_calls 21829).
+      GVOS_ZOMBIE_TIMEOUT: "90s"
+      GVOS_DB_DSN: "postgres://gvos:gvos_dev@postgres:5432/gvos?sslmode=disable"
+      # Multi-server URL: the Go client fails over between cluster
+      # members transparently.
+      GVOS_NATS_URL: "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222"
+      # JetStream stream replicas (R3 on the cluster; 1 for a
+      # single-node broker). The publisher converges an existing
+      # stream to this value at boot (UpdateStream).
+      GVOS_JS_REPLICAS: "3"
+      GVOS_REDIS_URL: "redis://redis:6379"
+      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
+      GVOS_LISTEN: ":8080"
+    volumes:
+      - ./tls:/etc/gvos/tls:ro
+    ports:
+      - "${GVOS_API_PORT:-28080}:8080"
+
+  kamailio:
+    # Self-built image: the upstream CI alpine build lacks nats.so
+    # (see kamailio.Dockerfile). Debian bookworm ships
+    # kamailio-nats-modules (Kamailio 5.6).
+    build:
+      context: .
+      dockerfile: kamailio.Dockerfile
+    image: gvos-kamailio
+    # The signaling edge is a single point of the stack: a dead VM
+    # hiccup (observed SIGTERM storms on Docker Desktop under
+    # sustained 100-200CPS benches, exit 139 with no restart) must
+    # not take SIP down until a human notices.
+    restart: unless-stopped
+    depends_on:
+      gv-core:
+        condition: service_started
+      nats-1:
+        condition: service_started
+      nats-2:
+        condition: service_started
+      nats-3:
+        condition: service_started
+    volumes:
+      - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
+      - ./tls:/etc/kamailio/tls:ro
+    environment:
+      GVOS_CORE_HOST: gv-core
+      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
+      # Per-node identity: builds the unique NATS queue group name
+      # (broadcast semantics across the signaling pool).
+      GVOS_NODE_HOST: kamailio-1
+      # Broker dial for the edge: the round-robin DNS alias "nats"
+      # (compose network alias on ALL cluster members). The module
+      # passes one server string to libnats (no comma lists — a comma
+      # list is treated as one unresolvable host); the alias re-resolves
+      # on every reconnect attempt, so a dead member cycles out, and
+      # the cluster-INFO handshake adds the full mesh as discovered
+      # servers once connected.
+      GVOS_NATS_URL: "nats://nats:4222,nats://nats-2:4222,nats://nats-3:4222"
+      # NATS publish routes on: registration events + CDR over bus.
+      WITH_NATS: "1"
+      WITH_NATS_CDR: "1"
+      # Async bill-lock RPC (tier A): publish gvos.svc.call.start +
+      # t_suspend instead of the blocking http_connect. NOTE: "0" is
+      # still defined for trydefenv — disabling means removing this
+      # line, never setting it to zero.
+      WITH_NATS_RPC: "1"
+      # Bench isolation (GVOS_BENCH_MEDIA_OFF=1): skip the INVITE-path
+      # rtpengine_manage so capacity runs measure the control plane
+      # alone. Pass through GVOS_BENCH_MEDIA_OFF from the host env.
+      GVOS_MEDIA_OFF: "${GVOS_BENCH_MEDIA_OFF:-}"
+    ports:
+      - "${GVOS_SIP_PORT:-15060}:5060/udp"
+      - "${GVOS_SIP_PORT:-15060}:5060/tcp"
+      - "14444:4444/tcp"
+
+  rtpengine:
+    # Media relay built from Debian packages (see rtpengine.Dockerfile);
+    # userspace forwarding (no kernel module in-container).
+    build:
+      context: .
+      dockerfile: rtpengine.Dockerfile
+    image: gvos-rtpengine
+    volumes:
+      - ./entrypoint.sh:/entrypoint.sh:ro
+      - recdata:/recording
+    restart: unless-stopped
+
+  # Transcoding daemon (R1, recording-oss-upgrade-plan): consumes the
+  # rtpengine DUX spool and emits MP3 per SSRC. Opt-in via
+  # `--profile recording` — the spool consumer format issue recorded in
+  # the plan §R0 makes this experimental until the verification batch.
+  # Object storage for recordings (S3-compatible): the local minio
+  # mirrors the production aliyun-OSS S3 mode. Same recording profile.
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: gvos
+      MINIO_ROOT_PASSWORD: gvos-minio-secret
+    ports:
+      - "${GVOS_MINIO_PORT:-29000}:9000"
+      - "${GVOS_MINIO_CONSOLE_PORT:-29001}:9001"
+    profiles: ["recording"]
+
+  recording:
+    build:
+      context: .
+      dockerfile: recording.Dockerfile
+    image: gvos-recording
+    profiles: ["recording"]
+    depends_on: [rtpengine]
+    volumes:
+      - recdata:/recording:ro
+      - recout:/output
+
+  demo-gw:
+    # SIPp UAS: answers INVITEs with 200. ctaloi/sipp is pinned locally.
+    image: ctaloi/sipp:latest
+    entrypoint: ["sipp", "-sn", "uas", "-p", "5060"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  recout:
+  recdata:
+  nats1-data:
+  nats2-data:
+  nats3-data:
+

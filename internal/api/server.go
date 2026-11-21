@@ -594,6 +594,10 @@ func MuxFor(s *Server) http.Handler {
 		w.WriteHeader(200)
 		fmt.Fprintln(w, "ok")
 	})
+
+	// Prometheus scrape (unauthenticated: counters only, no secrets —
+	// gate at the ingress if 8080 is ever exposed publicly).
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	return logWrap(mux)
 }
 

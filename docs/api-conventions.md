@@ -93,3 +93,41 @@ cursor 式:`?cursor=&limit=`(默认 50,上限 500),响应带 `next_cursor`(空=�
 |---|---|
 | 2026-11-19 | v1:错误包络、资源化路由表、fail-closed 内部鉴权、cursor 分页、事件演进规则 |
 | 2026-11-20 | v1.1:事件目录表(golden fixture 守护);query-token 内部鉴权形式;403 细分 code 落地实录 |
+
+## Webhook 契约与载荷版本规则（Phase D，2026-11-21 交付）
+
+### 信封
+每个 webhook POST 的 body 都是版本化信封：
+
+```json
+{
+  "v": 1,
+  "event": "cdr.completed",
+  "occurred_at": "2026-11-21T03:00:30Z",
+  "tenant": "<tenant-uuid>",
+  "seq": 42,
+  "data": { ...事件投影... }
+}
+```
+
+### 版本规则
+- `v` 是**信封版本**。v1 内：字段只增不改不删，枚举值不新增成员；破坏性变更发 v2，双版本并行 ≥6 个月。
+- `data` 是**稳定投影**（`internal/webhook/contract.go` 的 typed struct），内部结构体重构不外泄。
+- **seq 每订阅单调递增**：跳号 = 有事件丢失（客户用 CDR API 对账）；重投**同 seq**（at-least-once）——消费方必须按 `(tenant, event, seq)` 幂等。
+
+### 事件枚举（封闭）
+| event | data 投影 |
+|---|---|
+| `cdr.completed` | CDRCompletedData（call_id/account/dest/时间三件套/duration/billed/cost 小数字符串/release/sip_code/pdd/recorded） |
+| `call.teardown` | CallTeardownData（call_id/reason: balance-exhausted\|zombie-timeout\|admin） |
+
+新事件类型 = 新键（加法，允许但进 changelog）；已知事件的新成员字段同上。
+
+### 签名与重放
+`X-GVOS-Signature: t=<unix>,v1=<hex(hmac-sha256(secret, t + "." + body))>`，重放窗口 5 分钟（`Verify` maxSkew）；`X-GVOS-Event` / `X-GVOS-Version` 头伴随。签名覆盖**信封完整字节**。
+
+### 安全
+订阅 URL **admin 创建/更新时强制 https + 公网地址**（webhook.ValidateSubscription：拒 http/私网/loopback/元数据地址/解析到私网的域名）；投递时二次 DNS 校验。残余风险：DNS rebinding——生产叠加出口策略（operations manual）。
+
+### 投递语义
+at-least-once，重试 1m/5m/30m/2h/6h 共 5 次后 dead-letter（PG delivery log）。**幂等键 = (tenant, event, seq)**。

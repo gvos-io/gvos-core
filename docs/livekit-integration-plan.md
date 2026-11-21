@@ -1,15 +1,15 @@
 # Voice Agent 集成方案（二）：LiveKit SIP——WebRTC/多方场景
 
 **状态**：规划稿（未实施；含 2026-11-20 已核实的上游事实）
-**日期**：2026-11-20
+**日期**：2026-11-20（v2：同步 Pipecat spike 验证结论）
 **范围**：把自托管 LiveKit SIP 挂进 G-VOS 网关模型（Kamailio → rtpengine → livekit-sip → room → agent worker），覆盖：选型边界、呼出/呼入链路、agent 接入两条技术栈、转人工、录音取舍、部署容量。
-**关联**：[pipecat-integration-plan.md](pipecat-integration-plan.md)（**主推荐路径：Pipecat SIPTransport 直连**；平台侧四个硬前提见其 §0，本文不重复）· [02-architecture.md](02-architecture.md) §4 · [recording-oss-upgrade-plan.md](recording-oss-upgrade-plan.md)
+**关联**：[pipecat-integration-plan.md](pipecat-integration-plan.md)（**主推荐路径：Pipecat SIPTransport 直连，Spike 已 e2e 验证**——安装方式/五个上游坑/CDR 证据见其 §1.2/§3/§2；平台侧四个硬前提见其 §0，本文不重复）· [02-architecture.md](02-architecture.md) §4 · [recording-oss-upgrade-plan.md](recording-oss-upgrade-plan.md)
 
 ---
 
 ## 0. 何时选 LiveKit（与 Pipecat 直连的选型边界）
 
-Pipecat 自带 `SIPTransport` 后，**电话↔agent 单人通话不再需要 LiveKit**（少一跳组件、少一次编解码往返，见 [pipecat-integration-plan.md](pipecat-integration-plan.md) §1.1）。LiveKit 在以下场景仍是正确选型：
+Pipecat 自带 `SIPTransport` 后，**电话↔agent 单人通话不再需要 LiveKit**（少一跳组件、少一次编解码往返，且该路径已 e2e 验证——60s 计费通话落 CDR，见 [pipecat-integration-plan.md](pipecat-integration-plan.md) §1.1/§2）。LiveKit 在以下场景仍是正确选型：
 
 | 场景 | 为什么需要 LiveKit | Pipecat 直连为什么不够 |
 |---|---|---|
@@ -114,7 +114,7 @@ LiveKit Cloud 选项：托管版免去自托管运维（host 网络/端口面/�
 
 | 阶段 | 内容 | 出口 |
 |---|---|---|
-| Spike | 单机 compose（host net）livekit+livekit-sip+agent worker；SIPp 打通 | CDR 覆盖 answer/BYE/时长；teardown 强拆对 LiveKit leg 生效 |
+| Spike | 单机 compose（host net）livekit+livekit-sip+agent worker；SIPp 打通（对齐 [pipecat-integration-plan.md](pipecat-integration-plan.md) 已验证的 SIPp 场景与网关挂载法） | CDR 覆盖 answer/BYE/时长；teardown 强拆对 LiveKit leg 生效 |
 | Phase 1 | dispatch rule 按 caller 建 room + livekit-agents 接入 + 录音 fork 验证 | 多 agent room 隔离实测；录音按 call-id 关联 |
 | Phase 2 | 共用 DID 表/账户口径/`gw_id` 指派（与 Pipecat 方案同一批建设） | carrier 呼入→LiveKit room 全链路计费闭环 |
 | Phase 3 | 冷转 REFER 经 rtpengine 重锚定 e2e + 房间级报表 | 转接两段话单分列；网页参与者通话跑通（本方案独有出口） |
