@@ -255,3 +255,56 @@ func (dsp *Dispatcher) SubscriptionCount() []Subscription {
 	defer dsp.mu.RUnlock()
 	return dsp.subs
 }
+
+// PublishEnvelope queues one CONTRACT event: event is the contract
+// name (cdr.completed / call.teardown), tenant the owning tenant, and
+// data the typed projection struct. The envelope (v/seq/occurred_at)
+// is built at delivery time per subscription.
+func (dsp *Dispatcher) PublishEnvelope(event, tenant string, data any) {
+	dsp.mu.RLock()
+	subs := dsp.subs
+	dsp.mu.RUnlock()
+	for i := range subs {
+		sub := subs[i]
+		if !sub.Active || !WantsEvent(sub.Events, "gvos."+event) {
+			continue
+		}
+		dsp.mu.Lock()
+		dsp.seq[sub.ID]++
+		seq := dsp.seq[sub.ID]
+		dsp.mu.Unlock()
+		go dsp.deliverEnvelope(sub, event, tenant, seq, data)
+	}
+}
+
+// deliverEnvelope builds the contract envelope with the subscription's
+// secret and drives the retry schedule.
+func (dsp *Dispatcher) deliverEnvelope(sub Subscription, event, tenant string, seq int64, data any) {
+	at := time.Now()
+	env := Envelope{V: EnvelopeVersion, Event: event,
+		OccurredAt: at.UTC().Format(time.RFC3339Nano), Tenant: tenant, Seq: seq}
+	if raw, err := json.Marshal(data); err == nil {
+		env.Data = raw
+	}
+	body, err := json.Marshal(env)
+	if err != nil {
+		log.Printf("webhook %s envelope marshal: %v", sub.URL, err)
+		return
+	}
+	for attempt := 1; attempt <= len(Backoff); attempt++ {
+		res := dsp.d.deliverOnce(dsp.ctx, sub, event, body)
+		if res.OK {
+			return
+		}
+		delay, more := NextRetry(attempt)
+		if !more {
+			log.Printf("webhook %s DEAD-LETTERED after %d attempts (%s)", sub.URL, attempt, event)
+			return
+		}
+		select {
+		case <-dsp.ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+	}
+}

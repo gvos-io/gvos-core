@@ -708,17 +708,24 @@ type RecordingRow struct {
 // WebhookRow is one subscription row (Secret rides along: the
 // dispatcher signs with it; the admin list endpoint must not echo it).
 type WebhookRow struct {
-	ID     string
-	URL    string
-	Secret string
-	Events []string
-	Active bool
+	ID       string
+	URL      string
+	Secret   string
+	Events   []string
+	Active   bool
+	TenantID string
 }
 
 // CreateWebhook inserts one subscription.
 func (p *PG) CreateWebhook(ctx context.Context, url, secret string, events []string) (string, error) {
+	return p.CreateWebhookTenant(ctx, url, secret, events, "")
+}
+
+// CreateWebhookTenant inserts one subscription bound to a tenant
+// (Phase C tenant plane) or to the admin ("" tenant).
+func (p *PG) CreateWebhookTenant(ctx context.Context, url, secret string, events []string, tenantID string) (string, error) {
 	var id string
-	err := p.pool.QueryRow(ctx, `INSERT INTO webhook_subscriptions (url, secret, events) VALUES ($1, $2, $3) RETURNING id::text`, url, secret, events).Scan(&id)
+	err := p.pool.QueryRow(ctx, `INSERT INTO webhook_subscriptions (url, secret, events, tenant_id) VALUES ($1, $2, $3, $4) RETURNING id::text`, url, secret, events, tenantID).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create webhook: %w", err)
 	}
@@ -728,7 +735,7 @@ func (p *PG) CreateWebhook(ctx context.Context, url, secret string, events []str
 // ListWebhooks returns active subscriptions (secrets included — the
 // dispatcher needs them to sign; the admin API never echoes them).
 func (p *PG) ListWebhooks(ctx context.Context) ([]WebhookRow, error) {
-	rows, err := p.pool.Query(ctx, `SELECT id::text, url, secret, events, active FROM webhook_subscriptions WHERE active`)
+	rows, err := p.pool.Query(ctx, `SELECT id::text, url, secret, events, active, tenant_id FROM webhook_subscriptions WHERE active`)
 	if err != nil {
 		return nil, err
 	}
@@ -736,7 +743,7 @@ func (p *PG) ListWebhooks(ctx context.Context) ([]WebhookRow, error) {
 	var out []WebhookRow
 	for rows.Next() {
 		var r WebhookRow
-		if err := rows.Scan(&r.ID, &r.URL, &r.Secret, &r.Events, &r.Active); err != nil {
+		if err := rows.Scan(&r.ID, &r.URL, &r.Secret, &r.Events, &r.Active, &r.TenantID); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

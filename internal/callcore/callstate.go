@@ -633,6 +633,20 @@ func (m *Manager) Live() int {
 	return len(m.calls)
 }
 
+// LiveByAccounts counts live calls whose account is in the given set
+// (tenant-plane slice of the live count; the manager owns the map).
+func (m *Manager) LiveByAccounts(set map[string]bool) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, c := range m.calls {
+		if set[c.AccountID] {
+			n++
+		}
+	}
+	return n
+}
+
 // Info returns the start time of a live call (for duration derivation
 // when the BYE event carries no duration).
 func (m *Manager) Info(callID string) (time.Time, bool) {

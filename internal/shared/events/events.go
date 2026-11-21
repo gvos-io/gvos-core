@@ -34,6 +34,14 @@ import (
 	"github.com/gvos-io/gvos-core/internal/shared/metrics"
 )
 
+// Contract subjects (Phase D webhook events). These are the
+// customer-facing event names after the gvos. prefix strip.
+const (
+	SubjectAccountLowBalance = "gvos.account.low_balance"
+	SubjectRiskBlocked       = "gvos.risk.blocked"
+	SubjectPackageExhausted  = "gvos.package.exhausted"
+)
+
 // Subjects published by gv-core. Payloads are plain JSON documents
 // (CDR, teardown reason, audit diff) — no envelope: each payload is
 // already self-describing and versioned through the stream itself.

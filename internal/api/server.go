@@ -69,6 +69,11 @@ type Server struct {
 	workers       []*events.Consumer   // running async workers (stopped at exit)
 	workerNames   []string             // surfaced in /v1/stats
 	startAt       time.Time
+
+	// Tenant CDR stream taps (Phase D): per-connection subscribers of
+	// /v1/tenant/cdr-stream, fed from storeCdr. Non-blocking drops.
+	cdrTapsMu sync.Mutex
+	cdrTaps   []*cdrTap
 }
 
 // emit is the single event-bus seam: nil-safe and best-effort. The
@@ -274,6 +279,11 @@ func (s *Server) newCallManager() *callcore.Manager {
 	m := callcore.NewManager(s.store, func(callID, reason string) {
 		log.Printf("TEARDOWN %s reason=%s", callID, reason)
 		s.emit(events.SubjectCallTeardown, map[string]string{"call_id": callID, "reason": reason})
+		if reason == "balance-exhausted" {
+			// Contract event (Phase D): the billing alarm a customer's
+			// finance desk reacts to — balance drained mid-call.
+			s.emit(events.SubjectAccountLowBalance, map[string]string{"call_id": callID, "reason": reason})
+		}
 		if s.events == nil {
 			// No bus: pre-NATS behavior, executor runs inline.
 			dispatchTeardown(callID, reason)
@@ -565,6 +575,18 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("GET /v1/admin/webhooks", s.handleWebhookList)
 	mux.HandleFunc("DELETE /v1/admin/webhooks/{id}", s.handleWebhookDelete)
 
+	// Tenant self-service plane (Phase C): read-only, scoped to the
+	// API key's tenant. Roles tenant|agent only.
+	mux.HandleFunc("GET /v1/tenant/me", s.handleTenantMe)
+	mux.HandleFunc("GET /v1/tenant/accounts", s.handleTenantAccounts)
+	mux.HandleFunc("GET /v1/tenant/cdrs", s.handleTenantCDRs)
+	mux.HandleFunc("GET /v1/tenant/stats", s.handleTenantStats)
+	mux.HandleFunc("GET /v1/tenant/packages/usage", s.handleTenantPackageUsage)
+	mux.HandleFunc("POST /v1/tenant/webhooks", s.handleTenantWebhookCreate)
+	mux.HandleFunc("GET /v1/tenant/webhooks", s.handleTenantWebhookList)
+	mux.HandleFunc("GET /v1/tenant/cdr-stream", s.handleTenantCDRStream)
+
+	// Recording pipeline (R2/R3).
 	// Recording pipeline (R2/R3).
 	mux.HandleFunc("GET /v1/recording/{call_id}", s.handleRecordingList)
 	mux.HandleFunc("GET /v1/recording/{call_id}/{track}", s.handleRecordingPlay)

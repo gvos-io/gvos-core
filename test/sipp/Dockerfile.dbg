@@ -1,0 +1,2 @@
+FROM s379dbg
+RUN rm -rf /tmp/sipp-3.7.9 && tar xzf /s.tgz -C /tmp && mkdir -p /tmp/sipp-3.7.9/pugixml && tar xzf /p.tgz -C /tmp/sipp-3.7.9/pugixml --strip-components=1 && cd /tmp/sipp-3.7.9 && cmake . -DCMAKE_BUILD_TYPE=Release -DUSE_PCAPPLAY=1 2>&1 | tail -8

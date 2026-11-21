@@ -1,0 +1,5 @@
+FROM debian:bookworm-slim
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources && apt-get update -qq && apt-get install -y -qq build-essential cmake libncurses-dev libssl-dev pkg-config >/dev/null 2>&1
+COPY sipp379.tar.gz /s.tgz
+COPY pugixml.tar.gz /p.tgz
+RUN tar xzf /s.tgz -C /tmp && mkdir -p /tmp/sipp-3.7.9/third_party/pugixml && tar xzf /p.tgz -C /tmp/sipp-3.7.9/third_party/pugixml --strip-components=1 && cd /tmp/sipp-3.7.9 && cmake . -DCMAKE_BUILD_TYPE=Release -DUSE_PCAPPLAY=1 >/dev/null && make -j4 >/dev/null 2>&1; find /tmp/sipp-3.7.9 -name sipp -type f

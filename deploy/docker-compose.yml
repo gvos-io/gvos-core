@@ -180,9 +180,12 @@ services:
       context: .
       dockerfile: rtpengine.Dockerfile
     image: gvos-rtpengine
-    restart: unless-stopped
+    # CLI binds 127.0.0.1 (the in-image config's [::1]:2224 fails on
+    # hosts without IPv6 localhost — Alibaba Cloud Linux kernel).
     volumes:
+      - ./entrypoint.sh:/entrypoint.sh:ro
       - recdata:/recording
+    restart: unless-stopped
 
   # Transcoding daemon (R1, recording-oss-upgrade-plan): consumes the
   # rtpengine DUX spool and emits MP3 per SSRC. Opt-in via

@@ -78,6 +78,9 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	// dest_prefix rule for B must fire even when the caller dialed X).
 	// Estimated cost for the cost-cap check uses the 60s lock basis.
 	if h := s.risk.CheckCall(accID, actualDest, money.MustFromYuan(0.05)); h.Blocked {
+		s.emit(events.SubjectRiskBlocked, map[string]string{
+			"account_id": accID, "dest": actualDest, "rule_id": h.RuleID, "reason": h.Reason,
+		})
 		return 403, map[string]errorEnvelope{"error": {Code: "FORBIDDEN", Message: "risk-blocked [" + h.RuleID + "]: " + h.Reason}}
 	} else if h.Alerted {
 		log.Printf("RISK-ALERT account=%s rule=%s: %s", accID, h.RuleID, h.Reason)
@@ -159,16 +162,19 @@ const maxInMemoryCDRs = 10000
 // lock is what keeps handleCDRList/statsBody racing them safe.
 func (s *Server) storeCdr(cdr *callcore.CDR) {
 	s.cdrsMu.Lock()
-	defer s.cdrsMu.Unlock()
 	if len(s.cdrs) >= maxInMemoryCDRs {
 		// Drop from the head: copy the newest max-1 forward, then
 		// overwrite the last slot. Steady-state cost is one memmove,
 		// not a realloc.
 		copy(s.cdrs, s.cdrs[1:])
 		s.cdrs[len(s.cdrs)-1] = cdr
+		s.cdrsMu.Unlock()
+		s.tapAndPublish(cdr)
 		return
 	}
 	s.cdrs = append(s.cdrs, cdr)
+	s.cdrsMu.Unlock()
+	s.tapAndPublish(cdr)
 }
 
 // callEnd finalizes billing and returns the CDR. ctx drives the
@@ -198,7 +204,15 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 	// Subscription package: free allowance first, then discount on the
 	// billable remainder. The CDR carries the effective cost; free
 	// seconds are recorded in the record for the bill view.
-	if pr := s.pkg.Apply(cdr.AccountID, cdr.BilledSecs, cdr.Cost); pr.BillableSecs < float64(cdr.BilledSecs) || pr.Discount != 1 {
+	pr := s.pkg.Apply(cdr.AccountID, cdr.BilledSecs, cdr.Cost)
+	if pr.FreeSecs == 0 && pr.BillableSecs == 0 && cdr.BilledSecs > 0 {
+		// Contract event (Phase D): the free allowance and the paid
+		// tier both drained — the package is exhausted for this cycle.
+		s.emit(events.SubjectPackageExhausted, map[string]string{
+			"account_id": cdr.AccountID, "call_id": cdr.CallID,
+		})
+	}
+	if pr.BillableSecs < float64(cdr.BilledSecs) || pr.Discount != 1 {
 		if float64(cdr.BilledSecs) > 0 {
 			// Ratio math stays float (proportion); the product returns
 			// to fixed point, ceil'd (never undercharge).

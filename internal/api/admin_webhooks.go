@@ -20,6 +20,7 @@ import (
 // mode keeps subscriptions process-local and non-persistent).
 type WebhookStore interface {
 	CreateWebhook(ctx context.Context, url, secret string, events []string) (string, error)
+	CreateWebhookTenant(ctx context.Context, url, secret string, events []string, tenantID string) (string, error)
 	ListWebhooks(ctx context.Context) ([]store.WebhookRow, error)
 	DeleteWebhook(ctx context.Context, id string) (int, error)
 }
@@ -136,7 +137,7 @@ func (s *Server) refreshWebhookDispatcher() {
 	}
 	subs := make([]webhook.Subscription, 0, len(rows))
 	for _, rw := range rows {
-		subs = append(subs, webhook.Subscription{ID: rw.ID, URL: rw.URL, Secret: rw.Secret, Events: rw.Events, Active: rw.Active})
+		subs = append(subs, webhook.Subscription{ID: rw.ID, URL: rw.URL, Secret: rw.Secret, Events: rw.Events, Active: rw.Active, Tenant: rw.TenantID})
 	}
 	s.whDispatch.SetSubscriptions(subs)
 }

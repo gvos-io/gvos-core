@@ -1,0 +1,31 @@
+groups:
+  - name: gvos-billing
+    rules:
+      # 计费零写入 = 账务管道断裂（CDR/ledger 双路径同停）
+      - alert: GvosCDRWriteStalled
+        expr: sum(rate(gvos_cdr_written_total[10m])) < 0.001 and on() (rate(gvos_calls_ended_total[10m]) > 0)
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "CDR writes stalled while calls are ending"}
+      - alert: GvosLedgerWriteStalled
+        expr: sum(rate(gvos_ledger_written_total[10m])) < 0.001 and on() (rate(gvos_calls_ended_total[10m]) > 0)
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "ledger writes stalled while calls are ending"}
+  - name: gvos-edge
+    rules:
+      - alert: GvosZombieSweepSpike
+        expr: sum(rate(gvos_zombie_swept_total[5m])) > 0.5
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "BYE-loss zombies sweeping continuously — edge or gateway losing BYEs"}
+      - alert: GvosCDRDupSpike
+        expr: sum(rate(gvos_cdr_dup_acked_total[5m])) > 0.2
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "cdr.raw re-publish race recurring — check BYE retransmission path"}
+      - alert: GvosNatsPublishFailing
+        expr: sum(rate(gvos_nats_publish_errors_total[5m])) > 0.1
+        for: 3m
+        labels: {severity: critical}
+        annotations: {summary: "NATS JetStream publish failures — event bus unhealthy"}
