@@ -1,0 +1,71 @@
+# Kamailio edge: the node sysctl fix (net.core.rmem_default=4MB measured
+# on the bench — 416KB dropped 401s at 200CPS) rides a PRIVILEGED
+# initContainer because rmem_* are non-namespaced sysctls. The kamailio
+# cfg is a ConfigMap; the entrypoint (env + sed of @NODE@/@NATS_URL@)
+# is also config-managed so fixes ship without image rebuilds.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: kamailio-entrypoint, namespace: gvos}
+data:
+  entrypoint.sh: |
+    #!/bin/bash
+    set -e
+    NODE="${GVOS_NODE_HOST:-kamailio-$(hostname)}"
+    NODE_SAFE=$(printf '%s' "$NODE" | tr -c 'a-zA-Z0-9.-' '-')
+    sed -e "s/@NODE@/$NODE_SAFE/g" -e "s/@NATS_URL@/$GVOS_NATS_URL/" /etc/kamailio/kamailio.cfg > /tmp/kamailio-run.cfg
+    exec kamailio -f /tmp/kamailio-run.cfg -DD -E
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: kamailio, namespace: gvos}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: kamailio}}
+  template:
+    metadata: {labels: {app: kamailio}}
+    spec:
+      containers:
+      - name: kamailio
+        image: gvos-kamailio:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - {name: GVOS_NODE_HOST, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+        - {name: GVOS_NATS_URL, value: "nats://nats-client.gvos.svc.cluster.local:4222"}
+        - {name: WITH_NATS, value: "1"}
+        - {name: WITH_NATS_CDR, value: "1"}
+        - {name: WITH_NATS_RPC, value: "1"}
+        ports:
+        - {containerPort: 5060, protocol: UDP}
+        - {containerPort: 5060, protocol: TCP}
+        readinessProbe:
+          # TCP socket probe (NOT kamcmd): the ctl socket races with
+          # kamailio startup, and every probe failure triggers a
+          # SIGTERM whose nats-module teardown path segfaults
+          # (q_malloc BUG, K8s-only because compose never restarts
+          # the edge under probes).
+          tcpSocket: {port: 5060}
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 30
+        resources: {requests: {cpu: 250m, memory: 128Mi}, limits: {memory: 512Mi}}
+        volumeMounts:
+        - {name: cfg, mountPath: /etc/kamailio/kamailio.cfg, subPath: kamailio.cfg}
+        - {name: entrypoint, mountPath: /usr/local/bin/entrypoint.sh, subPath: entrypoint.sh}
+        - {name: tls, mountPath: /etc/kamailio/tls}
+      volumes:
+      - name: cfg
+        configMap: {name: kamailio-cfg}
+      - name: entrypoint
+        configMap: {name: kamailio-entrypoint}
+      - name: tls
+        secret: {secretName: kamailio-tls-secret}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: kamailio, namespace: gvos}
+spec:
+  selector: {app: kamailio}
+  ports:
+  - {name: udp, port: 5060, protocol: UDP, targetPort: 5060}
+  - {name: tcp, port: 5060, protocol: TCP, targetPort: 5060}

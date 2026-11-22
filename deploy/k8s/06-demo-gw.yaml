@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: demo-gw, namespace: gvos}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: demo-gw}}
+  template:
+    metadata: {labels: {app: demo-gw}}
+    spec:
+      containers:
+      - name: demo-gw
+        image: ctaloi/sipp:latest
+        imagePullPolicy: IfNotPresent
+        command: ["sipp", "-sn", "uas", "-p", "5060"]
+        ports: [{containerPort: 5060, protocol: UDP}]
+        resources: {requests: {cpu: 100m, memory: 32Mi}, limits: {memory: 128Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: demo-gw, namespace: gvos}
+spec:
+  selector: {app: demo-gw}
+  ports: [{port: 5060, protocol: UDP, targetPort: 5060}]

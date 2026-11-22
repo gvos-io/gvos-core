@@ -1,0 +1,25 @@
+# RTPengine: ng control 2223/udp from kamailio pods; media ports stay
+# pod-local for the bench (no real media in the load scenarios). For
+# production with media, switch to hostNetwork + a DaemonSet per node.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: rtpengine, namespace: gvos}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: rtpengine}}
+  template:
+    metadata: {labels: {app: rtpengine}}
+    spec:
+      containers:
+      - name: rtpengine
+        image: gvos-rtpengine:latest
+        imagePullPolicy: IfNotPresent
+        ports: [{containerPort: 2223, protocol: UDP}]
+        resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 512Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: rtpengine, namespace: gvos}
+spec:
+  selector: {app: rtpengine}
+  ports: [{port: 2223, protocol: UDP, targetPort: 2223}]
