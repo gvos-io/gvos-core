@@ -1,4 +1,4 @@
-// Package gvos is the minimal Go SDK for the G-VOS tenant plane
+// Package gvos is the minimal Go SDK for the gvos tenant plane
 // (api-roadmap Phase E first slice). It wraps only the Phase C
 // read-only surface — the stable contract. Generated clients
 // (oapi-codegen) replace this once the spec lands in CI (Phase E

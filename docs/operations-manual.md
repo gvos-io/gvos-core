@@ -1,6 +1,6 @@
-# G-VOS 运维手册
+# gvos 运维手册
 
-**适用**：G-VOS v0.3+（compose 单机 / compose-ha 双机）
+**适用**：gvos v0.3+（compose 单机 / compose-ha 双机）
 **读者**：系统运维工程师、交付实施工程师
 
 ---

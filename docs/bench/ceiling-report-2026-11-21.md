@@ -1,6 +1,6 @@
 # 真实容量天花板：阶梯压测终报（2026-11-21 凌晨）
 
-**目标**：拿到 G-VOS 在本机（Windows Docker Desktop）的真实容量天花板，并定位天花板的归属（平台 vs 宿主 vs 压测机）。
+**目标**：拿到 gvos 在本机（Windows Docker Desktop）的真实容量天花板，并定位天花板的归属（平台 vs 宿主 vs 压测机）。
 **方法**：多 SIPp 实例分摊聚合速率（单实例 ~100CPS 上限）；逐档冷却；栈内 tcpdump 审计信令流；/proc/net/snmp UDP 计数器；60s 保持场景测并发通话数。
 
 ## 容量天花板（本机口径，媒体开全栈）
@@ -14,7 +14,7 @@
 | **并发通话** | **9853 路同时在线**（live_calls 实测峰值；9622 CDR 全接通，PDD p99 4ms / max 8ms） | 10k 并发达成 |
 | 栈侧计数器 | InErrors≈0（修 4MB 缓冲后）、runaway=0、CDR=ledger 精确、CPU 峰值 gv-core 67%/Kamailio 19%（10k 并发时） | 平台本身有余量 |
 
-**结论：本机天花板 ≈ 170CPS 稳态 / 200CPS 抖动区 / ~1 万路并发。瓶颈在 Docker Desktop 桥接与宿主调度，不在 G-VOS。**
+**结论：本机天花板 ≈ 170CPS 稳态 / 200CPS 抖动区 / ~1 万路并发。瓶颈在 Docker Desktop 桥接与宿主调度，不在 gvos。**
 
 ## 天花板归属证据链（本轮新挖出）
 
@@ -26,7 +26,7 @@
 
 ## 与裸 Kamailio 基线的差距（更新）
 
-上次结论维持并加强：控制面逐呼叫开销 3-5ms（RPC 2.8ms + 异步落账），PDD p99 4-6ms 在所有档位不变——**G-VOS 在 170CPS/万级并发上不构成 Kamailio 的减项**。本轮 9853 并发、PDD max 8ms 是最硬的证据。裸 Kamailio 在同一宿主上会遇到同样的桥接长尾（它也要收发这些 UDP 包）；把 G-VOS 换成纯 Kamailio 转发，本机天花板提升有限——天花板是宿主的。
+上次结论维持并加强：控制面逐呼叫开销 3-5ms（RPC 2.8ms + 异步落账），PDD p99 4-6ms 在所有档位不变——**gvos 在 170CPS/万级并发上不构成 Kamailio 的减项**。本轮 9853 并发、PDD max 8ms 是最硬的证据。裸 Kamailio 在同一宿主上会遇到同样的桥接长尾（它也要收发这些 UDP 包）；把 gvos 换成纯 Kamailio 转发，本机天花板提升有限——天花板是宿主的。
 
 ## 复现与运维要点
 
@@ -55,11 +55,11 @@ docker exec gvos-kamailio-1 sh -c 'grep Udp: /proc/net/snmp | tail -1'
 
 **实验**：极简 Kamailio 代理（`test/sipp/bare-kamailio.cfg`，同样的 401 鉴权流程 + record-route + t_relay 转发，无 RPC/计费/媒体），同宿主、同网桥、同 SIPp 场景。
 
-**结果**：裸基线**比 G-VOS 死得更早**——
+**结果**：裸基线**比 gvos 死得更早**——
 - 50CPS：132/500（74% 失败），35 秒内 11571 条 SHM OOM（`t_newtran out of mem` / `relay_reply cannot alloc`），SHM 2GB 仍然泄漏；
-- G-VOS 同场景：500/500 满分，PDD p99 4-6ms。
+- gvos 同场景：500/500 满分，PDD p99 4-6ms。
 
-**教训（这就是 G-VOS 边缘层的存在意义）**："直接用 Kamailio"不是开箱即用的容量数字——极简配置缺重传吸收、事务卫生、缓冲调优、auth 缓存、janitor，在持续负载下先于 G-VOS 崩溃。裸 Kamailio 的"万级 CPS"官方数字需要 default.cfg 级别的完整工程配置 + Linux 裸机，与本实验的极简 cfg 不可比。
+**教训（这就是 gvos 边缘层的存在意义）**："直接用 Kamailio"不是开箱即用的容量数字——极简配置缺重传吸收、事务卫生、缓冲调优、auth 缓存、janitor，在持续负载下先于 gvos 崩溃。裸 Kamailio 的"万级 CPS"官方数字需要 default.cfg 级别的完整工程配置 + Linux 裸机，与本实验的极简 cfg 不可比。
 
 **平台真实容量的正确估法**（本机证据外推）：
 - 每呼叫平台成本：RPC 2.8ms（异步）+ 计费异步落账 + 边缘路由 ~1ms —— CPU 全程 <1%@100CPS；

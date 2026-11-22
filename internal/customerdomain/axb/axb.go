@@ -4,7 +4,7 @@
 // are time-boxed and per-tenant; X numbers are allocated from a
 // virtual pool (9xxxxxxxxx) and recycled on expiry.
 //
-// Call flow (G-VOS): the INVITE arrives with dest = X; gv-core's call
+// Call flow (gvos): the INVITE arrives with dest = X; gv-core's call
 // start resolves the binding, bills against B's rate, and returns a
 // rewrite_dest instruction — the signaling edge rewrites the R-URI
 // before relaying to the gateway. B's callback path (PSTN DID into

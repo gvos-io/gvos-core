@@ -1,4 +1,4 @@
-"""Minimal Python SDK for the G-VOS tenant plane (Phase E first slice).
+"""Minimal Python SDK for the gvos tenant plane (Phase E first slice).
 Read-only surface; generated clients replace this at Phase E step 2."""
 import requests
 

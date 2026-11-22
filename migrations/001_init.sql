@@ -1,4 +1,4 @@
--- G-VOS schema v0.1
+-- gvos schema v0.1
 -- Mirrors the in-memory model in internal/{account,rate,callstate}.
 -- Conventions: money as NUMERIC(18,7) (VOS 7-decimal precision),
 -- all timestamps UTC, soft-delete via deleted_at on mutable business

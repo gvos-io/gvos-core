@@ -20,7 +20,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Key prefix for every G-VOS key (see redis-adoption-plan §4 for the
+// Key prefix for every gvos key (see redis-adoption-plan §4 for the
 // full layout table).
 const (
 	Prefix = "gvos:"

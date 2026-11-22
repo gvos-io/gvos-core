@@ -1,6 +1,6 @@
 # 阿里云真实容量天花板（2026-11-21，nmg_ztgwyc3）
 
-**环境**：阿里云 ECS 4核/7.3GB/99GB（Alibaba Cloud Linux 4，内核 6.6），Docker 24 + compose 2.26；G-VOS 全栈（NATS 3 节点 R3 + Kamailio children=32 + RTPengine + PG16 + Redis7）。**loadgen 与被测栈同机**（SIPp 容器）。
+**环境**：阿里云 ECS 4核/7.3GB/99GB（Alibaba Cloud Linux 4，内核 6.6），Docker 24 + compose 2.26；gvos 全栈（NATS 3 节点 R3 + Kamailio children=32 + RTPengine + PG16 + Redis7）。**loadgen 与被测栈同机**（SIPp 容器）。
 **调优**：sysctl rmem_default=4MB/rmem_max=8MB（持久化 /etc/sysctl.d/99-gvos.conf）→ Kamailio SO_RCVBUF=4MB。
 
 ## 容量天花板（4核 ECS，同机 loadgen 口径）

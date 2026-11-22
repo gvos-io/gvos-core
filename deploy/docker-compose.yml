@@ -1,4 +1,4 @@
-# G-VOS one-command deployment (spike stage).
+# gvos one-command deployment (spike stage).
 # Brings up: gv-core (billing control plane), Kamailio (signaling),
 # RTPengine (media), a demo SIP gateway, PostgreSQL, and NATS (event
 # bus: gvos.> subjects, JetStream enabled).

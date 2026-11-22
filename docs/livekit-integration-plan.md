@@ -2,7 +2,7 @@
 
 **状态**：规划稿（未实施；含 2026-11-20 已核实的上游事实）
 **日期**：2026-11-20（v2：同步 Pipecat spike 验证结论）
-**范围**：把自托管 LiveKit SIP 挂进 G-VOS 网关模型（Kamailio → rtpengine → livekit-sip → room → agent worker），覆盖：选型边界、呼出/呼入链路、agent 接入两条技术栈、转人工、录音取舍、部署容量。
+**范围**：把自托管 LiveKit SIP 挂进 gvos 网关模型（Kamailio → rtpengine → livekit-sip → room → agent worker），覆盖：选型边界、呼出/呼入链路、agent 接入两条技术栈、转人工、录音取舍、部署容量。
 **关联**：[pipecat-integration-plan.md](pipecat-integration-plan.md)（**主推荐路径：Pipecat SIPTransport 直连，Spike 已 e2e 验证**——安装方式/五个上游坑/CDR 证据见其 §1.2/§3/§2；平台侧四个硬前提见其 §0，本文不重复）· [02-architecture.md](02-architecture.md) §4 · [recording-oss-upgrade-plan.md](recording-oss-upgrade-plan.md)
 
 ---
@@ -13,25 +13,25 @@ Pipecat 自带 `SIPTransport` 后，**电话↔agent 单人通话不再需要 Li
 
 | 场景 | 为什么需要 LiveKit | Pipecat 直连为什么不够 |
 |---|---|---|
-| 浏览器/WebRTC 参与者进同一通通话（网页客服、可視化面板） | room = 天然多方容器；WebRTC（Opus/DTLS/ICE）由 LiveKit 承担 | G-VOS 媒体面是 rtpengine **转发**不是混音器；SIP 侧与浏览器侧接不到一起 |
+| 浏览器/WebRTC 参与者进同一通通话（网页客服、可視化面板） | room = 天然多方容器；WebRTC（Opus/DTLS/ICE）由 LiveKit 承担 | gvos 媒体面是 rtpengine **转发**不是混音器；SIP 侧与浏览器侧接不到一起 |
 | 多路混合（caller + agent + 人工客服同房间） | room 参与者模型 + 房间级动态加入 | SIPTransport 一实例一通话，无房间语义 |
 | agent 弹性扩缩走生态 | livekit-agents worker 按房间自动调度 | Pipecat 直连扩缩 = 手工网关条目管理（§3 对比） |
 | 房间级录制/Egress | Egress 输出含 WebRTC 参与者的完整房间录像 | rtpengine fork 只见 SIP leg（取舍见 §8） |
 
-**结论**：两条方案不是二选一，是**同一套 G-VOS 网关模型下的两个目的地类型**——普通 agent 通话走 Pipecat 直连（[pipecat-integration-plan.md](pipecat-integration-plan.md)），要进房间的通话把目的地指派到 livekit-sip。pipeline（VAD/ASR/LLM/TTS/打断）两侧可共用同一套 Pipecat 代码，只换 transport（SIPTransport ↔ LiveKit transport）。
+**结论**：两条方案不是二选一，是**同一套 gvos 网关模型下的两个目的地类型**——普通 agent 通话走 Pipecat 直连（[pipecat-integration-plan.md](pipecat-integration-plan.md)），要进房间的通话把目的地指派到 livekit-sip。pipeline（VAD/ASR/LLM/TTS/打断）两侧可共用同一套 Pipecat 代码，只换 transport（SIPTransport ↔ LiveKit transport）。
 
 ## 1. 上游调研结论（2026-11-20 已核实，含出处）
 
 来源：[livekit/sip](https://github.com/livekit/sip)（GitHub README）、[LiveKit 端口与防火墙](https://docs.livekit.io/transport/self-hosting/ports-firewall)、[SIP trunk 配置](https://docs.livekit.io/telephony/start/sip-trunk-setup)、[冷转接（SIP REFER）](https://docs.livekit.io/telephony/features/transfers/cold)。配置字段名以所选版本 README 为准。
 
-| 机制 | 事实 | 对 G-VOS 的意义 |
+| 机制 | 事实 | 对 gvos 的意义 |
 |---|---|---|
 | 端口面 | SIP 信令 **UDP 5060**（`sip_port` 可配）+ 媒体 **UDP 10000-20000**；生产建议 SIP-TLS | 容量预算口径 = 端口面；防火墙/安全组按此开 |
 | 容器形态 | 默认大 UDP 端口段在 Docker 网络下难处理，**官方建议 `--network host`** | compose/K8s 形态需为 livekit-sip 单独处理网络模式 |
-| 依赖 | livekit-sip 必须连 **LiveKit server + Redis** | G-VOS 栈内已有 Redis（redis-adoption Phase 0-5），**分实例或分 DB** 复用，避免 key 域冲突（见 §10） |
-| trunk/dispatch | inbound trunk（号码/认证/host 匹配）→ dispatch rule（individual caller = 每caller一个 room / direct = 固定 room）；outbound trunk 用于 livekit-sip 向外呼出（本文主场景用不到，转接除外） | G-VOS 发起的 agent 通话，对 livekit-sip 而言是 inbound trunk 命中 + dispatch rule 建 room |
+| 依赖 | livekit-sip 必须连 **LiveKit server + Redis** | gvos 栈内已有 Redis（redis-adoption Phase 0-5），**分实例或分 DB** 复用，避免 key 域冲突（见 §10） |
+| trunk/dispatch | inbound trunk（号码/认证/host 匹配）→ dispatch rule（individual caller = 每caller一个 room / direct = 固定 room）；outbound trunk 用于 livekit-sip 向外呼出（本文主场景用不到，转接除外） | gvos 发起的 agent 通话，对 livekit-sip 而言是 inbound trunk 命中 + dispatch rule 建 room |
 | agent 派遣 | room config `agents`（自动）或 explicit dispatch API | 按 DID/租户分 room 派不同 agent |
-| 转接 | **冷转 = SIP REFER**（`transfer_sip_participant`），warm/bridge 模式另有模式 | 转人工原语可用；REFER 落 G-VOS 边缘，目标由 DID 路由接住（§7） |
+| 转接 | **冷转 = SIP REFER**（`transfer_sip_participant`），warm/bridge 模式另有模式 | 转人工原语可用；REFER 落 gvos 边缘，目标由 DID 路由接住（§7） |
 | 版本节奏 | livekit/sip 迭代快，dispatch/trunk API 有过 breaking 调整（issue [#256](https://github.com/livekit/sip/issues/256) 类问题） | spike 锁版本；trunk/dispatch 配置脚本化以便升级迁移 |
 
 ## 2. 目标拓扑
@@ -44,7 +44,7 @@ Pipecat 自带 `SIPTransport` 后，**电话↔agent 单人通话不再需要 Li
                                       │ SIP + RTP (PCMU)
                                       ▼
                      livekit-sip (host net, :5060, UDP 10000-20000)
-                         │ inbound trunk(G-VOS) + dispatch rule
+                         │ inbound trunk(gvos) + dispatch rule
                          ▼
                      LiveKit room（每 caller 一个 room 或 direct room）
                          ▼
@@ -52,9 +52,9 @@ Pipecat 自带 `SIPTransport` 后，**电话↔agent 单人通话不再需要 Li
                         或 pipecat（LiveKit transport，同一套 pipeline）
 ```
 
-要点：钱面不动（同 [pipecat-integration-plan.md](pipecat-integration-plan.md) §2）——agent 通话就是一通普通话务；teardown 强拆对 LiveKit leg 同样成立（`gvos.call.teardown` → `dlg.terminate_dlg` 拆的是 G-VOS↔livekit-sip 的 dialog，room 随 SIP 拆线终止）。
+要点：钱面不动（同 [pipecat-integration-plan.md](pipecat-integration-plan.md) §2）——agent 通话就是一通普通话务；teardown 强拆对 LiveKit leg 同样成立（`gvos.call.teardown` → `dlg.terminate_dlg` 拆的是 gvos↔livekit-sip 的 dialog，room 随 SIP 拆线终止）。
 
-## 3. G-VOS 侧配置：livekit-sip 就是网关
+## 3. gvos 侧配置：livekit-sip 就是网关
 
 ```json
 POST /v1/admin/gateways
@@ -70,7 +70,7 @@ POST /v1/admin/gateways
 ## 4. 呼出链路（电话 → agent）
 
 1. 租户分机拨打 agent 号段 → 边缘流水线照常（BILL_LOCK 以 from_user=租户账户锁定，锁账成立）。
-2. `GW_DISPATCH` → livekit-sip:5060。对 livekit-sip 而言这是 **inbound trunk 命中**（按 host/号码匹配 G-VOS trunk 配置）。
+2. `GW_DISPATCH` → livekit-sip:5060。对 livekit-sip 而言这是 **inbound trunk 命中**（按 host/号码匹配 gvos trunk 配置）。
 3. dispatch rule 建 room（individual caller：room 名含主叫号码与随机串；或 direct room）→ agent 派遣（room config agents 自动加入，或 explicit dispatch 指定 agent）。
 4. worker（livekit-agents 或 pipecat LiveKit transport）加入 room 应答 → 200 OK 经原路返回边缘 → `gvos.svc.call.answer` → interim 扣减。
 5. BYE → `gvos.cdr.raw` → CDRR → PG。
@@ -81,7 +81,7 @@ POST /v1/admin/gateways
 
 链路与缺口同 [pipecat-integration-plan.md](pipecat-integration-plan.md) §5（DID 表 + 呼入账户口径 + `gw_id` 指派，两方案共用同一批 Phase 2 建设，本文不重复）。LiveKit 侧增量只有一条：**dispatch rule 按 DID 建/选 room**（trunk 配置里的号码匹配），使不同 DID 落到不同 agent/租户 room。
 
-LiveKit Cloud 选项：托管版免去自托管运维（host 网络/端口面/升级），但数据出域 + 按量计费，与 G-VOS 私有化交付姿态冲突——**默认自托管**；客户明确要求托管降级时才开。
+LiveKit Cloud 选项：托管版免去自托管运维（host 网络/端口面/升级），但数据出域 + 按量计费，与 gvos 私有化交付姿态冲突——**默认自托管**；客户明确要求托管降级时才开。
 
 ## 6. agent 接入两条技术栈（pipeline 复用）
 
@@ -92,14 +92,14 @@ LiveKit Cloud 选项：托管版免去自托管运维（host 网络/端口面/�
 
 ## 7. 转人工（Phase 3，依赖 DID 路由）
 
-- agent 判定转人工 → `transfer_sip_participant` 冷转（[官方文档](https://docs.livekit.io/telephony/features/transfers/cold)）：livekit-sip 向 SIP leg（即 G-VOS 边缘）发 **REFER** → in-dialog loose_route 分支（`kamailio.cfg:246-274`）转发 → G-VOS 按 refer 目标（坐席 DID）路由接住。
+- agent 判定转人工 → `transfer_sip_participant` 冷转（[官方文档](https://docs.livekit.io/telephony/features/transfers/cold)）：livekit-sip 向 SIP leg（即 gvos 边缘）发 **REFER** → in-dialog loose_route 分支（`kamailio.cfg:246-274`）转发 → gvos 按 refer 目标（坐席 DID）路由接住。
 - warm/bridge 转接模式（先咨询后拼接）涉及多方房间操作，Phase 3 单独设计。
 - 新话单新计费、两段时长分列的语义与 [pipecat-integration-plan.md](pipecat-integration-plan.md) §6 相同（两方案共用 O3 开放问题）。
 - 开放问题：REFER 经 rtpengine 的媒体重锚定（转接目标应答后 rtpengine 重协商）需 e2e 验证，spike 列入。
 
 ## 8. 录音取舍：fork 权威不动，Egress 是补充
 
-- **权威不变**：rtpengine 在 G-VOS↔livekit-sip leg 上 fork（`record:true` → `start_recording()`，既有链路），拿到的是**全对话混合**（caller+agent 两方向都在这条 leg 上）——话务商验收口径的录音产物，与 [recording-oss-upgrade-plan.md](recording-oss-upgrade-plan.md) 管道直接衔接。
+- **权威不变**：rtpengine 在 gvos↔livekit-sip leg 上 fork（`record:true` → `start_recording()`，既有链路），拿到的是**全对话混合**（caller+agent 两方向都在这条 leg 上）——话务商验收口径的录音产物，与 [recording-oss-upgrade-plan.md](recording-oss-upgrade-plan.md) 管道直接衔接。
 - **LiveKit Egress**（房间级录制）产出含 WebRTC 参与者的完整录像，但产物落在 LiveKit 侧、需拉回归档，且计费口径是 LiveKit 的——**仅作房间级补充，不作钱面录音权威**。
 - 分轨（坐席/用户分开）仍走 recording-oss 方案的 rtpengine `--output-single`/`mix-method=channels`，与 LiveKit 无关。
 
@@ -108,7 +108,7 @@ LiveKit Cloud 选项：托管版免去自托管运维（host 网络/端口面/�
 - **compose**：新增 `livekit`、`livekit-sip` 服务；livekit-sip 按[官方建议](https://github.com/livekit/sip) `--network host`（UDP 5060 + 10000-20000 端口段不适合常规 Docker 映射）；K8s 用 hostNetwork pod 或 NodePort+外部 LB 按 UDP 段扩。
 - **Redis 复用纪律**：livekit 的 Redis 与 gv-core 的 Redis **分实例或分 DB index**（redis-adoption-plan 已划定 gv-core key 域所有权，跨组件混用会破坏 key 域纪律）；NATS 无 livekit 依赖。
 - **容量预算口径**：并发通话数 × 媒体端口对（UDP 10000-20000 ≈ 单实例 5k 路 SDP 上限口径，实际以 livekit server 容量压测为准，spike 记录基线）。
-- **安全**：livekit-sip ↔ G-VOS 全内网；公网仅暴露 Kamailio（同 [pipecat-integration-plan.md](pipecat-integration-plan.md) §8）；生产开 SIP-TLS；LiveKit API key 走 livekit 侧配置，不进 gv-core settings。
+- **安全**：livekit-sip ↔ gvos 全内网；公网仅暴露 Kamailio（同 [pipecat-integration-plan.md](pipecat-integration-plan.md) §8）；生产开 SIP-TLS；LiveKit API key 走 livekit 侧配置，不进 gv-core settings。
 
 ## 10. 里程碑与验证点
 

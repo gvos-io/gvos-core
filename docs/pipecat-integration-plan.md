@@ -2,7 +2,7 @@
 
 **状态**：规划稿 + **Spike 已验证**（2026-11-20 e2e 打通：SIPp → Kamailio → rtpengine → pipecat worker，60s 计费通话落 CDR；安装与五个上游坑全部实测，见 §2/§3）
 **日期**：2026-11-20
-**范围**：用 Pipecat `SIPTransport`（trunk 模式）把 AI agent 通话直接挂在 G-VOS 现有网关模型上——Kamailio → rtpengine → pipecat worker **直连**，不经 LiveKit。覆盖：安装、Spike 交付物与实测结论、呼出/呼入链路、worker 池、转人工、计费语义、DashScope 适配、部署与 Phase 1-3。
+**范围**：用 Pipecat `SIPTransport`（trunk 模式）把 AI agent 通话直接挂在 gvos 现有网关模型上——Kamailio → rtpengine → pipecat worker **直连**，不经 LiveKit。覆盖：安装、Spike 交付物与实测结论、呼出/呼入链路、worker 池、转人工、计费语义、DashScope 适配、部署与 Phase 1-3。
 **关联**：[livekit-integration-plan.md](livekit-integration-plan.md)（何时选 LiveKit：WebRTC 参与者/多方/房间语义）· [02-architecture.md](02-architecture.md) §4（呼叫数据流）· [recording-oss-upgrade-plan.md](recording-oss-upgrade-plan.md)（录音管道，录音权威不动）
 **Spike 交付物**：[deploy/agent-worker/](../deploy/agent-worker/)（bot.py + Dockerfile）· [test/sipp/agent_call.xml](../test/sipp/agent_call.xml)（agent 通话场景）
 
@@ -25,11 +25,11 @@
 
 来源：[SIPTransport 官方参考](https://reference-server.pipecat.ai/en/latest/api/pipecat.transports.sip.transport.html) + GitHub main 分支源码级核实（commit 834903d）。
 
-| 机制 | 事实 | 对 G-VOS 的意义 |
+| 机制 | 事实 | 对 gvos 的意义 |
 |---|---|---|
-| 两种模式 | registered（REGISTER 到 SIP 服务器）vs **trunk**（`reg_interval=0`，不 REGISTER，对端直拨监听端口） | **只用 trunk 模式**：G-VOS 边缘无 lookup 路由，注册了也路由不进来 |
+| 两种模式 | registered（REGISTER 到 SIP 服务器）vs **trunk**（`reg_interval=0`，不 REGISTER，对端直拨监听端口） | **只用 trunk 模式**：gvos 边缘无 lookup 路由，注册了也路由不进来 |
 | 入站 | `auto_answer=True` 默认应答；事件链 `on_first_participant_joined → on_client_connected` | 对端 = Kamailio（经 rtpengine），INVITE 到 worker 端口即建立 |
-| 出站 | `start_dialout`（`sipUri`/`phoneNumber`），对 Digest 挑战用 `auth_user` 应答 | agent 反呼可直接 INVITE 到 G-VOS 边缘，正好对上 accounts 表认证 |
+| 出站 | `start_dialout`（`sipUri`/`phoneNumber`），对 Digest 挑战用 `auth_user` 应答 | agent 反呼可直接 INVITE 到 gvos 边缘，正好对上 accounts 表认证 |
 | 并发模型 | **一 transport 实例一通话**；每实例独占 `SIPConnection`；runtime 级 `max_concurrent_calls` 默认 2 | 扩容 = N 进程 × 独立端口 → 映射成 N 条网关记录（§6）；spike 实测一个 call task 结束会拆整个 runtime（进程须按一通话一生命周期设计，或改造为 per-call 重建） |
 | 媒体 | RTP；codec 连接级配置（`audio_codecs`，baresip 名 `pcmu`/`pcma`）；`audio_out_10ms_chunks` 默认 2 贴合 RTP 节奏 | PCMU/8000 直达 pipeline；**少一次 PCMU↔Opus↔PCMU 往返（对比 LiveKit 路径）** |
 | DTMF | `send_dtmf`（`rtpevent`/`info`/`auto`，连接级 `dtmf_mode`）；接收 `on_dtmf_event` | 收号/IVR 式交互可用 |
@@ -47,7 +47,7 @@
 
 - Pipecat 官方未内置 DashScope/阿里云服务（issue [#2126](https://github.com/pipecat-ai/pipecat/issues/2126)、[#3443](https://github.com/pipecat-ai/pipecat/issues/3443)）。
 - 社区插件 [`pipecat-dashscope`](https://github.com/AbaoFromCUG/pipecat-dashscope) 提供 STT/LLM/TTS 封装与预设 profile。
-- G-VOS 已有 DashScope WS 协议经验：`internal/mediamain/dashscope/dashscope.go`。两条路径见 §10。
+- gvos 已有 DashScope WS 协议经验：`internal/mediamain/dashscope/dashscope.go`。两条路径见 §10。
 
 ## 2. Spike 实测结论（2026-11-20，e2e 已通）
 
@@ -57,7 +57,7 @@
 
 - SIPp 侧：`Successful call 1, Call Length 60s`（401 挑战 → 带认证 INVITE → worker 180/200 → ACK → 60s → BYE）。
 - worker 侧：`INCOMING`（sipCallId/From/To 事件载荷齐全）→ `SIP handshake established` → `CLOSED`。
-- **G-VOS CDR 完整覆盖**（spike 唯一验证点，通过）：`CallID/AccountID/Dest/StartTime` 正常，`Duration 60 / BilledSecs 60 / Cost 0.0500 / RatePrefix 8613 / PDDMs 159 / SIPCode 200 / Recorded true`——计费、录音开关、PDD 全部落到 agent 通话上，**零控制面改动**。
+- **gvos CDR 完整覆盖**（spike 唯一验证点，通过）：`CallID/AccountID/Dest/StartTime` 正常，`Duration 60 / BilledSecs 60 / Cost 0.0500 / RatePrefix 8613 / PDDMs 159 / SIPCode 200 / Recorded true`——计费、录音开关、PDD 全部落到 agent 通话上，**零控制面改动**。
 - 挂载方式即 §6 的网关模型：`PUT /v1/admin/gateways` 加 `agent-1 → sip:<worker-ip>:5070, priority 0`，NATS 广播 → GW_DISPATCH 选它，`gwfail` 熔断/`GW_FAILOVER` 重试语义原样继承。
 
 **⚠️ 已知限制（spike 观测，未做修复性开发）**：
@@ -93,10 +93,10 @@
                        pipecat worker ×N（trunk 模式, :5070-507x）
                        SIPTransport → pipeline:
                        VAD → ASR(DashScope) → LLM → TTS → 打断
-                       （ASR/LLM/TTS 出公网，与 G-VOS 无 API 耦合）
+                       （ASR/LLM/TTS 出公网，与 gvos 无 API 耦合）
 ```
 
-- **worker 对 G-VOS 零 API 依赖**：信令走 Kamailio、媒体走 rtpengine，钱面全部留在 gv-core——agent 只是媒体对端的 B 端。
+- **worker 对 gvos 零 API 依赖**：信令走 Kamailio、媒体走 rtpengine，钱面全部留在 gv-core——agent 只是媒体对端的 B 端。
 - teardown 广播（`gvos.call.teardown` → `dlg.terminate_dlg`）照常生效（U3 既有验证链路；agent 通话复测列 §12）。
 
 ## 5. 呼出链路（电话 → agent；spike 即此，已验证）
@@ -127,7 +127,7 @@ PUT /v1/admin/gateways
 
 ## 7. 呼入链路（carrier DID → agent）与两个前置缺口（Phase 2）
 
-链路：运营商 trunk → G-VOS 边缘（IP 白名单准入）→ **DID 路由** → worker。
+链路：运营商 trunk → gvos 边缘（IP 白名单准入）→ **DID 路由** → worker。
 
 1. **DID 登记与账户口径**：新增 DID 表（号码、归属租户、目的地、启停），admin API + 广播；BILL_LOCK 在 trunk 准入语义下按 `$rU`（被叫 DID）反查归属账户锁定——替代 `from_user=$fU`。**不可跳过**。
 2. **按被叫选路**：推荐**控制面在 BILL_LOCK 应答里带 `gw_id`**（DID→目的地已查好），边缘直接 `$du`；载荷加字段向后兼容（02-architecture §9），并顺带把 per-destination LCR 做真（替掉全局 best-index 近似）。备选：边缘 GW_DISPATCH 加被叫前缀匹配（cfg 词法敏感区，慎动）。
@@ -135,7 +135,7 @@ PUT /v1/admin/gateways
 
 ## 8. 转人工（Phase 3，依赖 §7）
 
-- worker 判定转人工 → `sip_refer`/`sip_attended_transfer` → REFER 落 G-VOS 边缘 → in-dialog loose_route 转发 → 目标（坐席 DID）由 §7 的 DID 路由接住。
+- worker 判定转人工 → `sip_refer`/`sip_attended_transfer` → REFER 落 gvos 边缘 → in-dialog loose_route 转发 → 目标（坐席 DID）由 §7 的 DID 路由接住。
 - 新话单新计费；两段时长分列（close reason=`transferred` 有语义锚点）。
 - 开放问题：`sip_call_transfer` 在 SIPTransport 报错（Daily 云专属），转接语义只可用 refer 族。
 
@@ -145,7 +145,7 @@ PUT /v1/admin/gateways
 - **监听面**：worker 端口只在内网可达；公网入口只有 Kamailio。
 - **准入**：trunk → IP 白名单；worker ↔ 边缘全内网。
 - **凭据**：spike 期实测 admin key 会因 gv-core 重启轮换（BOOTSTRAP 打日志一次性输出）——运维脚本要从日志取当前 key，或预先在 PG 里落固定 key。
-- **可观测**：worker 出 Prometheus 文本端口（通话数/RTT/打断次数）；G-VOS 侧 CDR pdd/qos 已覆盖话务面。
+- **可观测**：worker 出 Prometheus 文本端口（通话数/RTT/打断次数）；gvos 侧 CDR pdd/qos 已覆盖话务面。
 
 ## 10. agent 技术栈（pipeline + DashScope）
 

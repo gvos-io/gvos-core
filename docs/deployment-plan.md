@@ -2,7 +2,7 @@
 
 **状态**：定稿（随代码演进维护）
 **日期**：2026-11-19
-**范围**：G-VOS 全组件的部署架构、已落地的部署形态、各形态操作要点与生产前缺口，以及分阶段的部署方式建议。
+**范围**：gvos 全组件的部署架构、已落地的部署形态、各形态操作要点与生产前缺口，以及分阶段的部署方式建议。
 **关联**：[02-architecture](02-architecture.md)（架构设计）· [operations-manual](operations-manual.md)（日常运维）· [redis-adoption-plan](redis-adoption-plan.md)（gv-core 多副本前置项）
 
 ---

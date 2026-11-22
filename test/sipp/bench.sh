@@ -8,7 +8,7 @@ STEPS="${1:-5 10 20 40}"
 SCENDIR="$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || pwd)"
 DEST=kamailio
 
-echo "G-VOS capacity benchmark - $(date -u +%FT%TZ)"
+echo "gvos capacity benchmark - $(date -u +%FT%TZ)"
 echo "scenario: load.xml (Digest auth, 500ms call, UDP)"
 printf "%-8s %-7s %-8s %-7s %-8s\n" "rate" "calls" "success" "failed" "setup(ms)"
 

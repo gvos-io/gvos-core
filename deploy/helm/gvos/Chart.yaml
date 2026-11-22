@@ -1,4 +1,4 @@
-# G-VOS Helm chart (skeleton for the K8s deployment track).
+# gvos Helm chart (skeleton for the K8s deployment track).
 # Values here mirror deploy/compose-ha.yml semantics:
 #   - gv-core: Deployment with PG DSN
 #   - kamailio: Deployment x2 (stateless signaling; scale at will)
@@ -7,7 +7,7 @@
 #   - service + ingress for the admin/event API
 apiVersion: v2
 name: gvos
-description: G-VOS cloud-native telephony billing and switching platform
+description: gvos cloud-native telephony billing and switching platform
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

@@ -20,7 +20,7 @@ PSQL() { docker exec gvos-postgres-1 psql -U gvos -tA -c "$1"; }
 
 log() { docker logs gvos-kamailio-1 --since 30m 2>&1; }
 
-echo "G-VOS 100CPS benchmark - $(date -u +%FT%TZ) - rate=${RATE}cps x${ROUNDS} rounds x ${CALLS} calls"
+echo "gvos 100CPS benchmark - $(date -u +%FT%TZ) - rate=${RATE}cps x${ROUNDS} rounds x ${CALLS} calls"
 printf "%-6s %-7s %-8s %-8s %-9s %-7s %-7s %-8s %-10s %-11s %-10s\n" \
   "round" "calls" "success" "failed" "setup(ms)" "cdr" "ledger" "runaway" "redeliv" "dur0_pct" "ans_cov"
 

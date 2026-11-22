@@ -124,7 +124,7 @@ func buildOpenAPI() map[string]any {
 	return map[string]any{
 		"openapi": "3.1.0",
 		"info": map[string]any{
-			"title":       "G-VOS API",
+			"title":       "gvos API",
 			"version":     "1.0.0",
 			"description": "Event-driven soft exchange + billing + routing + risk control. Conventions: docs/api-conventions.md. Auth: Bearer API key (admin planes), X-GVOS-Internal (signaling planes).",
 		},

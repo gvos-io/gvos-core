@@ -1,5 +1,5 @@
 // regload is the registration load generator: UDP REGISTER with Digest
-// (MD5) auth against G-VOS's edge, driving N distinct AORs so the
+// (MD5) auth against gvos's edge, driving N distinct AORs so the
 // usrloc table and authcache scale like a real deployment.
 //
 // Why not SIPp: 3.5.x cannot substitute per-call usernames into

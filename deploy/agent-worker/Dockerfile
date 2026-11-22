@@ -1,4 +1,4 @@
-# G-VOS voice-agent spike worker image.
+# gvos voice-agent spike worker image.
 #
 # pipecat-ai PyPI releases (1.16.0 as of this writing) do not yet
 # include the transports/sip module — it lives on GitHub main. Pin the

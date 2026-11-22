@@ -7,7 +7,7 @@
 1. 构建 pjsua 容器（Debian bookworm + pjsua 源码编译，约 30min）：
    - 依赖：build-essential + pjproject 2.14 源码（codeload.github.com/pjsip/pjproject）
    - `./configure --with-openssl && make dep && make && make install`
-2. 场景：pjsua（SRTP=mandatory, DTLS-SRTP）→ G-VOS → SIPp gw（明文 RTP）
+2. 场景：pjsua（SRTP=mandatory, DTLS-SRTP）→ gvos → SIPp gw（明文 RTP）
    - rtpengine 做 SRTP(A-leg) ↔ RTP(B-leg) 的转封装
 3. 验证点：
    - pjsua 日志显示 `SRTP status: Active ... DTLS-SRTP`
@@ -17,7 +17,7 @@
 
 ## 验证路径 B：浏览器 WebRTC（产品级 DTLS-SRTP）
 
-- G-VOS 已有 WSS 端点（1444，自签 TLS）；浏览器 WebRTC 的媒体**强制 DTLS-SRTP**（RFC 8122 已内建于规范）
+- gvos 已有 WSS 端点（1444，自签 TLS）；浏览器 WebRTC 的媒体**强制 DTLS-SRTP**（RFC 8122 已内建于规范）
 - 实现：管理台增加 sip.js/WebRTC 软电话页（jssip 3.x 通过 WSS 注册 + 呼叫），RTPengine 收到浏览器 SDP（UDP/TLS/RTP/SAVPF）即 DTLS-SRTP
 - 这是产品功能（Web 软电话），规划进 M15/WebRTC 计划，验证随实现交付
 

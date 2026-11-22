@@ -1,4 +1,4 @@
-// Command gvos-migrate imports VOS exports into a G-VOS deployment.
+// Command gvos-migrate imports VOS exports into a gvos deployment.
 //
 // Pipeline:
 //   gvos-migrate extract -accounts a.csv -rates r.csv -gateways g.csv -out snapshot.json
@@ -167,10 +167,10 @@ func cmdPlan(args []string) error {
 	iss, _ := migrate.Validate(s.Accounts, s.Rates, s.Gateways)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "# VOS -> G-VOS 迁移计划\n\n生成：%s\n\n", time.Now().Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(&b, "# VOS -> gvos 迁移计划\n\n生成：%s\n\n", time.Now().Format("2006-01-02 15:04:05"))
 	fmt.Fprintf(&b, "## 概览\n\n- 账户 %d 个（含代理层级）\n- 费率 %d 条\n- 网关 %d 个\n\n", len(s.Accounts), len(s.Rates), len(s.Gateways))
 	fmt.Fprintf(&b, "## 语义差异决策（默认保持 VOS 行为）\n\n")
-	fmt.Fprintf(&b, "| # | VOS 行为 | G-VOS 行为 | 决策 |\n|---|---|---|---|\n")
+	fmt.Fprintf(&b, "| # | VOS 行为 | gvos 行为 | 决策 |\n|---|---|---|---|\n")
 	fmt.Fprintf(&b, "| 1 | 计费步长 60+6 直迁 | 同 | 保持 VOS |\n| 2 | 7 位小数第 8 位进一 | 同 | 保持 VOS |\n| 3 | 负余额账户照常呼 | 预付余额 >= 0 | 快照结转为 0 |\n| 4 | 上级费率组缺省 | 需指定 | 落 default 组 |\n\n")
 	fmt.Fprintf(&b, "## 校验发现\n\n")
 	for _, i := range iss {
@@ -183,7 +183,7 @@ func cmdPlan(args []string) error {
 func cmdLoad(args []string) error {
 	fs := flag.NewFlagSet("load", flag.ExitOnError)
 	snapPath := fs.String("snapshot", "snapshot.json", "snapshot file")
-	api := fs.String("api", "http://127.0.0.1:8080", "G-VOS API base URL")
+	api := fs.String("api", "http://127.0.0.1:8080", "gvos API base URL")
 	token := fs.String("token", "", "admin bearer token")
 	dry := fs.Bool("dry-run", false, "validate only, do not write")
 	fs.Parse(args)

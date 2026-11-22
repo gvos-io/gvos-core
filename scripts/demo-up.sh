@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# G-VOS one-command demo: prerequisites check, stack up, seed, smoke
+# gvos one-command demo: prerequisites check, stack up, seed, smoke
 # call, and print the access URLs. Works on Git Bash (Windows) and
 # Linux. Usage: bash scripts/demo-up.sh
 set -uo pipefail
 cd "$(dirname "$0")/../deploy"
 
 fail() { echo "FAIL: $1"; exit 1; }
-echo "== G-VOS demo installer =="
+echo "== gvos demo installer =="
 
 # 1. Prerequisites.
 command -v docker >/dev/null 2>&1 || fail "docker not found - install Docker Desktop / Engine first"
@@ -50,7 +50,7 @@ fi
 STATS=$(curl -s http://127.0.0.1:8080/v1/stats)
 echo
 echo "=============================================="
-echo " G-VOS demo is up."
+echo " gvos demo is up."
 echo "----------------------------------------------"
 echo " Admin console : http://127.0.0.1:8080/ui"
 echo " Admin token   : dev-admin-token (legacy; deprecated once a key"

@@ -9,7 +9,7 @@ PER="${2:-3000}"
 SCENDIR="$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || pwd)"
 PSQL() { docker exec gvos-postgres-1 psql -U gvos -tA -c "$1"; }
 
-echo "G-VOS CPS ladder - $(date -u +%FT%TZ)"
+echo "gvos CPS ladder - $(date -u +%FT%TZ)"
 printf "%-9s %-6s %-8s %-8s %-9s %-9s %-9s %-8s %-8s\n" "rate" "insts" "attempt" "cdr" "succ%" "pdd_p99" "pdd_max" "failures" "quality"
 
 for STEP in $STEPS; do

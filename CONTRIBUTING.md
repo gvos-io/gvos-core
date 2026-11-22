@@ -1,6 +1,6 @@
-# Contributing to G-VOS
+# Contributing to gvos
 
-感谢关注 G-VOS。Issue 与 PR 均欢迎。
+感谢关注 gvos。Issue 与 PR 均欢迎。
 
 ## 开发环境
 

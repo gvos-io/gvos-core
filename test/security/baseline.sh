@@ -27,7 +27,7 @@ chk() { # name, expected, actual
 
 code() { curl -s -o /dev/null -w "%{http_code}" -m 5 "$@"; }
 
-echo "== G-VOS security baseline against $BASE =="
+echo "== gvos security baseline against $BASE =="
 
 # --- 1. Admin plane requires auth.
 chk "admin accounts without token -> 401" 401 "$(code "$BASE/v1/admin/accounts")"

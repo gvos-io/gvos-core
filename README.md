@@ -1,6 +1,6 @@
 <div align="center">
 
-# G-VOS
+# gvos
 
 **云原生话务运营平台 — 软交换编排 · 实时精确计费 · NATS 事件总线 · 内置风控**
 
@@ -10,11 +10,11 @@
 
 </div>
 
-> **English** — G-VOS is a cloud-native telecom operations platform (softswitch orchestration + real-time billing + fraud control) built as a Go control plane over Kamailio/RTPengine. All state changes flow through a NATS JetStream event bus: CDR persistence, audit trail, teardown execution and multi-replica config sync are durable consumers, so the billing answer never waits on a database. One command brings up a working demo; the billing core is fully unit-tested with a reconciliation-first design.
+> **English** — gvos is a cloud-native telecom operations platform (softswitch orchestration + real-time billing + fraud control) built as a Go control plane over Kamailio/RTPengine. All state changes flow through a NATS JetStream event bus: CDR persistence, audit trail, teardown execution and multi-replica config sync are durable consumers, so the billing answer never waits on a database. One command brings up a working demo; the billing core is fully unit-tested with a reconciliation-first design.
 
-## 为什么是 G-VOS
+## 为什么是 gvos
 
-传统话务运营系统把信令、媒体、计费塞在一个"一体化大盒子"里：扩展靠换大机器、计费语义是黑盒、出了问题无从对账。G-VOS 反其道而行：
+传统话务运营系统把信令、媒体、计费塞在一个"一体化大盒子"里：扩展靠换大机器、计费语义是黑盒、出了问题无从对账。gvos 反其道而行：
 
 - **控制面自研（Go）**：计费、路由决策、租户/代理链、风控全部代码透明，测试先行
 - **事件驱动**：CDR 落库、审计、强制拆线执行、Webhook 分发全是 NATS durable 消费者——**计费应答永不等待数据库**，写失败进重投队列而非丢失

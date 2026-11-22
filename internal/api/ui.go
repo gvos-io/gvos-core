@@ -7,7 +7,7 @@ const adminHTML = `<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>G-VOS 管理台</title>
+<title>gvos 管理台</title>
 <style>
   :root { --bg:#0f172a; --card:#1e293b; --line:#334155; --fg:#e2e8f0;
           --dim:#94a3b8; --acc:#38bdf8; --ok:#34d399; --warn:#fbbf24; --err:#f87171; }
@@ -44,7 +44,7 @@ const adminHTML = `<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>G-VOS 管理台</h1>
+  <h1>gvos 管理台</h1>
   <span id="mode" style="color:var(--dim)"></span>
   <div class="tok">
     <input id="tok" type="password" placeholder="Admin Token" style="width:180px">

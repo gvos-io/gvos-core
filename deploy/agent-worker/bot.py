@@ -1,8 +1,8 @@
-# G-VOS voice-agent spike worker (pipecat-integration-plan.md §10 Spike).
+# gvos voice-agent spike worker (pipecat-integration-plan.md §10 Spike).
 #
 # One SIP endpoint per process (trunk mode: no REGISTER). Answers the
 # INVITE, holds the call open until BYE — deliberately no LLM/ASR/TTS:
-# the spike verifies the G-VOS side only (BILL_LOCK, answer event, CDR,
+# the spike verifies the gvos side only (BILL_LOCK, answer event, CDR,
 # teardown). The pipeline slot list is where Phase 1 will insert
 # VAD/ASR/LLM/TTS.
 #
@@ -88,7 +88,7 @@ async def _run_call(transport: SIPTransport):
 class AgentWorker:
     def __init__(self):
         # Trunk mode: reg_interval=0 — the worker never REGISTERs, the
-        # G-VOS edge (Kamailio GW_DISPATCH) dials this process directly.
+        # gvos edge (Kamailio GW_DISPATCH) dials this process directly.
         # Inbound matching: baresip routes an INVITE to the account
         # whose address-of-record matches the Request-URI. Kamailio
         # relays the INVITE with the original callee URI

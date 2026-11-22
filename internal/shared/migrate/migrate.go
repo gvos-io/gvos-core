@@ -1,4 +1,4 @@
-// Package migrate implements the VOS -> G-VOS migration pipeline:
+// Package migrate implements the VOS -> gvos migration pipeline:
 // extract (parse VOS exports) -> validate (health report) -> plan
 // (differences + mapping decisions) -> load (import via admin API).
 //

@@ -1,4 +1,4 @@
-# G-VOS scrape config: gv-core's /metrics is the platform face; add
+# gvos scrape config: gv-core's /metrics is the platform face; add
 # node/kamailio exporters here when they are deployed.
 global:
   scrape_interval: 15s

@@ -1,4 +1,4 @@
-# G-VOS 全功能自测报告（NATS 事件驱动化批次）
+# gvos 全功能自测报告（NATS 事件驱动化批次）
 
 **日期**：2026-11-19
 **验收方式**：自动化（Go 测试套件 93 项、真 PG 集成、真 NATS JetStream、双副本端到端、curl/psql 断言、nats-box 事件注入）

@@ -12,7 +12,7 @@ N=$(( RATE * 10 ))   # 10 seconds of traffic per round
 
 PSQL() { docker exec gvos-postgres-1 psql -U gvos -tA -c "$1"; }
 
-echo "G-VOS 10-round benchmark - $(date -u +%FT%TZ) - rate=${RATE}cps x${ROUNDS} rounds x ${N} calls"
+echo "gvos 10-round benchmark - $(date -u +%FT%TZ) - rate=${RATE}cps x${ROUNDS} rounds x ${N} calls"
 printf "%-6s %-7s %-8s %-8s %-9s %-10s %-8s %-8s %-10s\n" "round" "calls" "success" "failed" "setup(ms)" "cdr" "ledger" "kam_err" "nats_pending"
 
 for i in $(seq 1 $ROUNDS); do
