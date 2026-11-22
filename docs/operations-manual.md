@@ -93,6 +93,7 @@ docker exec -i gvos-postgres-1 psql -U gvos < migrations/00N_xxx.sql
 | 呼叫 503 No Gateway | `kamcmd dispatcher.list` 看网关 FLAGS（IP=探测失败）→ 检查网关容器/网络；恢复后探测自动恢复 |
 | bill-lock REJECTED rc=3 | Kamailio→gv-core 网络断（`docker ps` 看 gv-core 状态） |
 | live_calls 持续增长 | UAS/网关不发 BYE；10 分钟后清扫器自动结算；持续增长=泄漏，报研发 |
+| 大量 `REMOTE-SETTLE` | Call-ID 粘性失效或滚动发布过久；查 LB hash；偶发可接受，持续升高要修粘性 |
 | REGISTER 失败 | accounts 表 ha1 是否为 CHAR(32)；version 表 accounts=7 |
 | dispatcher 启动失败 | version 表 gateways/dispatcher=4；gateways 表列形状（flags/priority） |
 | CDR 与账本不平 | 停写 → 导出两张表 → 联系研发（正常情况下不可能，WAL/事务保证） |
@@ -107,19 +108,42 @@ docker exec -i gvos-postgres-1 psql -U gvos < migrations/00N_xxx.sql
 - [ ] 审计日志异地归档（audit_log 表 append-only，禁止 UPDATE/DELETE 权限）
 - [ ] Docker 密钥管理：生产不用 bind-mount 明文 key（用 k8s secret/docker secret）
 
-## 6. 容量规划参考
+## 6. 多副本 gv-core（粘性 + 远程结算）
+
+计费热状态（Interim / teardown / 媒体流）仍驻留**本机 map**；多副本部署必须：
+
+1. **LB 按 Call-ID 粘性（主路径）**  
+   对 `gvos.svc.call.*` / HTTP `/v1/call/*` 用 Call-ID（或 From+Call-ID）做
+   consistent hash / sticky session，保证同一通话的 Start/Interim/End 落到同一副本。
+2. **Redis call meta 兜底（已实现）**  
+   Start 写入 `gvos:callmeta:{callID}`；本机 End 404 时 peer 用 meta 做一次
+   `remote-settle`（扣/退余额 + 清 admission）。`gvos:callsettled:{callID}` SETNX
+   防止双结算。日志关键词：`REMOTE-SETTLE`。
+3. **监控**  
+   `REMOTE-SETTLE` 比例应接近 0；持续升高 = 粘性失效或滚动发布窗口过长。
+
+计费扣款语义（Mode A）：**只扣主叫叶子账户**；上级代理保留并发/CPS 上限，
+不与叶子同额预扣。上级分润若需要，走独立账本行，不共用 Reserve。
+
+环境变量：
+
+| 变量 | 默认 | 含义 |
+|------|------|------|
+| `GVOS_RISK_MODE` | `open` | `strict`：Redis 风控不可用时拒呼 |
+| `GVOS_PKG_MODE` | `list_price` | `open`：Redis 套餐不可用时回退本地免费分钟 |
+
+## 7. 容量规划参考
 
 - **实测基线**（见 `docs/bench/capacity-report-v0.md` v0.3）：单节点
   2,000 并发 / 100 CPS 聚合零失败，账目零漂移
 - 扩容路径：信令节点无状态（加 Kamailio 容器 + LB）；媒体加
-  rtpengine 节点；计费控制面垂直扩容（Go 单进程，当前阈值远未触顶）
+  rtpengine 节点；计费控制面可水平扩（**必须 Call-ID 粘性**，见 §6）
 - 数据增长：CDR 月分区自动路由；**每月建下月分区**（预留
   `migrations/006_partition_maintenance.sql` 手工执行或挂 cron）；
   超过保留期的分区 `DETACH + 归档到对象存储`
 - 磁盘预算：CDR ≈ 1KB/通（含索引）；录音 ≈ 100KB/分钟（pcap）——
   按话务量预估，录音卷建议独立磁盘
-
-## 7. 支持与升级通道
+## 8. 支持与升级通道
 
 - 工单/邮件：support@gvos.example
 - 安全漏洞：security@gvos.example（PGP 可用，72h 响应）

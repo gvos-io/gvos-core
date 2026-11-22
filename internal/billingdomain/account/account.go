@@ -112,51 +112,39 @@ func (s *Store) Chain(id string) ([]*Account, error) {
 	return chain, nil
 }
 
-// Reserve locks est for a call on every prepaid account in the chain.
-// Postpaid accounts (Postpaid=true) are skipped — they charge on the
-// invoice cycle instead. It is all-or-nothing: on any failure the whole
-// reservation is rolled back. Returns the reservation token used by
-// Commit/Release.
+// Reserve locks est on the leaf prepaid account only (Mode A: terminal
+// billing). Ancestors keep concurrent/CPS caps via admission, not
+// co-debit. Postpaid leaf accounts skip the lock (invoice cycle).
 func (s *Store) Reserve(id string, est money.Amount) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	chain, err := s.chainLocked(id)
-	if err != nil {
-		return "", err
+	a, ok := s.accounts[id]
+	if !ok {
+		return "", fmt.Errorf("account %q not found", id)
 	}
-	var charged []*Account
-	for _, a := range chain {
-		if a.Postpaid {
-			continue
-		}
-		if a.Credit.Sub(a.MaxDebt) < est {
-			for _, c := range charged {
-				c.Credit = c.Credit.Add(est)
-			}
-			return "", fmt.Errorf("account %q insufficient balance %s < %s", a.ID, a.Credit, est)
-		}
-		a.Credit = a.Credit.Sub(est)
-		charged = append(charged, a)
+	if a.Postpaid {
+		return id + ":call:" + fmt.Sprintf("%d", now()), nil
 	}
+	if a.Credit.Sub(a.MaxDebt) < est {
+		return "", fmt.Errorf("account %q insufficient balance %s < %s", a.ID, a.Credit, est)
+	}
+	a.Credit = a.Credit.Sub(est)
 	return id + ":call:" + fmt.Sprintf("%d", now()), nil
 }
 
-// Commit finalizes actual cost: returns deltas are applied so the
-// released remainder returns to balances (est >= actual normally).
+// Commit finalizes actual cost on the leaf: positive est-actual refunds
+// the unused reservation.
 func (s *Store) Commit(token string, id string, est, actual money.Amount) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	chain, err := s.chainLocked(id)
-	if err != nil {
-		return err
+	a, ok := s.accounts[id]
+	if !ok {
+		return fmt.Errorf("account %q not found", id)
 	}
-	diff := est.Sub(actual) // positive: refund remainder
-	for _, a := range chain {
-		if a.Postpaid {
-			continue // match Redis authority: postpaid skips prepaid movements
-		}
-		a.Credit = a.Credit.Add(diff)
+	if a.Postpaid {
+		return nil
 	}
+	a.Credit = a.Credit.Add(est.Sub(actual))
 	return nil
 }
 

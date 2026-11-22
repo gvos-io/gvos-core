@@ -1,9 +1,9 @@
 // balance_redis.go: the Redis-side balance authority (redis-adoption
 // Phase 1). Account *configuration* (the chain) stays in the Go
-// memory map; only Credit/MaxDebt movements cross to Redis, executed
-// atomically by Lua so a multi-account reservation is all-or-nothing
-// even under concurrent replicas. Amounts are INCRBY integers
-// (ADR-0003 fixed point) — no floating point ever crosses the wire.
+// memory map; money movements charge the leaf prepaid account only
+// (Mode A: terminal billing — ancestors keep concurrent/CPS caps via
+// the admission ledger, not co-debit of the same est). Amounts are
+// INCRBY integers (ADR-0003 fixed point).
 package account
 
 import (
@@ -18,35 +18,24 @@ import (
 
 func balKey(id string) string { return rds.Prefix + "bal:" + id }
 
-// reserveScript: KEYS = balance keys of the prepaid chain (in order),
-// ARGV[1] = est (fixed-point int), ARGV[2..] = maxDebt per key in the
-// same order. Checks then debits in one pass; rolls back on the first
-// failure. Returns 1 on success, 0 on insufficient balance.
+// reserveScript: KEYS[1] = leaf balance key, ARGV[1] = est,
+// ARGV[2] = maxDebt. Returns 1 on success, 0 on insufficient balance.
 var reserveScript = rds.NewScript(`
 local est = tonumber(ARGV[1])
-local charged = {}
-for i, k in ipairs(KEYS) do
-  local maxdebt = tonumber(ARGV[i + 1])
-  local bal = tonumber(redis.call('GET', k) or '0')
-  if bal - maxdebt < est then
-    for j = 1, i - 1 do
-      redis.call('INCRBY', KEYS[j], est)
-    end
-    return 0
-  end
-  redis.call('INCRBY', k, -est)
-  charged[i] = true
+local maxdebt = tonumber(ARGV[2])
+local bal = tonumber(redis.call('GET', KEYS[1]) or '0')
+if bal - maxdebt < est then
+  return 0
 end
+redis.call('INCRBY', KEYS[1], -est)
 return 1
 `)
 
-// refundScript: KEYS = chain keys, ARGV[1] = signed delta (positive =
-// refund remainder, negative = extra charge). Applied to every key.
+// refundScript: KEYS[1] = leaf key, ARGV[1] = signed delta (positive =
+// refund remainder, negative = extra charge).
 var refundScript = rds.NewScript(`
 local delta = tonumber(ARGV[1])
-for _, k in ipairs(KEYS) do
-  redis.call('INCRBY', k, delta)
-end
+redis.call('INCRBY', KEYS[1], delta)
 return 1
 `)
 
@@ -74,45 +63,34 @@ func (b *BalanceR) Seed(ctx context.Context) error {
 	return nil
 }
 
-// chainIDs returns the prepaid chain (Go walks the config tree; Redis
-// executes the money).
-func (b *BalanceR) chainIDs(id string) ([]string, []money.Amount, error) {
+// leafKeys returns the prepaid leaf account's balance key (Mode A:
+// only the calling account is debited). Postpaid leaf → empty.
+func (b *BalanceR) leafKeys(id string) ([]string, money.Amount, error) {
 	b.s.mu.RLock()
 	defer b.s.mu.RUnlock()
-	chain, err := b.s.chainLocked(id)
-	if err != nil {
-		return nil, nil, err
+	a, ok := b.s.accounts[id]
+	if !ok {
+		return nil, 0, fmt.Errorf("account %q not found", id)
 	}
-	var keys []string
-	var debts []money.Amount
-	for _, a := range chain {
-		if a.Postpaid {
-			continue
-		}
-		keys = append(keys, balKey(a.ID))
-		debts = append(debts, a.MaxDebt)
+	if a.Postpaid {
+		return nil, 0, nil
 	}
-	return keys, debts, nil
+	return []string{balKey(id)}, a.MaxDebt, nil
 }
 
 // Reserve mirrors Store.Reserve on the authority. Fail-closed: a
 // Redis error is returned and the caller must refuse the call.
 func (b *BalanceR) Reserve(ctx context.Context, id string, est money.Amount) (string, error) {
-	keys, debts, err := b.chainIDs(id)
+	keys, debt, err := b.leafKeys(id)
 	if err != nil {
 		return "", err
 	}
-	if len(keys) == 0 { // fully postpaid chain: nothing to lock
+	if len(keys) == 0 { // postpaid leaf: nothing to lock
 		return id + ":call:" + fmt.Sprintf("%d", now()), nil
-	}
-	args := make([]any, 0, len(debts)+1)
-	args = append(args, int64(est))
-	for _, d := range debts {
-		args = append(args, int64(d))
 	}
 	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)
 	defer cancel()
-	res, err := reserveScript.Run(ctx, b.rdb, keys, args...)
+	res, err := reserveScript.Run(ctx, b.rdb, keys, int64(est), int64(debt))
 	if err != nil {
 		return "", fmt.Errorf("balance authority unavailable: %w", err)
 	}
@@ -122,11 +100,11 @@ func (b *BalanceR) Reserve(ctx context.Context, id string, est money.Amount) (st
 	return id + ":call:" + fmt.Sprintf("%d", now()), nil
 }
 
-// Commit reconciles est against actual across the chain (delta
+// Commit reconciles est against actual on the leaf (delta
 // refund/charge). Fail-open by design: settlement must not drop the
 // CDR; the error is loud and the hour rollback to PG catches up.
 func (b *BalanceR) Commit(ctx context.Context, token, id string, est, actual money.Amount) error {
-	keys, _, err := b.chainIDs(id)
+	keys, _, err := b.leafKeys(id)
 	if err != nil {
 		return err
 	}

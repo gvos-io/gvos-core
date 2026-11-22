@@ -75,6 +75,7 @@ type Manager struct {
 	store       *account.Store
 	bal         BalanceAuthority // nil = the in-memory store path
 	adm         *AdmissionR      // nil = local-map admission (single replica)
+	meta        *CallMetaStore   // nil = no cross-replica settle fallback
 	charger     *billing.Charger
 	teardown    TeardownFunc
 	interval    time.Duration // interim deduction period
@@ -90,6 +91,30 @@ func (m *Manager) SetBalanceAuthority(b BalanceAuthority) { m.bal = b }
 // concurrent/CPS caps count the shared ledger instead of the local
 // map, closing the ×N oversell. nil = local admission.
 func (m *Manager) SetAdmissionLedger(a *AdmissionR) { m.adm = a }
+
+// SetCallMetaStore wires the cross-replica settle fallback (Redis).
+func (m *Manager) SetCallMetaStore(s *CallMetaStore) { m.meta = s }
+
+func (m *Manager) putMeta(c *Call) {
+	if m.meta == nil || c == nil {
+		return
+	}
+	meta := CallMeta{
+		AccountID: c.AccountID, Dest: c.Destination,
+		StartUnix: c.Start.Unix(), Lock: c.Lock, Accrued: c.Accrued,
+		Recorded: c.Recorded,
+	}
+	if c.Rate != nil {
+		meta.Prefix = c.Rate.Prefix
+		meta.Price = c.Rate.Price
+		meta.InitDur = c.Rate.InitDur
+		meta.StepDur = c.Rate.StepDur
+		meta.MinDur = c.Rate.MinDur
+	}
+	if err := m.meta.Put(context.Background(), c.ID, meta); err != nil {
+		log.Printf("call meta put %s: %v", c.ID, err)
+	}
+}
 
 // StartLedgerSweeper periodically drops Redis admission members older
 // than ZombieTTL. Key-level EXPIRE refreshes on every new call, so
@@ -418,6 +443,7 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 		m.mu.Lock()
 		m.calls[callID] = c
 		m.mu.Unlock()
+		m.putMeta(c)
 		return nil
 	}
 
@@ -436,7 +462,7 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 		return err
 	}
 	start := m.now()
-	m.calls[callID] = &Call{
+	c := &Call{
 		ID:          callID,
 		AccountID:   accountID,
 		Destination: dest,
@@ -446,6 +472,11 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 		Lock:        est,
 		Recorded:    recorded,
 	}
+	m.calls[callID] = c
+	// putMeta needs the unlock for Redis; defer Unlock above — call after return via...
+	// Local path holds m.mu; write meta after unlock by copying.
+	metaCopy := *c
+	go func() { m.putMeta(&metaCopy) }()
 	return nil
 }
 
@@ -591,7 +622,11 @@ func (m *Manager) Interim(callID string) (bool, error) {
 		}
 		c.Accrued = c.Accrued.Add(delta)
 		c.LastActive = m.now()
+		accrued := c.Accrued
 		m.mu.Unlock()
+		if m.meta != nil {
+			_ = m.meta.TouchAccrued(context.Background(), callID, accrued)
+		}
 	} else if delta < 0 {
 		m.mu.Lock()
 		if c.closed {
@@ -601,8 +636,12 @@ func (m *Manager) Interim(callID string) (bool, error) {
 		accountID := c.AccountID
 		c.Accrued = c.Accrued.Add(delta)
 		c.LastActive = m.now()
+		accrued := c.Accrued
 		m.mu.Unlock()
 		_ = m.commit(accountID, -delta, 0) // refund excess (outside lock)
+		if m.meta != nil {
+			_ = m.meta.TouchAccrued(context.Background(), callID, accrued)
+		}
 	} else {
 		m.mu.Lock()
 		if !c.closed {
@@ -654,6 +693,10 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 	c, ok := m.calls[callID]
 	if !ok {
 		m.mu.Unlock()
+		// Cross-replica / owner-crash fallback: settle from Redis meta.
+		if m.meta != nil {
+			return m.endFromMeta(callID, seconds)
+		}
 		return nil, fmt.Errorf("unknown call %q", callID)
 	}
 	// Mark closed before deleting so a raced Interim refunds any
@@ -677,10 +720,54 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 	m.mu.Unlock()
 
 	if seconds < 0 {
-		// Negative duration must never trigger the unratable→full-refund
-		// path (a bad edge/NATS payload would otherwise unlock money).
 		seconds = 0
 	}
+	if m.meta != nil {
+		claimed, err := m.meta.ClaimSettle(context.Background(), callID)
+		_ = m.meta.Delete(context.Background(), callID)
+		if err == nil && !claimed {
+			// Peer already remote-settled; local map is stale.
+			return nil, fmt.Errorf("unknown call %q", callID)
+		}
+	}
+	return m.finalizeEnd(callID, accountID, dest, entry, start, lock, accrued, recorded, release, seconds)
+}
+
+// endFromMeta settles a call that is not in the local map using the
+// Redis CallMeta snapshot (BYE landed on a different replica, or the
+// owner died). Take() ensures only one replica wins the settle race.
+func (m *Manager) endFromMeta(callID string, seconds int) (*CDR, error) {
+	claimed, err := m.meta.ClaimSettle(context.Background(), callID)
+	if err != nil {
+		return nil, fmt.Errorf("call settle claim %s: %w", callID, err)
+	}
+	if !claimed {
+		return nil, fmt.Errorf("unknown call %q", callID)
+	}
+	meta, ok, err := m.meta.Take(context.Background(), callID)
+	if err != nil {
+		return nil, fmt.Errorf("call meta take %s: %w", callID, err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("unknown call %q", callID)
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	start := time.Unix(meta.StartUnix, 0)
+	if seconds == 0 && !start.IsZero() {
+		seconds = int(m.now().Sub(start).Seconds())
+		if seconds < 0 {
+			seconds = 0
+		}
+	}
+	log.Printf("REMOTE-SETTLE call=%s account=%s (cross-replica or owner miss)", callID, meta.AccountID)
+	return m.finalizeEnd(callID, meta.AccountID, meta.Dest, meta.Entry(), start,
+		meta.Lock, meta.Accrued, meta.Recorded, "remote-settle", seconds)
+}
+
+func (m *Manager) finalizeEnd(callID, accountID, dest string, entry *rate.Entry, start time.Time,
+	lock, accrued money.Amount, recorded bool, release string, seconds int) (*CDR, error) {
 
 	if m.adm != nil {
 		chain, _ := m.store.Chain(accountID)
@@ -698,9 +785,7 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 		release = "normal"
 	}
 	if err != nil {
-		// Unratable connected call: treat as zero cost but keep CDR.
 		billedSecs, cost, release = seconds, 0, "unratable"
-		err = nil
 	}
 	var price money.Amount
 	prefix := ""
@@ -708,23 +793,16 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 		price = entry.Price
 		prefix = entry.Prefix
 	}
-	// Final settle against what was already taken (pre-answer lock plus
-	// interim accruals): top up when the call cost more, refund when it
-	// cost less. Delta is signed; Commit applies +delta as a refund and
-	// a negative est means extra charge via Reserve.
 	taken := lock.Add(accrued)
 	if taken > cost {
 		_ = m.commit(accountID, taken.Sub(cost), 0)
 	} else if taken < cost {
-		// Under-collection (call ran longer than locked): charge the
-		// gap. If reserve fails, CDR cost reflects what was actually
-		// collected — never invent uncollected revenue.
 		gap := cost.Sub(taken)
 		if err := m.reserve(context.Background(), accountID, gap); err == nil {
 			_ = m.commit(accountID, gap, gap)
 		} else {
 			cost = taken
-			if release == "normal" {
+			if release == "normal" || release == "remote-settle" {
 				release = "undercollected"
 			}
 		}

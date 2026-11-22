@@ -35,6 +35,18 @@ type Rule struct {
 	Disabled bool `json:"disabled"`
 }
 
+// Mode controls Redis-unavailable behaviour for fraud checks.
+type Mode string
+
+const (
+	// ModeOpen (default): Redis errors fail open to local windows —
+	// platform availability wins over strict fraud caps.
+	ModeOpen Mode = "open"
+	// ModeStrict: Redis errors on cost_day/freq refuse the call instead
+	// of falling back (use for tenants that prefer false rejects).
+	ModeStrict Mode = "strict"
+)
+
 // Engine holds rules and live counters.
 type Engine struct {
 	mu sync.Mutex
@@ -48,6 +60,7 @@ type Engine struct {
 	// fed by the gvos.reg.event consumer on the bus
 	regs map[string][]int64 // user -> unix seconds
 	rr   *RiskR             // redis aggregate face (nil = local windows)
+	mode Mode
 	now  func() time.Time
 	cur  *time.Time // tests: shared clock handle
 }
@@ -57,6 +70,7 @@ func New() *Engine {
 		calls:   map[string][]int64{},
 		dayCost: map[int64]map[string]money.Amount{},
 		regs:    map[string][]int64{},
+		mode:    ModeOpen,
 		now:     time.Now,
 	}
 }
@@ -64,8 +78,18 @@ func New() *Engine {
 // SetClock overrides the time source (tests).
 func (e *Engine) SetClock(f func() time.Time) { e.now = f }
 
+// SetMode selects open (default) or strict Redis-failure behaviour.
+func (e *Engine) SetMode(m Mode) {
+	if m == ModeStrict {
+		e.mode = ModeStrict
+		return
+	}
+	e.mode = ModeOpen
+}
+
 // SetRiskRedis wires the shared aggregate face (Phase 3). Local
-// windows stay as the fail-open fallback and single-replica truth.
+// windows stay as the fail-open fallback and single-replica truth
+// unless ModeStrict is set.
 func (e *Engine) SetRiskRedis(r *RiskR) { e.rr = r }
 
 // SetRules atomically replaces the rule set (admin plane).
@@ -114,6 +138,7 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 	e.mu.Lock()
 	rules := e.rules // header copy: SetRules swaps the slice, elements are never mutated
 	rr := e.rr
+	mode := e.mode
 	e.mu.Unlock()
 
 	for i := range rules {
@@ -127,7 +152,8 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 		switch r.Kind {
 		case "freq":
 			// Redis face: the shared sliding window counts every
-			// replica's calls (Phase 3). Fail-open to local on error.
+			// replica's calls (Phase 3). Fail-open to local on error
+			// unless ModeStrict.
 			if rr != nil {
 				n, err := rr.SlidingCount(context.Background(), rfreqKey(account), now)
 				if err == nil {
@@ -138,6 +164,10 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 					continue
 				}
 				warn("freq window", err)
+				if mode == ModeStrict {
+					hit = decide(hit, *r, "risk authority unavailable (strict)")
+					continue
+				}
 			}
 			// calls in the trailing minute (inclusive of this attempt);
 			// the prune-and-count needs the local window under the lock
@@ -192,7 +222,10 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 		ok, spent, err := rr.CostDayTryAdd(ctx0(), dayKey(now), account, estCost, costDayLim)
 		if err != nil {
 			warn("cost_day try-add", err)
-			// fail-open: local admit below; CostDayAdd retries the shared counter
+			if mode == ModeStrict {
+				hit = decide(hit, *costDayRule, "risk authority unavailable (strict)")
+			}
+			// else fail-open: local admit below; CostDayAdd retries the shared counter
 		} else if !ok {
 			hit = decide(hit, *costDayRule, fmt.Sprintf("daily cost %s+%s exceeds %.2f (shared)", spent, estCost, costDayRule.CostLimit))
 		} else {

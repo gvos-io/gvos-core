@@ -934,13 +934,30 @@ func AttachRedis(s *Server, c *rds.Client) {
 	// per-second CPS counters) closes the ×N concurrent/CPS oversell.
 	s.calls.SetAdmissionLedger(callcore.NewAdmissionR(c))
 	s.calls.StartLedgerSweeper(time.Minute)
-	// Phase 3: shared risk windows (freq/reg sliding ZSETs, day-cost
-	// accumulators) — fail-open, the fraud engine never gates the
-	// platform.
+	// Cross-replica BYE fallback: Call-ID sticky at the LB is still
+	// required for Interim/teardown locality; meta lets a peer settle
+	// money + free the admission slot when stickiness fails.
+	s.calls.SetCallMetaStore(callcore.NewCallMetaStore(c))
+	// Phase 3: shared risk windows. GVOS_RISK_MODE=strict refuses
+	// calls when Redis fraud state is unavailable (default: open).
 	s.risk.SetRiskRedis(riskctrl.NewRiskR(c))
-	// Phase 4: shared package-usage counters (free allowance + cycle
-	// spend) — fail-open.
+	switch strings.ToLower(os.Getenv("GVOS_RISK_MODE")) {
+	case "strict":
+		s.risk.SetMode(riskctrl.ModeStrict)
+		log.Printf("risk mode: strict (Redis errors refuse calls)")
+	default:
+		s.risk.SetMode(riskctrl.ModeOpen)
+	}
+	// Phase 4: package usage. GVOS_PKG_MODE=open falls back to local
+	// free minutes; default list_price charges list on Redis errors.
 	s.pkg.SetPkgRedis(pkgplan.NewPkgR(c))
+	switch strings.ToLower(os.Getenv("GVOS_PKG_MODE")) {
+	case "open":
+		s.pkg.SetMode(pkgplan.ModeOpen)
+		log.Printf("pkg mode: open (Redis errors use local free minutes)")
+	default:
+		s.pkg.SetMode(pkgplan.ModeListPrice)
+	}
 	// Phase 5: persistent registration mirror + the single-runner locks
 	// on the periodic tasks (rollup, config rebroadcast) so N replicas
 	// run each exactly once.

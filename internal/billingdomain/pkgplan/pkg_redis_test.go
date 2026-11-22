@@ -77,21 +77,36 @@ func TestCycleRolloverNewKey(t *testing.T) {
 	}
 }
 
-// TestFailOpenLocalFallback: redis down -> the local counters still
-// grant the package (never block settlement).
+// TestFailOpenLocalFallback: with ModeOpen, redis down -> local
+// counters still grant free minutes.
 func TestFailOpenLocalFallback(t *testing.T) {
 	e, r := newPkgR(t)
-	mr := miniredis.RunT(t) // r is bound to a different server; kill by closing is awkward —
 	_ = r
-	_ = mr
-	// Simpler: point the engine at a dead face by using a closed server.
 	mr2 := miniredis.RunT(t)
 	c2, _ := rds.New("redis://" + mr2.Addr())
 	mr2.Close()
-	e.SetPkgRedis(NewPkgR(c2)) // unreachable — fail-open path
+	e.SetMode(ModeOpen)
+	e.SetPkgRedis(NewPkgR(c2)) // unreachable — open fallback
 	e.Define(Package{ID: "p1", Cycle: Daily, FreeMinutes: 1, Discount: 1})
 	e.Assign("u1", "p1")
 	if pr := e.Apply("u1", 60, money.MustFromYuan(0.06)); pr.FreeSecs != 60 {
 		t.Fatalf("fail-open should still apply the local package: %+v", pr)
+	}
+}
+
+// TestListPriceOnRedisFailure: default ModeListPrice charges list
+// (zero free) when Redis claim fails — never oversell free minutes.
+func TestListPriceOnRedisFailure(t *testing.T) {
+	e, _ := newPkgR(t)
+	mr2 := miniredis.RunT(t)
+	c2, _ := rds.New("redis://" + mr2.Addr())
+	mr2.Close()
+	e.SetMode(ModeListPrice)
+	e.SetPkgRedis(NewPkgR(c2))
+	e.Define(Package{ID: "p1", Cycle: Daily, FreeMinutes: 1, Discount: 1})
+	e.Assign("u1", "p1")
+	pr := e.Apply("u1", 60, money.MustFromYuan(0.06))
+	if pr.FreeSecs != 0 || pr.BillableSecs != 60 {
+		t.Fatalf("list_price on redis failure: %+v", pr)
 	}
 }

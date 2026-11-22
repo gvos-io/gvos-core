@@ -31,28 +31,27 @@ func TestChainOrder(t *testing.T) {
 	}
 }
 
-func TestReserveAllOrNothing(t *testing.T) {
+func TestReserveLeafOnly(t *testing.T) {
 	s := chain()
-	// end1 has 10, needs 9: whole chain gets reserved.
+	// Mode A: only end1 is debited; ancestors keep full credit.
 	if _, err := s.Reserve("end1", money.MustFromYuan(9)); err != nil {
 		t.Fatalf("reserve 9 should pass: %v", err)
 	}
-	for id, want := range map[string]money.Amount{"end1": money.MustFromYuan(1), "agent2": money.MustFromYuan(41), "agent1": money.MustFromYuan(91), "tenant": 0} {
+	for id, want := range map[string]money.Amount{
+		"end1": money.MustFromYuan(1), "agent2": money.MustFromYuan(50),
+		"agent1": money.MustFromYuan(100), "tenant": 0,
+	} {
 		if bal, _ := Balance(s, id); bal != want {
 			t.Errorf("balance[%s] = %v, want %v", id, bal, want)
 		}
 	}
 
-	// Now end1 has 1: another reserve of 5 must fail AND roll back agent2/agent1.
 	_, err := s.Reserve("end1", money.MustFromYuan(5))
 	if err == nil || !strings.Contains(err.Error(), "insufficient") {
 		t.Fatalf("expected insufficient-balance error, got %v", err)
 	}
-	if bal, _ := Balance(s, "agent2"); bal != money.MustFromYuan(41) {
-		t.Errorf("rollback failed: agent2 balance = %v, want 41", bal)
-	}
-	if bal, _ := Balance(s, "agent1"); bal != money.MustFromYuan(91) {
-		t.Errorf("rollback failed: agent1 balance = %v, want 91", bal)
+	if bal, _ := Balance(s, "agent2"); bal != money.MustFromYuan(50) {
+		t.Errorf("ancestor must be untouched: agent2 = %v", bal)
 	}
 }
 

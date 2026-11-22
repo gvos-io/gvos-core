@@ -29,28 +29,25 @@ func newRedisStore(t *testing.T) (*Store, *BalanceR) {
 	return s, b
 }
 
-func TestRedisReserveAllOrNothing(t *testing.T) {
+func TestRedisReserveLeafOnly(t *testing.T) {
 	_, b := newRedisStore(t)
 	ctx := context.Background()
 
-	// Whole-chain reserve of 9: end1/agent1/tenant each drop 9.
+	// Mode A: only the leaf prepaid account is debited.
 	if _, err := b.Reserve(ctx, "end1", money.MustFromYuan(9)); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	for id, want := range map[string]float64{"end1": 1, "agent1": 91, "tenant": 91} {
+	for id, want := range map[string]float64{"end1": 1, "agent1": 100, "tenant": 100} {
 		if bal, _ := b.Get(ctx, id); bal != money.MustFromYuan(want) {
 			t.Errorf("bal[%s] = %s, want %v", id, bal, want)
 		}
 	}
 
-	// end1 now has 1: reserve 5 fails and the partial debits roll back.
 	if _, err := b.Reserve(ctx, "end1", money.MustFromYuan(5)); err == nil {
 		t.Fatal("expected insufficient")
 	}
-	for id, want := range map[string]float64{"agent1": 91, "tenant": 91} {
-		if bal, _ := b.Get(ctx, id); bal != money.MustFromYuan(want) {
-			t.Errorf("rollback bal[%s] = %s, want %v (partial debit not rolled back)", id, bal, want)
-		}
+	if bal, _ := b.Get(ctx, "agent1"); bal != money.MustFromYuan(100) {
+		t.Errorf("ancestor must stay untouched: agent1 = %s", bal)
 	}
 }
 

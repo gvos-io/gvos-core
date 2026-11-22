@@ -41,12 +41,26 @@ type Package struct {
 	GraceMinutes float64 // minutes allowed beyond balance (debt floor)
 }
 
+// Mode controls Redis-unavailable behaviour for free-minute claims.
+type Mode string
+
+const (
+	// ModeOpen (default legacy): Redis claim errors fall back to the
+	// local free-minute counter (may oversell free minutes under
+	// multi-replica Redis outages).
+	ModeOpen Mode = "open"
+	// ModeListPrice: Redis claim errors charge list price (zero free
+	// seconds) — prefer under-discounting over free-minute oversell.
+	ModeListPrice Mode = "list_price"
+)
+
 // Engine tracks which account holds which package plus usage counters.
 type Engine struct {
 	mu       sync.Mutex
 	accounts map[string]assigned // accountID -> plan+usage
 	plans    map[string]Package
-	pr       *PkgR              // shared usage face (nil = local counters)
+	pr       *PkgR // shared usage face (nil = local counters)
+	mode     Mode
 	now      func() time.Time
 	cur      *time.Time // tests: shared clock handle
 }
@@ -62,6 +76,7 @@ func New() *Engine {
 	return &Engine{
 		accounts: map[string]assigned{},
 		plans:    map[string]Package{},
+		mode:     ModeListPrice,
 		now:      time.Now,
 	}
 }
@@ -69,8 +84,17 @@ func New() *Engine {
 // SetClock overrides the time source (tests).
 func (e *Engine) SetClock(f func() time.Time) { e.now = f }
 
+// SetMode selects open or list_price Redis-failure behaviour.
+func (e *Engine) SetMode(m Mode) {
+	if m == ModeOpen {
+		e.mode = ModeOpen
+		return
+	}
+	e.mode = ModeListPrice
+}
+
 // SetPkgRedis wires the shared usage face (Phase 4). Local counters
-// stay the fail-open fallback.
+// stay the fail-open fallback unless ModeListPrice (default).
 func (e *Engine) SetPkgRedis(p *PkgR) { e.pr = p }
 
 // Define registers/updates a package definition.
@@ -176,6 +200,7 @@ func (e *Engine) Apply(accountID string, billedSecs int, ratedCost money.Amount)
 	localUsed := a.freeUsedSecs
 	discount := a.pkg.Discount
 	pr := e.pr
+	mode := e.mode
 	e.mu.Unlock()
 
 	want := float64(billedSecs)
@@ -184,13 +209,17 @@ func (e *Engine) Apply(accountID string, billedSecs int, ratedCost money.Amount)
 		claimed, err := pr.ClaimUsed(context.Background(), accountID, key, want, maxFree)
 		if err != nil {
 			warn("used claim", err)
-			freeLeft := maxFree - localUsed
-			if freeLeft < 0 {
-				freeLeft = 0
-			}
-			free = want
-			if free > freeLeft {
-				free = freeLeft
+			if mode == ModeListPrice {
+				free = 0 // charge list price rather than oversell free minutes
+			} else {
+				freeLeft := maxFree - localUsed
+				if freeLeft < 0 {
+					freeLeft = 0
+				}
+				free = want
+				if free > freeLeft {
+					free = freeLeft
+				}
 			}
 		} else {
 			free = claimed
