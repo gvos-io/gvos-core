@@ -17,6 +17,11 @@ import (
 
 const callMetaTTL = 15 * time.Minute
 
+// Settle locks only need to cover the dual-End race window (owner +
+// peer BYE). Reusing callMetaTTL (15m) left ~10k callsettled keys after
+// a few minutes of 40–400 CPS load; 2m is ample for LB skew + retry.
+const callSettledTTL = 2 * time.Minute
+
 func callMetaKey(callID string) string    { return rds.Prefix + "callmeta:" + callID }
 func callSettledKey(callID string) string { return rds.Prefix + "callsettled:" + callID }
 
@@ -92,7 +97,7 @@ func (s *CallMetaStore) Delete(ctx context.Context, callID string) error {
 func (s *CallMetaStore) ClaimSettle(ctx context.Context, callID string) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)
 	defer cancel()
-	return s.rdb.Raw().SetNX(ctx, callSettledKey(callID), "1", callMetaTTL).Result()
+	return s.rdb.Raw().SetNX(ctx, callSettledKey(callID), "1", callSettledTTL).Result()
 }
 
 // Take atomically reads and deletes meta so only one replica can

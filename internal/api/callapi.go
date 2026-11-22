@@ -202,7 +202,17 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 		}
 	}
 	if seconds < 0 {
-		return 400, map[string]errorEnvelope{"error": {Code: "BAD_DURATION", Message: "duration must be >= 0"}}
+		// Edge clocks can publish a negative duration_ms (NTP step or
+		// $TS/$TV mix). Clamp and fall back to wall-clock since Start
+		// instead of 400 — a 400 on the CDRR path NAKs and burns the
+		// consumer (MaxDeliver×1s) for a non-retryable payload.
+		seconds = 0
+		if info, ok := s.calls.Info(req.CallID); ok {
+			seconds = int(time.Since(info).Seconds())
+			if seconds < 0 {
+				seconds = 0
+			}
+		}
 	}
 	cdr, err := s.calls.End(req.CallID, seconds)
 	if err != nil {

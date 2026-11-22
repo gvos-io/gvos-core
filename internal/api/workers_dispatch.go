@@ -342,11 +342,14 @@ func cdrRawHandler(s *Server) func(data []byte) error {
 			// call, or a duplicated delivery). That is an idempotent
 			// terminal state, not a retryable failure: ack instead of
 			// NAK so the poison redelivery loop (measured 7381
-			// redeliveries at 40CPS) cannot monopolize the single
-			// CDRR worker. Anything else (4xx/5xx) stays retryable.
-			if code == 404 {
+			// redeliveries at 40CPS) cannot monopolize the CDRR
+			// workers. 400 BAD_DURATION was the same class (edge
+			// clock) until callEnd started clamping — still ack any
+			// remaining 4xx client errors so a stale payload cannot
+			// retry-storm. 5xx stays retryable.
+			if code == 404 || (code >= 400 && code < 500) {
 				mCDRDupAcked.Inc(1)
-				log.Printf("CDRR dup end acked call=%s (already finalized)", req.CallID)
+				log.Printf("CDRR terminal %d acked call=%s body=%v", code, req.CallID, body)
 				return nil
 			}
 			return fmt.Errorf("callEnd rejected call=%s: %v", req.CallID, body)
