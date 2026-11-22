@@ -43,7 +43,8 @@ func TestMediaStreamEndToEnd(t *testing.T) {
 	keyB64 := base64.StdEncoding.EncodeToString(key)
 	req := "GET /v1/stream/media-e2e-1 HTTP/1.1\r\n" +
 		"Host: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
-		"Sec-WebSocket-Key: " + keyB64 + "\r\nSec-WebSocket-Version: 13\r\n\r\n"
+		"Sec-WebSocket-Key: " + keyB64 + "\r\nSec-WebSocket-Version: 13\r\n" +
+		"X-GVOS-Internal: " + os.Getenv("GVOS_INTERNAL_TOKEN") + "\r\n\r\n"
 	if _, err := conn.Write([]byte(req)); err != nil {
 		t.Fatal(err)
 	}

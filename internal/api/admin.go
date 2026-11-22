@@ -3,12 +3,12 @@ package api
 
 import (
 	"context"
-	"log"
-	"strings"
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/hex"
-	"math/rand"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gvos-io/gvos-core/internal/shared/acl"
@@ -114,7 +114,14 @@ func contextWithTimeout(parent context.Context) (context.Context, context.Cancel
 func genSIPPassword(n int) string {
 	const alphabet = "abcdefghjkmnpqrstuvwxyz23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 	b := make([]byte, n)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// Extremely unlikely; fall back to time-derived bytes rather than
+		// panic mid-create (still better than math/rand).
+		now := time.Now().UnixNano()
+		for i := range b {
+			b[i] = byte(now >> (i % 8))
+		}
+	}
 	for i := range b {
 		b[i] = alphabet[int(b[i])%len(alphabet)]
 	}

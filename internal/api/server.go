@@ -40,6 +40,7 @@ type Server struct {
 	store         *account.Store
 	rates         *rate.Table
 	rateList      []rate.Rate // memory-mode source of truth for the table
+	cfgMu         sync.RWMutex         // guards rates, rateList, userIndex
 	calls         *callcore.Manager
 	cdrs          []*callcore.CDR
 	cdrsMu        sync.Mutex // guards cdrs (NATS responders append concurrently with HTTP reads)
@@ -85,10 +86,12 @@ type Server struct {
 // alias. Payloads are identical — aliases are transport copies, not
 // semantic forks.
 func (s *Server) emit(subject string, payload any) {
-	if s.whDispatch != nil {
+	if s.whDispatch != nil && subject != events.SubjectCDRCompleted {
 		// Phase D fan-out: customer endpoints subscribed to this
 		// subject receive the same payload (signed; retries in the
-		// dispatcher). Non-blocking, observability tier.
+		// dispatcher). CDR completed is owned solely by tapAndPublish
+		// (contract envelope) — publishing here too double-delivers
+		// and double-increments seq.
 		s.whDispatch.Publish(subject, payload)
 	}
 	if s.events == nil {
@@ -125,7 +128,10 @@ func (r *lcrRater) BestRate(group, dest string) *money.Amount {
 			// Memory mode: filter rateList by group membership (the
 			// demo list is single-group; rateList entries carry no
 			// group so all serve the demo group).
-			tbl = rate.NewTable(r.s.rateList)
+			r.s.cfgMu.RLock()
+			list := append([]rate.Rate(nil), r.s.rateList...)
+			r.s.cfgMu.RUnlock()
+			tbl = rate.NewTable(list)
 		}
 		r.cache[group] = tbl
 	}
@@ -142,15 +148,21 @@ func (r *lcrRater) BestRate(group, dest string) *money.Amount {
 // rebuildRates recomputes the lookup table. PG mode reloads from the
 // database (authoritative); memory mode rebuilds from rateList.
 func (s *Server) rebuildRates() {
+	var tbl *rate.Table
 	if s.pg != nil {
 		ctx, cancel := contextWithTimeoutDuration(context.Background(), 5*time.Second)
 		defer cancel()
-		if tbl, err := s.pg.LoadRates(ctx, "demo"); err == nil {
-			s.rates = tbl
-			return
+		if loaded, err := s.pg.LoadRates(ctx, "demo"); err == nil {
+			tbl = loaded
 		}
-		// DB reload failed: fall back to the in-memory list.
 	}
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	if tbl != nil {
+		s.rates = tbl
+		return
+	}
+	// DB reload failed (or memory mode): rebuild from the in-memory list.
 	s.rates = rate.NewTable(s.rateList)
 }
 
@@ -289,14 +301,15 @@ func (s *Server) newCallManager() *callcore.Manager {
 			dispatchTeardown(callID, reason)
 		}
 	}, 10*time.Second)
-	// Zombie sweeper: calls whose BYE never arrives (SIPp timeout
-	// kills, gateway drops) settle instead of leaking their
-	// pre-answer locks. Timeout is env-tunable: the 10-minute default
-	// is the production stance (slow, billing-friendly); a bench or
-	// an edge with BYE-loss under load collapses live_calls fast —
-	// every zombie rides the 10s Interim/Redis loop, and thousands
-	// of them starve the RPC responders (measured: live_calls 21829
-	// -> SVC-CALL-START throughput to zero).
+	// Zombie sweeper: calls with no Interim activity (LastActive)
+	// beyond the timeout — BYE never arrived — settle and teardown
+	// instead of leaking pre-answer locks. Long live calls that keep
+	// ticking Interim are NOT swept. Timeout is env-tunable; the
+	// 10-minute default is the production stance. A bench or edge
+	// with BYE-loss under load collapses live_calls fast — every
+	// zombie rides the 10s Interim/Redis loop, and thousands of them
+	// starve the RPC responders (measured: live_calls 21829 ->
+	// SVC-CALL-START throughput to zero).
 	if t := os.Getenv("GVOS_ZOMBIE_TIMEOUT"); t != "" {
 		if d, err := time.ParseDuration(t); err == nil {
 			m.StartSweeper(d, 30*time.Second)

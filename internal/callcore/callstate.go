@@ -37,10 +37,12 @@ type Call struct {
 	Destination string
 	Rate        *rate.Entry
 	Start       time.Time
+	LastActive  time.Time    // refreshed by Interim; sweeper uses this, not Start
 	Lock        money.Amount // pre-answer reservation
 	Accrued     money.Amount // deducted so far
-	Tick        int     // interim deduction rounds completed
-	Recorded    bool    // rtpengine recording engaged for this call
+	Tick        int  // interim deduction rounds completed
+	Recorded    bool // rtpengine recording engaged for this call
+	closed      bool // set by End under m.mu; Interim refunds if it races past End
 }
 
 // ErrLimit encapsulates a rejection due to account limits so the HTTP
@@ -62,12 +64,14 @@ func (e *ErrLimit) Error() string {
 type BalanceAuthority interface {
 	ReserveCtx(ctx context.Context, id string, est money.Amount) (string, error)
 	CommitCtx(ctx context.Context, token, id string, est, actual money.Amount) error
+	GetBalance(ctx context.Context, id string) (money.Amount, error)
 }
 
 // Manager owns live calls and their billing lifecycle.
 type Manager struct {
 	mu          sync.Mutex
 	calls       map[string]*Call
+	inflight    map[string]struct{} // Start in progress; blocks duplicate INVITE
 	store       *account.Store
 	bal         BalanceAuthority // nil = the in-memory store path
 	adm         *AdmissionR      // nil = local-map admission (single replica)
@@ -101,9 +105,33 @@ func (m *Manager) reserve(ctx context.Context, id string, est money.Amount) erro
 
 func (m *Manager) commit(id string, est, actual money.Amount) error {
 	if m.bal != nil {
-		return m.bal.CommitCtx(context.Background(), "", id, est, actual)
+		err := m.bal.CommitCtx(context.Background(), "", id, est, actual)
+		if err != nil {
+			log.Printf("balance commit failed account=%s est=%s actual=%s: %v", id, est, actual, err)
+		}
+		return err
 	}
 	return m.store.Commit("", id, est, actual)
+}
+
+// Refund returns amt to the account balance (package discount settlement).
+func (m *Manager) Refund(accountID string, amt money.Amount) error {
+	if amt <= 0 {
+		return nil
+	}
+	return m.commit(accountID, amt, 0)
+}
+
+// balanceOf reads the live authority (Redis when wired) for interim
+// affordability checks.
+func (m *Manager) balanceOf(accountID string) money.Amount {
+	if m.bal != nil {
+		if b, err := m.bal.GetBalance(context.Background(), accountID); err == nil {
+			return b
+		}
+	}
+	bal, _ := account.Balance(m.store, accountID)
+	return bal
 }
 
 func NewManager(store *account.Store, teardown TeardownFunc, interval time.Duration) *Manager {
@@ -112,6 +140,7 @@ func NewManager(store *account.Store, teardown TeardownFunc, interval time.Durat
 	}
 	return &Manager{
 		calls:       map[string]*Call{},
+		inflight:    map[string]struct{}{},
 		store:       store,
 		charger:     &billing.Charger{},
 		teardown:    teardown,
@@ -196,8 +225,11 @@ func (m *Manager) driveInterim() {
 	}
 }
 
-// sweep settles one pass of timed-out calls. The release reason is
-// "zombie-timeout" so the CDR trail shows what happened.
+// sweep settles one pass of timed-out calls. Timeout is measured from
+// LastActive (refreshed by Interim), not Start — otherwise every call
+// longer than the timeout is force-billed while SIP keeps talking.
+// The release reason is "zombie-timeout" so the CDR trail shows what
+// happened; teardown is dispatched so the edge can hang up.
 func (m *Manager) sweep(timeout time.Duration) {
 	now := m.now()
 	type victim struct {
@@ -208,7 +240,11 @@ func (m *Manager) sweep(timeout time.Duration) {
 
 	m.mu.Lock()
 	for id, c := range m.calls {
-		if now.Sub(c.Start) > timeout {
+		active := c.LastActive
+		if active.IsZero() {
+			active = c.Start
+		}
+		if now.Sub(active) > timeout {
 			victims = append(victims, victim{id, int(now.Sub(c.Start).Seconds())})
 		}
 	}
@@ -216,8 +252,10 @@ func (m *Manager) sweep(timeout time.Duration) {
 
 	for _, v := range victims {
 		m.markRelease(v.id, "zombie-timeout")
+		if m.teardown != nil {
+			m.teardown(v.id, "zombie-timeout")
+		}
 		if _, err := m.End(v.id, v.d); err == nil {
-			// settled fine
 			zombieSwept.Inc(1)
 		}
 	}
@@ -240,6 +278,26 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 	if err != nil {
 		return err
 	}
+
+	// Idempotent retransmit / in-flight guard: never double-reserve the
+	// same callID (a second reserve with no matching Commit leaks money;
+	// a failed second reserve + EndChain would drop the live first call).
+	m.mu.Lock()
+	if _, ok := m.calls[callID]; ok {
+		m.mu.Unlock()
+		return nil
+	}
+	if _, ok := m.inflight[callID]; ok {
+		m.mu.Unlock()
+		return nil
+	}
+	m.inflight[callID] = struct{}{}
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.inflight, callID)
+		m.mu.Unlock()
+	}()
 
 	est := m.charger.EstimatedCost(e, expectedSecs)
 
@@ -265,10 +323,13 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 			return err
 		}
 		if err := m.reserve(context.Background(), accountID, est); err != nil {
-			// Roll the ledger registration back out; a failed rollback
-			// self-heals via the zombie TTL (logged, never blocks).
+			// Roll the ledger registration + CPS slot back out; a failed
+			// rollback self-heals via the zombie TTL (logged, never blocks).
 			if err2 := m.adm.EndChain(context.Background(), callID, keys); err2 != nil {
 				log.Printf("admission rollback failed for %s (zombie TTL will reclaim): %v", callID, err2)
+			}
+			if err2 := m.adm.DecrCPS(context.Background(), accountID, start); err2 != nil {
+				log.Printf("cps rollback failed for %s: %v", callID, err2)
 			}
 			return err
 		}
@@ -278,6 +339,7 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 			Destination: dest,
 			Rate:        e,
 			Start:       start,
+			LastActive:  start,
 			Lock:        est,
 			Recorded:    recorded,
 		}
@@ -301,12 +363,14 @@ func (m *Manager) Start(callID, accountID, dest string, e *rate.Entry, expectedS
 	if err := m.reserve(context.Background(), accountID, est); err != nil {
 		return err
 	}
+	start := m.now()
 	m.calls[callID] = &Call{
 		ID:          callID,
 		AccountID:   accountID,
 		Destination: dest,
 		Rate:        e,
-		Start:       m.now(),
+		Start:       start,
+		LastActive:  start,
 		Lock:        est,
 		Recorded:    recorded,
 	}
@@ -430,6 +494,10 @@ func (m *Manager) Interim(callID string) (bool, error) {
 	// Cost so far vs already deducted: reconcile the difference. The
 	// accrued fold-in happens under the lock (End races this loop).
 	m.mu.Lock()
+	if c.closed {
+		m.mu.Unlock()
+		return false, nil
+	}
 	delta := cost.Sub(c.Accrued)
 	m.mu.Unlock()
 	if delta > 0 {
@@ -441,33 +509,53 @@ func (m *Manager) Interim(callID string) (bool, error) {
 			}
 			return false, nil
 		}
-		// Reserve succeeded: fold the delta into accrued (release trick:
-		// commit the reservation immediately at actual cost delta).
-		_ = m.commit(c.AccountID, delta, delta)
+		// Reserve already deducted; fold into Accrued. If End settled
+		// while we held the reservation, refund immediately.
 		m.mu.Lock()
+		if c.closed {
+			m.mu.Unlock()
+			_ = m.commit(c.AccountID, delta, 0)
+			return false, nil
+		}
 		c.Accrued = c.Accrued.Add(delta)
+		c.LastActive = m.now()
 		m.mu.Unlock()
 	} else if delta < 0 {
-		_ = m.commit(c.AccountID, -delta, 0) // refund excess
 		m.mu.Lock()
+		if c.closed {
+			m.mu.Unlock()
+			return false, nil
+		}
+		accountID := c.AccountID
 		c.Accrued = c.Accrued.Add(delta)
+		c.LastActive = m.now()
+		m.mu.Unlock()
+		_ = m.commit(accountID, -delta, 0) // refund excess (outside lock)
+	} else {
+		m.mu.Lock()
+		if !c.closed {
+			c.LastActive = m.now()
+		}
 		m.mu.Unlock()
 	}
 
-	// Pre-check: can the account still afford one more tick? The
-	// accrued read and the balance check both go under the lock (End
-	// races this loop on Accrued).
+	// Pre-check: can the account still afford one more tick? Uses the
+	// Redis authority when wired (memory Credit lags under multi-replica).
 	m.mu.Lock()
+	if c.closed {
+		m.mu.Unlock()
+		return false, nil
+	}
+	accrued := c.Accrued
+	accountID := c.AccountID
 	nextSecs := elapsed + int(m.interval.Seconds())
 	_, nextCost, err := m.charger.ChargeFor(entry, nextSecs)
+	m.mu.Unlock()
 	if err != nil {
-		m.mu.Unlock()
 		return true, nil
 	}
-	bal, _ := account.Balance(m.store, c.AccountID)
-	exhausted := bal < nextCost.Sub(c.Accrued)
-	m.mu.Unlock()
-	if exhausted {
+	bal := m.balanceOf(accountID)
+	if bal < nextCost.Sub(accrued) {
 		m.markRelease(callID, "balance-exhausted")
 		if m.teardown != nil {
 			m.teardown(callID, "balance-exhausted")
@@ -496,6 +584,9 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("unknown call %q", callID)
 	}
+	// Mark closed before deleting so a raced Interim refunds any
+	// reservation it already took against this Call pointer.
+	c.closed = true
 	delete(m.calls, callID)
 	accountID := c.AccountID
 	entry := c.Rate
@@ -503,6 +594,7 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 	accrued := c.Accrued
 	start := c.Start
 	recorded := c.Recorded
+	dest := c.Destination
 	// Read-and-clear the release reason under the same lock: the old
 	// post-unlock read raced driveInterim's snapshot pass (both touch
 	// m.lastRelease unlocked) and crashed the whole process under
@@ -511,6 +603,12 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 	release := m.lastRelease[callID]
 	delete(m.lastRelease, callID)
 	m.mu.Unlock()
+
+	if seconds < 0 {
+		// Negative duration must never trigger the unratable→full-refund
+		// path (a bad edge/NATS payload would otherwise unlock money).
+		seconds = 0
+	}
 
 	if m.adm != nil {
 		chain, _ := m.store.Chain(accountID)
@@ -533,36 +631,42 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 		err = nil
 	}
 	var price money.Amount
+	prefix := ""
 	if entry != nil {
 		price = entry.Price
+		prefix = entry.Prefix
 	}
-	// (release was read-and-cleared under m.mu above; the old
-	// unlocked read here was the concurrent-map crash site.)
 	// Final settle against what was already taken (pre-answer lock plus
 	// interim accruals): top up when the call cost more, refund when it
 	// cost less. Delta is signed; Commit applies +delta as a refund and
 	// a negative est means extra charge via Reserve.
 	taken := lock.Add(accrued)
 	if taken > cost {
-		_ = m.commit(c.AccountID, taken.Sub(cost), 0)
+		_ = m.commit(accountID, taken.Sub(cost), 0)
 	} else if taken < cost {
 		// Under-collection (call ran longer than locked): charge the
-		// gap. Exhausted prepaid accounts still get the CDR at full
-		// cost — the debt shows in the next call's 403.
-		if err := m.reserve(context.Background(), c.AccountID, cost.Sub(taken)); err == nil {
-			_ = m.commit(c.AccountID, cost.Sub(taken), cost.Sub(taken))
+		// gap. If reserve fails, CDR cost reflects what was actually
+		// collected — never invent uncollected revenue.
+		gap := cost.Sub(taken)
+		if err := m.reserve(context.Background(), accountID, gap); err == nil {
+			_ = m.commit(accountID, gap, gap)
+		} else {
+			cost = taken
+			if release == "normal" {
+				release = "undercollected"
+			}
 		}
 	}
 
 	return &CDR{
 		CallID:     callID,
-		AccountID:  c.AccountID,
-		Dest:       c.Destination,
+		AccountID:  accountID,
+		Dest:       dest,
 		StartTime:  start,
 		Duration:   seconds,
 		BilledSecs: billedSecs,
 		Cost:       cost,
-		RatePrefix: entry.Prefix,
+		RatePrefix: prefix,
 		Price:      price,
 		Release:    release,
 		Recorded:   recorded,

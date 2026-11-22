@@ -159,9 +159,6 @@ func (s *Server) cdrPersistHandler(data []byte) error {
 	if err != nil {
 		return err
 	}
-	if !inserted {
-		return nil // duplicate delivery: row and ledger already stored
-	}
 	// Ledger balance snapshot reads the AUTHORITY (Redis when wired;
 	// the memory map lags under a multi-replica topology).
 	var bal money.Amount
@@ -169,6 +166,18 @@ func (s *Server) cdrPersistHandler(data []byte) error {
 		bal, _ = s.bal.Get(ctx, cdr.AccountID)
 	} else if b, err := account.Balance(s.store, cdr.AccountID); err == nil {
 		bal = b
+	}
+	if !inserted {
+		// CDR already present (redelivery). A prior attempt may have
+		// inserted the CDR then failed on AppendLedger — still ensure
+		// the settle row exists rather than permanently skipping it.
+		has, err := s.pg.HasLedgerForCall(ctx, cdr.CallID)
+		if err != nil {
+			return err
+		}
+		if has {
+			return nil
+		}
 	}
 	if err := s.pg.AppendLedger(ctx, cdr.AccountID, -cdr.Cost, bal, "call-settle", cdr.CallID); err != nil {
 		return err
@@ -586,7 +595,9 @@ func StartCfgReloadSubscriber(s *Server) {
 				return
 			}
 			if s.userIndex != nil {
+				s.cfgMu.Lock()
 				s.userIndex[op.Account.Username] = op.Account.ID
+				s.cfgMu.Unlock()
 			}
 			log.Printf("CFG-RELOAD account applied via bus (%s %s)", op.Account.ID, op.Account.Username)
 		case "credit":

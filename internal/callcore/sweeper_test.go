@@ -64,6 +64,33 @@ func TestSweeperIgnoresFreshCalls(t *testing.T) {
 	}
 }
 
+// TestSweeperIgnoresActiveLongCalls: a call whose Start is older than
+// the timeout but whose LastActive was refreshed by Interim must not
+// be force-settled (the old Start-only check billed live 10m+ calls).
+func TestSweeperIgnoresActiveLongCalls(t *testing.T) {
+	store := account.NewStore()
+	store.Put(&account.Account{ID: "u1", Credit: money.MustFromYuan(100), RateGroup: "g"})
+	m := NewManager(store, nil, time.Second)
+
+	base := time.Unix(1_700_000_000, 0)
+	cur := base
+	m.SetClock(func() time.Time { return cur })
+
+	if err := m.Start("long1", "u1", "86", entry2(), 60, false); err != nil {
+		t.Fatal(err)
+	}
+	// Age the call past the zombie timeout, then refresh LastActive.
+	cur = base.Add(15 * time.Minute)
+	if _, err := m.Interim("long1"); err != nil {
+		t.Fatal(err)
+	}
+	m.sweep(10 * time.Minute)
+
+	if m.Live() != 1 {
+		t.Fatalf("active long call swept: live = %d", m.Live())
+	}
+}
+
 // TestSweeperLoop: the background goroutine settles without manual
 // sweep calls, and stop() halts it. The fake clock hands the time over
 // a channel (a shared `cur` variable would be a data race between the

@@ -136,6 +136,9 @@ func (balanceRefusal) ReserveCtx(ctx context.Context, id string, est money.Amoun
 func (balanceRefusal) CommitCtx(ctx context.Context, token, id string, est, actual money.Amount) error {
 	return nil
 }
+func (balanceRefusal) GetBalance(ctx context.Context, id string) (money.Amount, error) {
+	return 0, errors.New("authority down")
+}
 
 func TestStartAuthorityFailureRollsBackLedger(t *testing.T) {
 	m, store, adm := ledgerSetup(t)

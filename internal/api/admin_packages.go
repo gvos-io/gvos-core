@@ -55,7 +55,10 @@ func (s *Server) handlePackages(w http.ResponseWriter, r *http.Request) {
 		// caller path in callStart).
 		assignID := req.Assign
 		if _, err := s.store.Get(assignID); err != nil {
-			if id, ok := s.userIndex[assignID]; ok {
+			s.cfgMu.RLock()
+			id, ok := s.userIndex[assignID]
+			s.cfgMu.RUnlock()
+			if ok {
 				assignID = id
 			} else {
 				httpError(w, 400, "assign_account not found: "+req.Assign)

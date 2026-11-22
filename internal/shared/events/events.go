@@ -299,9 +299,10 @@ func IsEdgeAlias(subject string) bool {
 	return strings.HasPrefix(subject, edgePrefix)
 }
 
-// Publish enqueues payload as JSON on subject. Non-blocking: a full
-// queue drops the event loudly (media-pump semantics) instead of
-// stalling the billing answer.
+// Publish enqueues payload as JSON on subject. Non-critical subjects
+// drop on a full queue (never stall the answer). Settlement subjects
+// (CDR completed/raw) block briefly instead of dropping — Redis may
+// already have charged the call.
 func (p *Publisher) Publish(subject string, payload any) {
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -309,14 +310,31 @@ func (p *Publisher) Publish(subject string, payload any) {
 		return
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.closed {
+		p.mu.Unlock()
 		return
 	}
+	ch := p.ch
+	p.mu.Unlock()
+
 	select {
-	case p.ch <- queued{subject: subject, data: data}:
+	case ch <- queued{subject: subject, data: data}:
+		return
 	default:
+	}
+	critical := subject == SubjectCDRCompleted || subject == SubjectCDRRaw
+	if !critical {
 		log.Printf("NATS queue full, dropped event %s", subject)
+		return
+	}
+	// Block up to publishBudget so a short burst does not lose money
+	// settlement; still log if the wait itself times out.
+	timer := time.NewTimer(publishBudget)
+	defer timer.Stop()
+	select {
+	case ch <- queued{subject: subject, data: data}:
+	case <-timer.C:
+		log.Printf("NATS queue full, DROPPED critical event %s after %s wait", subject, publishBudget)
 	}
 }
 

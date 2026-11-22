@@ -180,10 +180,37 @@ func (b *BalanceR) CommitCtx(ctx context.Context, token, id string, est, actual 
 	return b.Commit(ctx, token, id, est, actual)
 }
 
-// SetAbsolute writes the authoritative balance (TopUp /
-// broadcast-sync path).
+// SetAbsolute writes the authoritative balance (seed / peer-sync path).
+// Prefer IncrBy for TopUp so concurrent call deductions are not wiped.
 func (b *BalanceR) SetAbsolute(ctx context.Context, id string, amt money.Amount) error {
 	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)
 	defer cancel()
 	return b.rdb.Raw().Set(ctx, balKey(id), int64(amt), 0).Err()
+}
+
+// IncrBy applies a signed delta on the Redis authority and returns the
+// post-increment balance. TopUp must use this (not SetAbsolute) so a
+// concurrent Reserve/Interim deduction is not clobbered by a stale PG
+// absolute.
+func (b *BalanceR) IncrBy(ctx context.Context, id string, delta money.Amount) (money.Amount, error) {
+	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)
+	defer cancel()
+	n, err := b.rdb.Raw().IncrBy(ctx, balKey(id), int64(delta)).Result()
+	if err != nil {
+		return 0, err
+	}
+	return money.Amount(n), nil
+}
+
+// SeedOne SETNXs a single account's credit (create-account path). Live
+// values from other replicas are never overwritten.
+func (b *BalanceR) SeedOne(ctx context.Context, id string, credit money.Amount) error {
+	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)
+	defer cancel()
+	return b.rdb.Raw().SetNX(ctx, balKey(id), int64(credit), 0).Err()
+}
+
+// GetBalance is the BalanceAuthority face used by interim affordability.
+func (b *BalanceR) GetBalance(ctx context.Context, id string) (money.Amount, error) {
+	return b.Get(ctx, id)
 }

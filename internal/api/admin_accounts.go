@@ -74,10 +74,19 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err.Error())
 		return
 	}
+	// Seed Redis authority (SETNX) so prepaid credit is callable before
+	// the next process restart / Seed() pass.
+	if s.bal != nil && !req.Postpaid {
+		if err := s.bal.SeedOne(r.Context(), id, creditAmt); err != nil {
+			log.Printf("REDIS seed new account %s: %v", id, err)
+		}
+	}
 	// Keep the live username->ID index warm so freshly created accounts
 	// are immediately callable/resolvable by SIP username.
 	if s.userIndex != nil {
+		s.cfgMu.Lock()
 		s.userIndex[req.Username] = id
+		s.cfgMu.Unlock()
 	}
 	s.audit(r, "create", "account", id, nil,
 		map[string]any{"username": req.Username, "credit": req.Credit})
@@ -127,27 +136,43 @@ func (s *Server) handleTopUp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	before, _ := account.Balance(s.store, reqAccountID)
+	if s.bal != nil {
+		if b, err := s.bal.Get(r.Context(), reqAccountID); err == nil {
+			before = b
+		}
+	}
 
-	balance := before.Add(deltaAmt)
-	if s.pg != nil {
-		balance, err = s.pg.TopUp(r.Context(), reqAccountID, deltaAmt, req.Reason, whoAmI(r).Prefix)
+	var balance money.Amount
+	if s.bal != nil {
+		// Redis is the live authority: INCRBY the delta so concurrent
+		// call deductions are not wiped by a stale PG absolute SET.
+		balance, err = s.bal.IncrBy(r.Context(), reqAccountID, deltaAmt)
 		if err != nil {
 			httpError(w, 500, err.Error())
 			return
+		}
+		if s.pg != nil {
+			if err := s.pg.WriteBalance(r.Context(), reqAccountID, balance); err != nil {
+				log.Printf("PG topup write-back failed (%s): %v", reqAccountID, err)
+			}
+			if err := s.pg.AppendLedger(r.Context(), reqAccountID, deltaAmt, balance, req.Reason, ""); err != nil {
+				log.Printf("PG topup ledger failed (%s): %v", reqAccountID, err)
+			}
+		}
+	} else {
+		balance = before.Add(deltaAmt)
+		if s.pg != nil {
+			balance, err = s.pg.TopUp(r.Context(), reqAccountID, deltaAmt, req.Reason, whoAmI(r).Prefix)
+			if err != nil {
+				httpError(w, 500, err.Error())
+				return
+			}
 		}
 	}
 	// Update the live in-memory balance: read-modify-write via Put.
 	if a, err := s.store.Get(reqAccountID); err == nil {
 		a.Credit = balance
 		_ = s.store.Put(a)
-	}
-	// Redis authority gets the absolute value (adoption plan: TopUp
-	// writes PG -> Redis absolute; the broadcast below keeps no-redis
-	// peers' caches converging).
-	if s.bal != nil {
-		if err := s.bal.SetAbsolute(r.Context(), reqAccountID, balance); err != nil {
-			log.Printf("REDIS topup absolute write failed (%s): %v", reqAccountID, err)
-		}
 	}
 	s.audit(r, "topup", "account", reqAccountID,
 		map[string]any{"balance": before}, map[string]any{"balance": balance, "delta": req.Delta})

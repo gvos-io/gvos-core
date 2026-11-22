@@ -46,7 +46,10 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	// hard 404 — billing must never silently land on another
 	// account's balance.
 	if _, err := s.store.Get(accID); err != nil {
-		if id, ok := s.userIndex[accID]; ok {
+		s.cfgMu.RLock()
+		id, ok := s.userIndex[accID]
+		s.cfgMu.RUnlock()
+		if ok {
 			accID = id
 		} else if s.pg == nil {
 			if _, err2 := s.store.Get("1000"); err2 == nil {
@@ -96,7 +99,10 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	}
 
 	now := time.Now()
-	entry := s.rates.Lookup(actualDest, int(now.Weekday()), now.Hour()*60+now.Minute())
+	s.cfgMu.RLock()
+	rates := s.rates
+	s.cfgMu.RUnlock()
+	entry := rates.Lookup(actualDest, int(now.Weekday()), now.Hour()*60+now.Minute())
 	if entry == nil {
 		return 404, map[string]errorEnvelope{"error": {Code: "NOT_FOUND", Message: "no rate for destination " + actualDest}}
 	}
@@ -197,13 +203,17 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 			seconds = int(time.Since(info).Seconds())
 		}
 	}
+	if seconds < 0 {
+		return 400, map[string]errorEnvelope{"error": {Code: "BAD_DURATION", Message: "duration must be >= 0"}}
+	}
 	cdr, err := s.calls.End(req.CallID, seconds)
 	if err != nil {
 		return 404, map[string]errorEnvelope{"error": {Code: "NOT_FOUND", Message: err.Error()}}
 	}
 	// Subscription package: free allowance first, then discount on the
-	// billable remainder. The CDR carries the effective cost; free
-	// seconds are recorded in the record for the bill view.
+	// billable remainder. End() already charged list price — refund the
+	// gap so Redis/memory authority matches the CDR/ledger amount.
+	listCost := cdr.Cost
 	pr := s.pkg.Apply(cdr.AccountID, cdr.BilledSecs, cdr.Cost)
 	if pr.FreeSecs == 0 && pr.BillableSecs == 0 && cdr.BilledSecs > 0 {
 		// Contract event (Phase D): the free allowance and the paid
@@ -219,6 +229,11 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 			ratio := pr.BillableSecs / float64(cdr.BilledSecs) * pr.Discount
 			cdr.Cost = money.Amount(int64(math.Ceil(float64(cdr.Cost) * ratio)))
 			cdr.FreeSecs = int(pr.FreeSecs)
+			if refund := listCost.Sub(cdr.Cost); refund > 0 {
+				if err := s.calls.Refund(cdr.AccountID, refund); err != nil {
+					log.Printf("package refund failed (call %s): %v", cdr.CallID, err)
+				}
+			}
 		}
 	}
 

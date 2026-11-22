@@ -89,9 +89,23 @@ type Deliverer struct {
 	Client *http.Client
 }
 
-// NewDeliverer wires a deliverer with sane timeouts.
+// NewDeliverer wires a deliverer with sane timeouts and an SSRF-safe
+// redirect policy (each hop re-runs validateWebhookURL).
 func NewDeliverer() *Deliverer {
-	return &Deliverer{Client: &http.Client{Timeout: 15 * time.Second}}
+	d := &Deliverer{}
+	d.Client = &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("stopped after 5 redirects")
+			}
+			if err := validateWebhookURL(req.URL.String()); err != nil {
+				return fmt.Errorf("redirect blocked: %w", err)
+			}
+			return nil
+		},
+	}
+	return d
 }
 
 // DeliverResult is one delivery attempt's outcome.
@@ -222,9 +236,14 @@ func (dsp *Dispatcher) loop() {
 			dsp.mu.RLock()
 			subs := dsp.subs
 			dsp.mu.RUnlock()
+			env, isEnv := job.payload.(envelopeJob)
 			for i := range subs {
 				sub := subs[i]
-				if !sub.Active || !WantsEvent(sub.Events, job.subject) {
+				want := job.subject
+				if isEnv {
+					want = "gvos." + env.Event
+				}
+				if !sub.Active || !WantsEvent(sub.Events, want) {
 					continue
 				}
 				// Per-subscription monotonic seq (contract: gaps = missed
@@ -234,7 +253,11 @@ func (dsp *Dispatcher) loop() {
 				dsp.seq[sub.ID]++
 				seq := dsp.seq[sub.ID]
 				dsp.mu.Unlock()
-				go dsp.deliverLogged(sub, job.subject, seq, job.payload)
+				if isEnv {
+					go dsp.deliverEnvelope(sub, env.Event, env.Tenant, seq, env.Data)
+				} else {
+					go dsp.deliverLogged(sub, job.subject, seq, job.payload)
+				}
 			}
 		}
 	}
@@ -259,22 +282,21 @@ func (dsp *Dispatcher) SubscriptionCount() []Subscription {
 // PublishEnvelope queues one CONTRACT event: event is the contract
 // name (cdr.completed / call.teardown), tenant the owning tenant, and
 // data the typed projection struct. The envelope (v/seq/occurred_at)
-// is built at delivery time per subscription.
+// is built at delivery time per subscription. Delivery is funneled
+// through the same buffered events channel as Publish so fan-out has
+// backpressure instead of unbounded goroutines.
 func (dsp *Dispatcher) PublishEnvelope(event, tenant string, data any) {
-	dsp.mu.RLock()
-	subs := dsp.subs
-	dsp.mu.RUnlock()
-	for i := range subs {
-		sub := subs[i]
-		if !sub.Active || !WantsEvent(sub.Events, "gvos."+event) {
-			continue
-		}
-		dsp.mu.Lock()
-		dsp.seq[sub.ID]++
-		seq := dsp.seq[sub.ID]
-		dsp.mu.Unlock()
-		go dsp.deliverEnvelope(sub, event, tenant, seq, data)
-	}
+	// Contract subscribers match on "gvos.<event>"; reuse the Publish
+	// queue with a synthetic subject so loop applies the same caps.
+	dsp.Publish("gvos."+event, envelopeJob{Event: event, Tenant: tenant, Data: data})
+}
+
+// envelopeJob is recognized by the dispatch loop so contract events
+// build the typed envelope instead of posting the raw payload.
+type envelopeJob struct {
+	Event  string
+	Tenant string
+	Data   any
 }
 
 // deliverEnvelope builds the contract envelope with the subscription's

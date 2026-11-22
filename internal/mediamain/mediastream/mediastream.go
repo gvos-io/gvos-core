@@ -198,7 +198,11 @@ func (s *Stream) Push(dir Direction, data []byte) Chunk {
 	if dir == Downlink {
 		seq = s.downSeq
 	}
-	c := Chunk{Data: data, Seq: seq, TS: time.Now()}
+	// Copy before fan-out: producers often reuse the RTP buffer; async
+	// subscribers must not observe overwritten bytes.
+	dup := make([]byte, len(data))
+	copy(dup, data)
+	c := Chunk{Data: dup, Seq: seq, TS: time.Now()}
 	s.mu.Unlock()
 
 	for _, sub := range subs {

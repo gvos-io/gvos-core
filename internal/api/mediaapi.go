@@ -17,17 +17,53 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/gvos-io/gvos-core/internal/mediamain/mediastream"
+	"github.com/gvos-io/gvos-core/internal/shared/acl"
 )
+
+// mediaAuthorized gates the AI media plane: internal token (preferred)
+// or admin Bearer. When GVOS_INTERNAL_TOKEN is unset (local tests /
+// memory demo) the endpoint stays open — same stance as a missing
+// signaling token would take in a sealed deploy.
+func (s *Server) mediaAuthorized(w http.ResponseWriter, r *http.Request) bool {
+	want := os.Getenv("GVOS_INTERNAL_TOKEN")
+	if want != "" {
+		if r.Header.Get("X-GVOS-Internal") == want || r.URL.Query().Get("token") == want {
+			return true
+		}
+	}
+	h := r.Header.Get("Authorization")
+	const bearer = "Bearer "
+	if strings.HasPrefix(h, bearer) {
+		presented := strings.TrimPrefix(h, bearer)
+		if presented == adminToken {
+			return true
+		}
+		if s.acl != nil {
+			if k, ok := s.acl.Lookup(presented); ok && (k.Role == acl.RoleAdmin || k.Role == acl.RoleOperator) {
+				return true
+			}
+		}
+	}
+	if want == "" {
+		return true // demo / test: no token configured
+	}
+	httpErrorC(w, 401, "UNAUTHORIZED", "media stream requires internal or admin auth")
+	return false
+}
 
 // handleMediaStream upgrades and runs the media loop.
 func (s *Server) handleMediaStream(w http.ResponseWriter, r *http.Request) {
 	callID := strings.TrimPrefix(r.URL.Path, "/v1/stream/")
 	if callID == "" {
 		httpError(w, 400, "call_id required in path")
+		return
+	}
+	if !s.mediaAuthorized(w, r) {
 		return
 	}
 	if s.media == nil {
@@ -130,6 +166,7 @@ func (s *Server) mediaPump(conn net.Conn, stream *mediastream.Stream, done, read
 
 	unsubUp := stream.Subscribe(mediastream.Uplink, mediastream.SubscriberFunc(
 		func(c mediastream.Chunk) {
+			// Chunk.Data is already a private copy from Push; enqueue as-is.
 			select {
 			case out <- tagged{0, c.Data}:
 			default: // slow consumer: drop rather than block the media path
@@ -154,6 +191,7 @@ func (s *Server) mediaPump(conn net.Conn, stream *mediastream.Stream, done, read
 			buf := make([]byte, 1+len(tg.data))
 			buf[0] = tg.dir
 			copy(buf[1:], tg.data)
+			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := mediastream.WriteFrame(conn, mediastream.OpBinaryValue, buf); err != nil {
 				log.Printf("MEDIA-PUMP write error: %v", err)
 				return

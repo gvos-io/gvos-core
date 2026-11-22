@@ -44,6 +44,7 @@ func (s *Server) handleRateUpsert(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Memory mode: upsert into rateList so rebuildRates sees it.
+		s.cfgMu.Lock()
 		replaced := false
 		for i, rr := range s.rateList {
 			if rr.Prefix == req.Prefix {
@@ -61,6 +62,7 @@ func (s *Server) handleRateUpsert(w http.ResponseWriter, r *http.Request) {
 				InitDur: req.InitDur, StepDur: req.StepDur, MinDur: req.MinDur,
 			})
 		}
+		s.cfgMu.Unlock()
 	}
 	// Live rate table rebuild: the next call uses the new price.
 	s.rebuildRates()
@@ -81,13 +83,15 @@ func (s *Server) handleRateList(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	rows := []map[string]any{}
+	s.cfgMu.RLock()
+	rows := make([]map[string]any, 0, len(s.rateList))
 	for _, rr := range s.rateList {
 		rows = append(rows, map[string]any{
 			"prefix": rr.Prefix, "price": rr.Price,
 			"init_dur": rr.InitDur, "step_dur": rr.StepDur, "min_dur": rr.MinDur,
 		})
 	}
+	s.cfgMu.RUnlock()
 	writeJSON(w, 200, map[string]any{"rates": rows, "count": len(rows)})
 }
 

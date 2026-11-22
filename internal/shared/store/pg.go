@@ -196,7 +196,7 @@ func (p *PG) InsertCDR(ctx context.Context, c *callcore.CDR) (bool, error) {
                          mos, jitter_ms, packet_loss)
         VALUES ($1, '00000000-0000-0000-0000-000000000001', $2::uuid, $3, $4,
                 $5::timestamptz,
-                CASE WHEN $17::timestamptz = '1970-01-01' THEN NULL ELSE $17::timestamptz END,
+                CASE WHEN $17::timestamptz <= '1970-01-01' THEN NULL ELSE $17::timestamptz END,
                 $5::timestamptz + ($6::int * interval '1 second'),
                 $6::int, $7::int, $8::numeric, $9::numeric, $10, $11::int, $12::int, $13::bool,
                 $14::real, $15::real, $16::real)
@@ -223,6 +223,23 @@ func (p *PG) AppendLedger(ctx context.Context, accountID string, delta, balance 
 		ledgerWritten.Inc(1)
 	}
 	return err
+}
+
+// HasLedgerForCall reports whether a call-settle ledger row already
+// exists for callID (CDRW redelivery must not skip a missing ledger
+// after a prior InsertCDR succeeded).
+func (p *PG) HasLedgerForCall(ctx context.Context, callID string) (bool, error) {
+	if callID == "" {
+		return false, nil
+	}
+	var n int
+	err := p.pool.QueryRow(ctx, `
+        SELECT COUNT(*) FROM balance_ledger
+        WHERE call_id = $1 AND reason = 'call-settle'`, callID).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("ledger exists: %w", err)
+	}
+	return n > 0, nil
 }
 
 // AppendAudit writes one audit-log row. before/after accept any

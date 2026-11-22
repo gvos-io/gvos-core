@@ -40,7 +40,11 @@ func Verify(secret string, header string, body []byte, maxSkew time.Duration) bo
 	mac.Write([]byte(strconv.FormatInt(t, 10)))
 	mac.Write([]byte("."))
 	mac.Write(body)
-	return hex.EncodeToString(mac.Sum(nil)) == sig
+	want, err := hex.DecodeString(sig)
+	if err != nil {
+		return false
+	}
+	return hmac.Equal(mac.Sum(nil), want)
 }
 
 // Backoff schedule (retry 0..4), then dead-letter.

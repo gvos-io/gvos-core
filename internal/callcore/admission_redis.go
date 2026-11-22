@@ -81,6 +81,23 @@ func (a *AdmissionR) EndChain(ctx context.Context, callID string, chain []string
 	return err
 }
 
+// DecrCPS rolls back the per-second counter after a successful AdmitCall
+// whose subsequent reserve failed — without this the CPS slot is a
+// ghost occupancy until the 1s TTL expires.
+func (a *AdmissionR) DecrCPS(ctx context.Context, accountID string, start time.Time) error {
+	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)
+	defer cancel()
+	k := cpsKey(accountID, start.Unix())
+	n, err := a.rdb.Raw().Decr(ctx, k).Result()
+	if err != nil {
+		return err
+	}
+	if n < 0 {
+		_ = a.rdb.Raw().Del(ctx, k).Err()
+	}
+	return nil
+}
+
 // LiveConcurrent counts the account's live calls (ZCARD).
 func (a *AdmissionR) LiveConcurrent(ctx context.Context, accountID string) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)

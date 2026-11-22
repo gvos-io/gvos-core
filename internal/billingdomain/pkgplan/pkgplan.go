@@ -201,8 +201,15 @@ func (e *Engine) Apply(accountID string, billedSecs int, ratedCost money.Amount)
 	}
 	// Spend accrues the discounted share of the rated cost. The
 	// ratio stays float (it is a proportion, not money); the product
-	// returns to fixed point via the scaled numerator.
-	share := int64(ratedCost) * int64(billable*1e9/float64(billedSecs)) / 1e9
+	// returns to fixed point via the scaled numerator. Guard billedSecs
+	// so a zero-duration call never produces NaN→garbage spend.
+	var share int64
+	if billedSecs > 0 {
+		share = int64(ratedCost) * int64(billable*1e9/float64(billedSecs)) / 1e9
+		if a.pkg.Discount > 0 && a.pkg.Discount != 1 {
+			share = int64(float64(share) * a.pkg.Discount)
+		}
+	}
 	a.spend = a.spend.Add(money.Amount(share))
 	if e.pr != nil {
 		if _, err := e.pr.AddSpend(context.Background(), accountID, key, money.Amount(share)); err != nil {
