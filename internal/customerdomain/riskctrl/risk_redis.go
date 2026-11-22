@@ -83,6 +83,41 @@ func (r *RiskR) CostDayAdd(ctx context.Context, day int64, account string, amt m
 	return money.Amount(res[0].(*redis.IntCmd).Val()), nil
 }
 
+// costDayTryAddScript atomically checks spent+add <= limit then INCRBY.
+// Returns {1, newTotal} on admit or {0, current} when over the cap —
+// closes the multi-replica TOCTOU between CostDayGet and CostDayAdd.
+var costDayTryAddScript = rds.NewScript(`
+local lim = tonumber(ARGV[1])
+local add = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local cur = tonumber(redis.call('GET', KEYS[1]) or '0')
+if cur + add > lim then
+  return {0, cur}
+end
+local n = redis.call('INCRBY', KEYS[1], add)
+redis.call('EXPIRE', KEYS[1], ttl)
+return {1, n}
+`)
+
+// CostDayTryAdd is the atomic cost_day admit: true when the call fits
+// under the daily cap (and the estimate is reserved on the counter).
+func (r *RiskR) CostDayTryAdd(ctx context.Context, day int64, account string, amt, limit money.Amount) (ok bool, total money.Amount, err error) {
+	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)
+	defer cancel()
+	res, err := costDayTryAddScript.Run(ctx, r.rdb, []string{costDayKey(day, account)},
+		int64(limit), int64(amt), int64(costDayTTL/time.Second))
+	if err != nil {
+		return false, 0, err
+	}
+	arr, _ := res.([]any)
+	if len(arr) < 2 {
+		return false, 0, fmt.Errorf("cost_day try-add: bad script result")
+	}
+	admitted, _ := arr[0].(int64)
+	tot, _ := arr[1].(int64)
+	return admitted == 1, money.Amount(tot), nil
+}
+
 // CostDaySub reconciles down at settlement (actual < est).
 func (r *RiskR) CostDaySub(ctx context.Context, day int64, account string, amt money.Amount) error {
 	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)

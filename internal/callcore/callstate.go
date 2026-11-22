@@ -91,6 +91,52 @@ func (m *Manager) SetBalanceAuthority(b BalanceAuthority) { m.bal = b }
 // map, closing the ×N oversell. nil = local admission.
 func (m *Manager) SetAdmissionLedger(a *AdmissionR) { m.adm = a }
 
+// StartLedgerSweeper periodically drops Redis admission members older
+// than ZombieTTL. Key-level EXPIRE refreshes on every new call, so
+// without member pruning a busy account keeps crashed-replica
+// callIDs forever. Returns a stop function.
+func (m *Manager) StartLedgerSweeper(interval time.Duration) (stop func()) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				m.sweepLedger()
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+func (m *Manager) sweepLedger() {
+	if m.adm == nil {
+		return
+	}
+	accs, err := m.store.List()
+	if err != nil {
+		return
+	}
+	ctx := context.Background()
+	for _, a := range accs {
+		zombies, err := m.adm.Zombies(ctx, a.ID)
+		if err != nil || len(zombies) == 0 {
+			continue
+		}
+		for _, cid := range zombies {
+			if err := m.adm.Remove(ctx, a.ID, cid); err != nil {
+				log.Printf("ledger zombie remove %s/%s: %v", a.ID, cid, err)
+			}
+		}
+	}
+}
+
 // reserve/commit route through the balance authority (fail-closed on
 // start: an unavailable authority is an error the caller turns into a
 // 403/503; interim/settle paths log and continue per the plan).
@@ -208,6 +254,12 @@ func (m *Manager) StartInterimDriver(interval time.Duration) (stop func()) {
 	return func() { close(done) }
 }
 
+// interimWorkers is the parallel fan-out for one Interim pass. Under
+// tens of thousands of live calls a single goroutine starves RPC;
+// a small pool keeps Redis latency overlapping without unbounded
+// goroutine storms.
+const interimWorkers = 8
+
 // driveInterim runs one interim pass over all live calls that have not
 // been torn down yet. Errors from raced-out calls (BYE settled between
 // snapshot and Interim) are ignored: the call is simply gone.
@@ -220,9 +272,29 @@ func (m *Manager) driveInterim() {
 		}
 	}
 	m.mu.Unlock()
-	for _, id := range ids {
-		_, _ = m.Interim(id)
+	if len(ids) == 0 {
+		return
 	}
+	n := interimWorkers
+	if len(ids) < n {
+		n = len(ids)
+	}
+	ch := make(chan string, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			for id := range ch {
+				_, _ = m.Interim(id)
+			}
+		}()
+	}
+	for _, id := range ids {
+		ch <- id
+	}
+	close(ch)
+	wg.Wait()
 }
 
 // sweep settles one pass of timed-out calls. Timeout is measured from
@@ -666,6 +738,7 @@ func (m *Manager) End(callID string, seconds int) (*CDR, error) {
 		Duration:   seconds,
 		BilledSecs: billedSecs,
 		Cost:       cost,
+		EstCost:    lock,
 		RatePrefix: prefix,
 		Price:      price,
 		Release:    release,
@@ -683,6 +756,7 @@ type CDR struct {
 	Duration   int       // connected seconds
 	BilledSecs int       // billed seconds
 	Cost       money.Amount
+	EstCost    money.Amount // pre-answer lock / risk day-cost estimate
 	RatePrefix string
 	Price      money.Amount // per-minute price applied
 	Release    string       // normal | balance-exhausted | unratable

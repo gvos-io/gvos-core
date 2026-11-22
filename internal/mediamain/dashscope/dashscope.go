@@ -242,9 +242,23 @@ func (s *Session) readLoop() {
 					continue
 				}
 				final := sent.EndTime > 0 || sent.BeginNo != 0
-				select {
-				case s.results <- Sentence{Text: sent.Text, Final: final}:
-				default: // slow consumer drops partials, keeps finals queued next
+				s.mu.Lock()
+				closed := s.closed
+				s.mu.Unlock()
+				if closed {
+					return
+				}
+				if final {
+					// Finals wait briefly; partials drop on a full buffer.
+					select {
+					case s.results <- Sentence{Text: sent.Text, Final: true}:
+					case <-time.After(50 * time.Millisecond):
+					}
+				} else {
+					select {
+					case s.results <- Sentence{Text: sent.Text, Final: false}:
+					default:
+					}
 				}
 			case "task-finished":
 				return

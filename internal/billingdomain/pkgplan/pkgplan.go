@@ -156,69 +156,83 @@ type RateResult struct {
 // Apply runs package semantics for one call of billedSecs at
 // ratedCost (list). It advances the cycle counters and returns the
 // effective billing split. Calls on accounts without a package pass
-// through unchanged.
+// through unchanged. Redis round trips run outside e.mu so callEnd
+// paths do not serialize on the package lock.
 func (e *Engine) Apply(accountID string, billedSecs int, ratedCost money.Amount) RateResult {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	a, ok := e.accounts[accountID]
 	if !ok {
+		e.mu.Unlock()
 		return RateResult{FreeSecs: 0, BillableSecs: float64(billedSecs), Discount: 1}
 	}
-	// Cycle rollover resets counters.
 	key := e.cycleKeyOf(a.pkg.Cycle)
 	if key != a.cycleKey {
 		a.cycleKey = key
 		a.freeUsedSecs = 0
 		a.spend = 0
+		e.accounts[accountID] = a
 	}
+	maxFree := float64(a.pkg.FreeMinutes) * 60
+	localUsed := a.freeUsedSecs
+	discount := a.pkg.Discount
+	pr := e.pr
+	e.mu.Unlock()
 
-	// Free-allowance headroom: the shared counter is authoritative when
-	// wired (Phase 4) — the free minutes then aggregate every
-	// replica's consumption. Fail-open to the local view on error.
-	freeLeft := float64(a.pkg.FreeMinutes)*60 - a.freeUsedSecs
-	if e.pr != nil {
-		if n, err := e.pr.GetUsed(context.Background(), accountID, key); err == nil {
-			freeLeft = float64(a.pkg.FreeMinutes)*60 - n
+	want := float64(billedSecs)
+	var free float64
+	if pr != nil {
+		claimed, err := pr.ClaimUsed(context.Background(), accountID, key, want, maxFree)
+		if err != nil {
+			warn("used claim", err)
+			freeLeft := maxFree - localUsed
+			if freeLeft < 0 {
+				freeLeft = 0
+			}
+			free = want
+			if free > freeLeft {
+				free = freeLeft
+			}
 		} else {
-			warn("used read", err)
+			free = claimed
 		}
-	}
-	if freeLeft < 0 {
-		freeLeft = 0
-	}
-	free := float64(billedSecs)
-	if free > freeLeft {
-		free = freeLeft
+	} else {
+		freeLeft := maxFree - localUsed
+		if freeLeft < 0 {
+			freeLeft = 0
+		}
+		free = want
+		if free > freeLeft {
+			free = freeLeft
+		}
 	}
 	billable := float64(billedSecs) - free
 
-	a.freeUsedSecs += free
-	if e.pr != nil {
-		if _, err := e.pr.AddUsed(context.Background(), accountID, key, free); err != nil {
-			warn("used add", err)
-		}
-	}
-	// Spend accrues the discounted share of the rated cost. The
-	// ratio stays float (it is a proportion, not money); the product
-	// returns to fixed point via the scaled numerator. Guard billedSecs
-	// so a zero-duration call never produces NaN→garbage spend.
 	var share int64
 	if billedSecs > 0 {
 		share = int64(ratedCost) * int64(billable*1e9/float64(billedSecs)) / 1e9
-		if a.pkg.Discount > 0 && a.pkg.Discount != 1 {
-			share = int64(float64(share) * a.pkg.Discount)
+		if discount > 0 && discount != 1 {
+			share = int64(float64(share) * discount)
 		}
 	}
-	a.spend = a.spend.Add(money.Amount(share))
-	if e.pr != nil {
-		if _, err := e.pr.AddSpend(context.Background(), accountID, key, money.Amount(share)); err != nil {
+	amt := money.Amount(share)
+	if pr != nil && amt != 0 {
+		if _, err := pr.AddSpend(context.Background(), accountID, key, amt); err != nil {
 			warn("spend add", err)
 		}
 	}
-	e.accounts[accountID] = a
 
-	return RateResult{FreeSecs: free, BillableSecs: billable, Discount: a.pkg.Discount}
+	e.mu.Lock()
+	a, ok = e.accounts[accountID]
+	if ok {
+		if a.cycleKey == key {
+			a.freeUsedSecs += free
+			a.spend = a.spend.Add(amt)
+		}
+		e.accounts[accountID] = a
+	}
+	e.mu.Unlock()
+
+	return RateResult{FreeSecs: free, BillableSecs: billable, Discount: discount}
 }
 
 // MinSpendShortfall returns how much the account is below its

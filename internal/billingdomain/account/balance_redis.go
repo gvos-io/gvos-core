@@ -77,8 +77,8 @@ func (b *BalanceR) Seed(ctx context.Context) error {
 // chainIDs returns the prepaid chain (Go walks the config tree; Redis
 // executes the money).
 func (b *BalanceR) chainIDs(id string) ([]string, []money.Amount, error) {
-	b.s.mu.Lock()
-	defer b.s.mu.Unlock()
+	b.s.mu.RLock()
+	defer b.s.mu.RUnlock()
 	chain, err := b.s.chainLocked(id)
 	if err != nil {
 		return nil, nil, err

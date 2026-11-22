@@ -123,6 +123,13 @@ local cid = ARGV[1]
 local score = tonumber(ARGV[2])
 local cps = ARGV[4]
 local cpsCap = tonumber(ARGV[5])
+-- Drop ledger members older than the zombie TTL before ZCARD so a
+-- busy account's key-level EXPIRE refresh cannot keep crashed-replica
+-- callIDs forever.
+local cutoff = score - ` + fmt.Sprint(ZombieTTLSeconds) + `
+for i = 1, #KEYS do
+  redis.call('ZREMRANGEBYSCORE', KEYS[i], '-inf', cutoff)
+end
 for i = 1, #KEYS do
   local cap = tonumber(ARGV[5 + i])
   if cap > 0 then

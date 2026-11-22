@@ -7,6 +7,7 @@ package pkgplan
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strconv"
 	"time"
@@ -47,6 +48,47 @@ func (p *PkgR) AddUsed(ctx context.Context, account, cycleKey string, secs float
 		return 0, err
 	}
 	return res[0].(*redis.FloatCmd).Val(), nil
+}
+
+// claimUsedScript atomically claims up to `want` free seconds under a
+// cycle cap — closes GetUsed/AddUsed TOCTOU across replicas.
+// ARGV: wantSecs, maxFreeSecs, ttlSeconds. Returns seconds actually claimed.
+var claimUsedScript = rds.NewScript(`
+local want = tonumber(ARGV[1])
+local maxf = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local used = tonumber(redis.call('GET', KEYS[1]) or '0')
+local left = maxf - used
+if left < 0 then left = 0 end
+local take = want
+if take > left then take = left end
+if take > 0 then
+  redis.call('INCRBYFLOAT', KEYS[1], take)
+  redis.call('EXPIRE', KEYS[1], ttl)
+end
+return tostring(take)
+`)
+
+// ClaimUsed atomically reserves free seconds under the cycle allowance.
+func (p *PkgR) ClaimUsed(ctx context.Context, account, cycleKey string, want, maxFree float64) (float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)
+	defer cancel()
+	res, err := claimUsedScript.Run(ctx, p.rdb, []string{usedKey(account, cycleKey)},
+		want, maxFree, int64(cycleTTL/time.Second))
+	if err != nil {
+		return 0, err
+	}
+	switch v := res.(type) {
+	case string:
+		f, err := strconv.ParseFloat(v, 64)
+		return f, err
+	case []byte:
+		f, err := strconv.ParseFloat(string(v), 64)
+		return f, err
+	default:
+		f, err := strconv.ParseFloat(fmt.Sprint(v), 64)
+		return f, err
+	}
 }
 
 // AddSpend advances cycle spend (fixed-point integer INCRBY).

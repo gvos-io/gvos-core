@@ -361,7 +361,9 @@ func cdrRawHandler(s *Server) func(data []byte) error {
 // shape, same as the teardown fallback).
 func StartCdrRawConsumer(s *Server) {
 	handler := cdrRawHandler(s)
-	if c, err := s.events.NewDurableConsumer("CDRR", events.SubjectCDRRaw, handler, 1); err != nil {
+	// Four competing workers: a single CDRR goroutine capped end-call
+	// throughput under BYE storms (settlement is Redis+package+emit).
+	if c, err := s.events.NewDurableConsumer("CDRR", events.SubjectCDRRaw, handler, 4); err != nil {
 		if err2 := s.events.Subscribe(events.SubjectCDRRaw, func(data []byte) {
 			_ = handler(data)
 		}); err2 != nil {

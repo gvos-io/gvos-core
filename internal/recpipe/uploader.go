@@ -92,7 +92,14 @@ func (u *Uploader) processOne(ctx context.Context, name string) (bool, error) {
 	}
 
 	rec := Recording{CallID: callID, LocalPath: local, SizeBytes: st.Size()}
-	rec.Track = ClassifyTrack(rec, u.seenForCall)
+	// Peek track without advancing: failed uploads must not flip
+	// agent/user on the next retry.
+	n := u.seenForCall[callID]
+	if n == 0 {
+		rec.Track = TrackAgent
+	} else {
+		rec.Track = TrackUser
+	}
 	objectKey := ObjectKey(callID, rec.Track, "mp3", st.ModTime().Format(time.RFC3339))
 
 	locator, err := u.Store.Put(ctx, objectKey, local)
@@ -109,6 +116,7 @@ func (u *Uploader) processOne(ctx context.Context, name string) (bool, error) {
 	if err := os.Remove(local); err != nil && !os.IsNotExist(err) {
 		return false, fmt.Errorf("cleanup: %w", err)
 	}
+	u.seenForCall[callID] = n + 1
 	if u.Emit != nil {
 		u.Emit(events.SubjectRecordingCompleted, map[string]any{
 			"call_id": callID, "track": rec.Track,
@@ -121,20 +129,28 @@ func (u *Uploader) processOne(ctx context.Context, name string) (bool, error) {
 }
 
 // Run scans on a ticker until stop is closed (the api layer starts
-// this next to the other async workers).
+// this next to the other async workers). Overlapping ticks are
+// skipped so a slow ScanOnce cannot pile up concurrent ReadDir/upload
+// passes against a large output directory.
 func (u *Uploader) Run(ctx context.Context, interval time.Duration) (stop func()) {
 	t := time.NewTicker(interval)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		busy := false
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				if busy {
+					continue
+				}
+				busy = true
 				if _, err := u.ScanOnce(ctx); err != nil {
 					log.Printf("recpipe scan: %v", err)
 				}
+				busy = false
 			}
 		}
 	}()

@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -356,7 +357,9 @@ func requireInternal(w http.ResponseWriter, r *http.Request) bool {
 	if r.Header.Get("X-GVOS-Internal") == want || r.URL.Query().Get("token") == want {
 		return true
 	}
-	log.Printf("AUTH-DEBUG %s %s hdr=%q q=%q", r.Method, r.URL.RequestURI(), r.Header.Get("X-GVOS-Internal"), r.URL.Query().Get("token"))
+	// Never log presented tokens — they are credentials and may land
+	// in access/log aggregators.
+	log.Printf("AUTH-DEBUG %s %s: bad or missing internal token", r.Method, r.URL.Path)
 	httpErrorC(w, 401, "UNAUTHORIZED", "bad internal token")
 	return false
 }
@@ -826,24 +829,43 @@ func (s *Server) routeRiskLegacy(w http.ResponseWriter, r *http.Request) {
 func (s *Server) lcrGateways() []gateway.Gateway {
 	gws := s.gws.Gateways()
 	r := &lcrRater{s: s, cache: map[string]*rate.Table{}}
-	// Reorder per served-prefix family: the longest common destination
-	// shape here is the union of prefixes; a single global order per
-	// gateway set keeps the htable contract (one prio per id). We
-	// order by the gateway's own best-prefix cheapest rate.
-	ordered := gateway.LCR(gws, "0", r) // placeholder dest; refined below
-	// Refine: order against each distinct prefix and take the best
-	// (lowest) resulting index per gateway.
-	pos := map[string]int{}
+	// Average rank across served prefixes — taking the MIN index
+	// collapsed distinct cost orders (a gateway #0 on 8613 and #5 on
+	// 86 both became Priority 0). Mean rank keeps relative cost order
+	// in the single global priority the edge htable can carry.
+	sum := map[string]int{}
+	cnt := map[string]int{}
 	for _, p := range distinctPrefixes(gws) {
 		for i, g := range gateway.LCR(gws, p, r) {
-			if cur, ok := pos[g.ID]; !ok || i < cur {
-				pos[g.ID] = i
-			}
+			sum[g.ID] += i
+			cnt[g.ID]++
 		}
 	}
-	out := make([]gateway.Gateway, 0, len(ordered))
+	type ranked struct {
+		gw  gateway.Gateway
+		avg float64
+	}
+	rows := make([]ranked, 0, len(gws))
 	for _, g := range gws {
-		g.Priority = pos[g.ID]
+		avg := float64(len(gws))
+		if c := cnt[g.ID]; c > 0 {
+			avg = float64(sum[g.ID]) / float64(c)
+		}
+		rows = append(rows, ranked{g, avg})
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].avg != rows[j].avg {
+			return rows[i].avg < rows[j].avg
+		}
+		if rows[i].gw.Priority != rows[j].gw.Priority {
+			return rows[i].gw.Priority < rows[j].gw.Priority
+		}
+		return rows[i].gw.ID < rows[j].gw.ID
+	})
+	out := make([]gateway.Gateway, 0, len(rows))
+	for i, row := range rows {
+		g := row.gw
+		g.Priority = i
 		out = append(out, g)
 	}
 	return out
@@ -911,6 +933,7 @@ func AttachRedis(s *Server, c *rds.Client) {
 	// Phase 2: the shared admission ledger (chain-mirrored ZSETs +
 	// per-second CPS counters) closes the ×N concurrent/CPS oversell.
 	s.calls.SetAdmissionLedger(callcore.NewAdmissionR(c))
+	s.calls.StartLedgerSweeper(time.Minute)
 	// Phase 3: shared risk windows (freq/reg sliding ZSETs, day-cost
 	// accumulators) — fail-open, the fraud engine never gates the
 	// platform.

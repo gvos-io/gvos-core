@@ -7,15 +7,16 @@
 package api
 
 import (
-	"math"
-	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"context"
 	"errors"
 	"log"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/billing"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"github.com/gvos-io/gvos-core/internal/callcore"
 	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
@@ -76,28 +77,6 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 		}
 	}
 
-	// Fraud engine: frequency/cost/prefix rules, block or alert —
-	// evaluated against the REAL destination (post-AXB resolve; a
-	// dest_prefix rule for B must fire even when the caller dialed X).
-	// Estimated cost for the cost-cap check uses the 60s lock basis.
-	if h := s.risk.CheckCall(accID, actualDest, money.MustFromYuan(0.05)); h.Blocked {
-		s.emit(events.SubjectRiskBlocked, map[string]string{
-			"account_id": accID, "dest": actualDest, "rule_id": h.RuleID, "reason": h.Reason,
-		})
-		return 403, map[string]errorEnvelope{"error": {Code: "FORBIDDEN", Message: "risk-blocked [" + h.RuleID + "]: " + h.Reason}}
-	} else if h.Alerted {
-		log.Printf("RISK-ALERT account=%s rule=%s: %s", accID, h.RuleID, h.Reason)
-		// username rides the payload: the Kamailio edge keys its
-		// banned htable on $fU (SIP username), not the account ID.
-		username := req.From
-		if a, err := s.store.Get(accID); err == nil {
-			username = a.Username
-		}
-		s.emit(events.SubjectRiskAlert, map[string]string{
-			"account": accID, "username": username, "rule_id": h.RuleID, "reason": h.Reason, "to": actualDest,
-		})
-	}
-
 	now := time.Now()
 	s.cfgMu.RLock()
 	rates := s.rates
@@ -105,6 +84,25 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	entry := rates.Lookup(actualDest, int(now.Weekday()), now.Hour()*60+now.Minute())
 	if entry == nil {
 		return 404, map[string]errorEnvelope{"error": {Code: "NOT_FOUND", Message: "no rate for destination " + actualDest}}
+	}
+	// Fraud engine: frequency/cost/prefix rules against the REAL
+	// destination (post-AXB). Daily-cost estimate uses the same 60s
+	// lock basis as Start — never a hardcoded stub amount.
+	estCost := (&billing.Charger{}).EstimatedCost(entry, 60)
+	if h := s.risk.CheckCall(accID, actualDest, estCost); h.Blocked {
+		s.emit(events.SubjectRiskBlocked, map[string]string{
+			"account_id": accID, "dest": actualDest, "rule_id": h.RuleID, "reason": h.Reason,
+		})
+		return 403, map[string]errorEnvelope{"error": {Code: "FORBIDDEN", Message: "risk-blocked [" + h.RuleID + "]: " + h.Reason}}
+	} else if h.Alerted {
+		log.Printf("RISK-ALERT account=%s rule=%s: %s", accID, h.RuleID, h.Reason)
+		username := req.From
+		if a, err := s.store.Get(accID); err == nil {
+			username = a.Username
+		}
+		s.emit(events.SubjectRiskAlert, map[string]string{
+			"account": accID, "username": username, "rule_id": h.RuleID, "reason": h.Reason, "to": actualDest,
+		})
 	}
 	if err := s.calls.Start(req.CallID, accID, actualDest, entry, 60, s.recordEnabled); err != nil {
 		// Insufficient balance is a 403 for the caller; account limits
@@ -238,8 +236,9 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 	}
 
 	// Fraud engine settlement: reconcile the daily cost accumulation
-	// with the actual CDR cost (estimate was 0.05 basis at start).
-	s.risk.SettleCost(cdr.AccountID, money.MustFromYuan(0.05), cdr.Cost)
+	// with the actual CDR cost (EstCost is the same 60s lock basis
+	// reserved at CheckCall/Start).
+	s.risk.SettleCost(cdr.AccountID, cdr.EstCost, cdr.Cost)
 	// Media plane: close the call's stream (subscribers drop, final
 	// stats reported for the RTT budget audit).
 	if st, ok := s.media.Close(req.CallID); ok && st.UplinkChunks+st.DownlinkChunks > 0 {

@@ -152,6 +152,9 @@ func (s *Store) Commit(token string, id string, est, actual money.Amount) error 
 	}
 	diff := est.Sub(actual) // positive: refund remainder
 	for _, a := range chain {
+		if a.Postpaid {
+			continue // match Redis authority: postpaid skips prepaid movements
+		}
 		a.Credit = a.Credit.Add(diff)
 	}
 	return nil

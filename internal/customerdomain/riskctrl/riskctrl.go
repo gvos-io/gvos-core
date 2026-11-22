@@ -106,13 +106,18 @@ type Hit struct {
 func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 	now := e.now()
 	var hit Hit
+	// cost_day is deferred to a post-loop atomic TryAdd so a later
+	// blocking rule does not leave a stranded day-cost reservation.
+	var costDayRule *Rule
+	var costDayLim money.Amount
 
 	e.mu.Lock()
 	rules := e.rules // header copy: SetRules swaps the slice, elements are never mutated
 	rr := e.rr
 	e.mu.Unlock()
 
-	for _, r := range rules {
+	for i := range rules {
+		r := &rules[i]
 		if r.Disabled {
 			continue
 		}
@@ -127,7 +132,7 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 				n, err := rr.SlidingCount(context.Background(), rfreqKey(account), now)
 				if err == nil {
 					if n > r.Limit {
-						hit = decide(hit, r, fmt.Sprintf("%d calls/min exceeds %d (shared)", n, r.Limit))
+						hit = decide(hit, *r, fmt.Sprintf("%d calls/min exceeds %d (shared)", n, r.Limit))
 						continue
 					}
 					continue
@@ -139,7 +144,7 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 			cutoff := now.Unix() - 60
 			e.mu.Lock()
 			ts := e.calls[account]
-			recent := ts[:0]
+			recent := make([]int64, 0, len(ts))
 			for _, t := range ts {
 				if t >= cutoff {
 					recent = append(recent, t)
@@ -148,26 +153,23 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 			e.calls[account] = recent
 			e.mu.Unlock()
 			if len(recent)+1 > r.Limit {
-				hit = decide(hit, r, fmt.Sprintf("%d calls/min exceeds %d", len(recent)+1, r.Limit))
+				hit = decide(hit, *r, fmt.Sprintf("%d calls/min exceeds %d", len(recent)+1, r.Limit))
 				continue // rule matched; other rules may still add alerts
 			}
 		case "cost_day":
-			day := dayKey(now)
-			if rr != nil {
-				spent, err := rr.CostDayGet(ctx0(), day, account)
-				if err == nil {
-					if spent.Add(estCost) > money.MustFromYuan(r.CostLimit) {
-						hit = decide(hit, r, fmt.Sprintf("daily cost %s+%s exceeds %.2f (shared)", spent, estCost, r.CostLimit))
-					}
-					continue
-				}
-				warn("cost_day get", err)
+			lim, limErr := money.FromYuan(r.CostLimit)
+			if limErr != nil {
+				warn("cost_day limit", limErr)
+				continue
 			}
+			// Defer the shared atomic reserve until every other rule
+			// has had a chance to block; local pre-check still runs.
+			costDayRule, costDayLim = r, lim
 			e.mu.Lock()
-			spent := e.dayCost[day][account]
+			spent := e.dayCost[dayKey(now)][account]
 			e.mu.Unlock()
-			if spent.Add(estCost) > money.MustFromYuan(r.CostLimit) {
-				hit = decide(hit, r, fmt.Sprintf("daily cost %s+%s exceeds %.2f", spent, estCost, r.CostLimit))
+			if spent.Add(estCost) > lim {
+				hit = decide(hit, *r, fmt.Sprintf("daily cost %s+%s exceeds %.2f", spent, estCost, r.CostLimit))
 			}
 		case "dest_prefix":
 			// Admission list: the call destination must match one of
@@ -180,8 +182,21 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 				}
 			}
 			if !matched {
-				hit = decide(hit, r, "destination not in admitted prefixes")
+				hit = decide(hit, *r, "destination not in admitted prefixes")
 			}
+		}
+	}
+
+	redisCostReserved := false
+	if !hit.Blocked && costDayRule != nil && rr != nil {
+		ok, spent, err := rr.CostDayTryAdd(ctx0(), dayKey(now), account, estCost, costDayLim)
+		if err != nil {
+			warn("cost_day try-add", err)
+			// fail-open: local admit below; CostDayAdd retries the shared counter
+		} else if !ok {
+			hit = decide(hit, *costDayRule, fmt.Sprintf("daily cost %s+%s exceeds %.2f (shared)", spent, estCost, costDayRule.CostLimit))
+		} else {
+			redisCostReserved = true
 		}
 	}
 
@@ -196,9 +211,9 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 		}
 		e.dayCost[day][account] += estCost
 		e.mu.Unlock()
-		if rr != nil {
-			// freq window already advanced inside SlidingCount; the day
-			// accumulator is advanced here (evaluate read, admit writes).
+		// Shared day counter: TryAdd already reserved when it succeeded;
+		// otherwise (no cost_day rule, or Redis fail-open) INCRBY here.
+		if rr != nil && !redisCostReserved {
 			if _, err := rr.CostDayAdd(ctx0(), day, account, estCost); err != nil {
 				warn("cost_day add", err)
 			}
