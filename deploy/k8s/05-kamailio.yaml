@@ -26,7 +26,7 @@ spec:
     spec:
       containers:
       - name: kamailio
-        image: gvos-kamailio:latest
+        image: gvos-kamailio:6.0.1-gvos.1
         imagePullPolicy: IfNotPresent
         env:
         - {name: GVOS_NODE_HOST, valueFrom: {fieldRef: {fieldPath: metadata.name}}}

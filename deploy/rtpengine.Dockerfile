@@ -1,5 +1,6 @@
 # Minimal rtpengine daemon image from Debian packages.
-# Build: docker build -f deploy/rtpengine.Dockerfile -t gvos-rtpengine deploy/
+# Build: docker build -f deploy/rtpengine.Dockerfile -t gvos-rtpengine:bookworm-gvos.1 deploy/
+# Tag policy: docs/edge-deps-fork-strategy.md
 
 FROM debian:bookworm-slim
 

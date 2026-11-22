@@ -8,9 +8,14 @@ image:
   gvCore:
     repository: gvos/gvos-core
     tag: "0.1.0"
+  # Self-built images (nats.so); see docs/edge-deps-fork-strategy.md.
+  # Do not use ghcr.io/kamailio/kamailio-ci alpine — it lacks nats.so.
   kamailio:
-    repository: ghcr.io/kamailio/kamailio-ci
-    tag: "6.1-alpine"
+    repository: gvos-kamailio
+    tag: "6.0.1-gvos.1"
+  rtpengine:
+    repository: gvos-rtpengine
+    tag: "bookworm-gvos.1"
 
 # Database: production brings an external HA Postgres (Patroni or
 # managed). The chart does NOT ship a database by default.

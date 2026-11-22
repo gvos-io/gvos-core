@@ -10,7 +10,8 @@
 #               kamailio-extra-modules, Kamailio 6.0.1
 # Hence trixie.
 #
-# Build: docker build -f deploy/kamailio.Dockerfile -t gvos-kamailio deploy/
+# Build: docker build -f deploy/kamailio.Dockerfile -t gvos-kamailio:6.0.1-gvos.1 deploy/
+# Tag policy: docs/edge-deps-fork-strategy.md
 # (context must cover deploy/ so the cfg and tls material mount cleanly;
 # runtime mounts overwrite /etc/kamailio anyway).
 

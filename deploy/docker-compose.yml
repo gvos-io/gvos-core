@@ -124,7 +124,7 @@ services:
     build:
       context: .
       dockerfile: kamailio.Dockerfile
-    image: gvos-kamailio
+    image: gvos-kamailio:6.0.1-gvos.1
     # The signaling edge is a single point of the stack: a dead VM
     # hiccup (observed SIGTERM storms on Docker Desktop under
     # sustained 100-200CPS benches, exit 139 with no restart) must
@@ -179,7 +179,7 @@ services:
     build:
       context: .
       dockerfile: rtpengine.Dockerfile
-    image: gvos-rtpengine
+    image: gvos-rtpengine:bookworm-gvos.1
     # CLI binds 127.0.0.1 (the in-image config's [::1]:2224 fails on
     # hosts without IPv6 localhost — Alibaba Cloud Linux kernel).
     volumes:
