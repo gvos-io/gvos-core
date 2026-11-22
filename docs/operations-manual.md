@@ -90,7 +90,7 @@ docker exec -i gvos-postgres-1 psql -U gvos < migrations/00N_xxx.sql
 | 现象 | 排查顺序 |
 |---|---|
 | 呼叫全部 403 | gv-core stats 余额 → 账户 credit；风控规则（`GET /v1/admin/risk-rules`）；黑名单 |
-| 呼叫 503 No Gateway | `kamcmd dispatcher.list` 看网关 FLAGS（IP=探测失败）→ 检查网关容器/网络；恢复后探测自动恢复 |
+| 呼叫 503 No Gateway | `kamcmd htable.dump gw` 是否空表 → 看 `GW_POLL`/`GW_SYNC` 日志；空表多在 Kamailio 刚重启（≤5s 应自愈）；仍空则查 `curl -H "X-GVOS-Internal:…" gv-core:8080/v1/internal/gateway-snapshot` 与 demo-gw/网关可达性；`gwfail` 冷却见 `htable.dump gwfail` |
 | bill-lock REJECTED rc=3 | Kamailio→gv-core 网络断（`docker ps` 看 gv-core 状态） |
 | live_calls 持续增长 | UAS/网关不发 BYE；10 分钟后清扫器自动结算；持续增长=泄漏，报研发 |
 | 大量 `REMOTE-SETTLE` | Call-ID 粘性失效或滚动发布过久；查 LB hash；偶发可接受，持续升高要修粘性 |
@@ -116,11 +116,12 @@ docker exec -i gvos-postgres-1 psql -U gvos < migrations/00N_xxx.sql
    对 `gvos.svc.call.*` / HTTP `/v1/call/*` 用 Call-ID（或 From+Call-ID）做
    consistent hash / sticky session，保证同一通话的 Start/Interim/End 落到同一副本。
 2. **Redis call meta 兜底（已实现）**  
-   Start 写入 `gvos:callmeta:{callID}`；本机 End 404 时 peer 用 meta 做一次
+   Start 写入 `gvos:callmeta:{callID}`（TTL 15m）；本机 End miss 时 peer 用 meta 做一次
    `remote-settle`（扣/退余额 + 清 admission）。`gvos:callsettled:{callID}` SETNX
-   防止双结算。日志关键词：`REMOTE-SETTLE`。
+   （**TTL 2m**，仅覆盖双 End 竞态）防止双结算。日志关键词：`REMOTE-SETTLE`。
 3. **监控**  
-   `REMOTE-SETTLE` 比例应接近 0；持续升高 = 粘性失效或滚动发布窗口过长。
+   `REMOTE-SETTLE` 比例应接近 0；持续升高 = 粘性失效或滚动发布窗口过长。  
+   可选：监控 `gvos:callsettled:*` 键数量（异常堆积说明 CPS×TTL 过大或锁未过期）。
 
 计费扣款语义（Mode A）：**只扣主叫叶子账户**；上级代理保留并发/CPS 上限，
 不与叶子同额预扣。上级分润若需要，走独立账本行，不共用 Reserve。
@@ -129,15 +130,20 @@ docker exec -i gvos-postgres-1 psql -U gvos < migrations/00N_xxx.sql
 
 | 变量 | 默认 | 含义 |
 |------|------|------|
+| `GVOS_REDIS_URL` | （空=内存单副本） | 多副本必配；余额/准入/callmeta 权威 |
 | `GVOS_RISK_MODE` | `open` | `strict`：Redis 风控不可用时拒呼 |
 | `GVOS_PKG_MODE` | `list_price` | `open`：Redis 套餐不可用时回退本地免费分钟 |
+
+边缘冷启动：Kamailio `GW_POLL` 每 5s 拉 `GET /v1/internal/gateway-snapshot`；
+core 启动立即 `gvos.cfg.reload` 广播（不等 60s）。重启后空 `gw` htable 应在数秒内自愈。
 
 ## 7. 容量规划参考
 
 - **实测基线**（见 `docs/bench/capacity-report-v0.md` v0.3）：单节点
   2,000 并发 / 100 CPS 聚合零失败，账目零漂移
 - 扩容路径：信令节点无状态（加 Kamailio 容器 + LB）；媒体加
-  rtpengine 节点；计费控制面可水平扩（**必须 Call-ID 粘性**，见 §6）
+  rtpengine 节点；计费控制面可水平扩（**Call-ID 粘性 + Redis**，见 §6；
+  架构压测见 `docs/bench/bench10-report-2026-11-22.md`）
 - 数据增长：CDR 月分区自动路由；**每月建下月分区**（预留
   `migrations/006_partition_maintenance.sql` 手工执行或挂 cron）；
   超过保留期的分区 `DETACH + 归档到对象存储`

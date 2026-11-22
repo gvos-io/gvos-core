@@ -175,3 +175,18 @@ Redis 是这些缺口的对症药：分布式原子计数/锁/TTL 结构天然�
 | M2 | +Phase 2 | 并发/CPS=cap；杀副本僵尸被回收 | ✅ 代码+单测；多副本实测留验证批次 |
 | M3 | +Phase 3+4 | 风控与套餐聚合正确 | ✅ 代码+单测 |
 | M4 | +Phase 5 | 全量完成；容量基准重测 | ⚠️ 代码完成；容量重测留验证批次 |
+
+---
+
+## 8. 后续架构补充（2026-11-22，非本方案 Phase，记入以免文档漂移）
+
+Redis 收口 unlock 多副本账务后，呼叫态仍在本机 map。v0.3 补齐结算面：
+
+| 项 | 说明 |
+|---|---|
+| `gvos:callmeta:{callID}` | Start 写入计费快照（TTL 15m）；peer End 可 remote-settle |
+| `gvos:callsettled:{callID}` | SETNX 结算锁（TTL **2m**）防双扣 |
+| Mode A 叶子扣款 | Reserve/Commit 只动叶子 prepaid；上级仅 Concurrent/CPS |
+| `GVOS_RISK_MODE` / `GVOS_PKG_MODE` | 风控/套餐 Redis 故障时 open vs strict / list_price |
+
+详见 [02-architecture §6](02-architecture.md)、[operations-manual §6](operations-manual.md)、[bench10-report-2026-11-22](bench/bench10-report-2026-11-22.md)。

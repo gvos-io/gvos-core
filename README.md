@@ -10,7 +10,7 @@
 
 </div>
 
-> **English** — gvos is a cloud-native telecom operations platform (softswitch orchestration + real-time billing + fraud control) built as a Go control plane over Kamailio/RTPengine. All state changes flow through a NATS JetStream event bus: CDR persistence, audit trail, teardown execution and multi-replica config sync are durable consumers, so the billing answer never waits on a database. One command brings up a working demo; the billing core is fully unit-tested with a reconciliation-first design.
+> **English** — gvos is a cloud-native telecom operations platform (softswitch orchestration + real-time billing + fraud control) built as a Go control plane over Kamailio/RTPengine. Runtime money/admission state lives in Redis; multi-replica gv-core uses Call-ID stickiness plus Redis callmeta remote-settle. All state changes flow through a NATS JetStream event bus (CDR, audit, teardown, config sync) so the billing answer never waits on a database. One command brings up a working demo; the billing core is fully unit-tested with a reconciliation-first design.
 
 ## 为什么是 gvos
 
@@ -26,33 +26,37 @@
 | 域 | 能力 |
 |---|---|
 | **计费引擎** | 前缀最长匹配（10 万条费率 133ns/次）、时段窗口（节假日/夜间）、步长 60+6 / 6+6 / 1+1 / N+M、首步价/增量价 |
-| **账户体系** | 租户→多级代理→账户树、全链路原子预锁定（all-or-nothing 回滚）、后付账户、并发/CPS 限额 |
-| **实时风控** | 频次/日成本/地区准入规则（block/alert）、黑白名单（前缀索引 220ns/次）、余额耗尽强制拆线 |
+| **账户体系** | 租户→多级代理→账户树；**Mode A 叶子扣款**（只预锁/结算主叫叶子，上级仅并发/CPS）；后付账户 |
+| **实时风控** | 频次/日成本/地区准入规则（block/alert）、黑白名单（前缀索引 220ns/次）、余额耗尽强制拆线；`GVOS_RISK_MODE` |
 | **信令边缘** | Kamailio 6.0 + nats 模块：鉴权 htable 缓存、IP 准入、异步 bill-lock RPC（suspend/resume 4 分片回复消费）、重传吸收、网关门限故障切换 |
 | **媒体面** | RTPengine 用户态转发（端口池 30k）、录音管道（pcap→MP3→OSS）、20 万注册实测承载 |
 | **事件总线** | NATS JetStream 3 节点 R3：CDR 流、审计流、拆线指令队列、Webhook 分发（NAK 重投 + MaxDeliver 防毒丸）、多副本配置广播 |
 | **租户自助面** | `/v1/tenant/*`：me/accounts/cdrs/stats/packages/webhooks——API key 按 tenant_id 强制过滤（逃逸测试覆盖） |
 | **Webhook 契约** | v1 版本化信封（{v,event,occurred_at,tenant,seq,data}）、Stripe 风格 HMAC 签名、at-least-once + 幂等键、SSRF 门（https+公网强制） |
 | **可观测** | Prometheus `/metrics`（呼叫/RPC 直方图/账务写入/总线健康）+ Grafana 预置面板 + 告警规则（计费停滞/zombie/总线故障） |
-| **套餐引擎** | 日/月免费额度、折扣、最低消费，按周期计数 |
+| **套餐引擎** | 日/月免费额度、折扣、最低消费，按周期计数；`GVOS_PKG_MODE`（list_price / open） |
 | **AI 语音** | 通话媒体流 WebSocket 出站 + DashScope ASR 桥接（实时转写） |
 | **迁移工具** | `gvos-migrate` 四步流水线（extract/validate/plan/load），从旧系统 CSV 导入账户/费率 |
 
 ## 架构
 
 ```
-┌───────────────────── 控制平面（自研，Go） ─────────────────────┐
-│  账户/多级代理 │ 费率引擎 │ 风控 │ 套餐 │ CDR/审计/账本 │ 管理 API  │
+┌───────────────────── 控制平面（自研，Go）×N ───────────────────┐
+│  账户/叶子计费 │ 费率 │ 风控 │ 套餐 │ CDR/审计/账本 │ 管理 API   │
+│  Redis: 余额/准入/callmeta·callsettled（跨副本结算兜底）        │
 └──────────┬──────────────────────────┬─────────────────────────┘
-           │ HTTP(同步锁定门)           │ NATS JetStream（事件/广播/队列）
+           │ HTTP / NATS RPC(bill-lock) │ NATS JetStream（事件/广播）
 ┌──────────▼──────────┐    ┌───────────▼──────────────────────────┐
-│ Kamailio ×N (信令)   │    │ durable workers: CDRW落库 AUDIT审计   │
-│ RTPengine ×M (媒体)  │    │ TEARDOWN拆线 WEBHOOKS分发 cfg广播     │
+│ Kamailio ×N (信令)   │    │ durable: CDRW / AUDIT / TEARDOWN /   │
+│ RTPengine ×M (媒体)  │    │ WEBHOOKS；cfg.reload + gateway-snapshot│
 └─────────────────────┘    └───────────┬──────────────────────────┘
                                 ┌──────▼──────┐
                                 │ PostgreSQL  │ (+ settings kv)
                                 └─────────────┘
 ```
+
+多副本部署：**Call-ID 粘性为主路径**；粘性失效或滚动发布时 peer 用 Redis
+`callmeta`/`callsettled` 做一次 `remote-settle`（详见 [运维手册 §6](docs/operations-manual.md)）。
 
 ## 快速开始
 
@@ -99,9 +103,10 @@ go test ./...
 
 ## 已知限制（诚实声明）
 
-- 信令边缘已过 100CPS 全栈/2000 并发/20 万注册压测（本轮修复 11+ 个压测暴露的 bug，见 [docs/bench/](docs/bench/)）；300CPS+ 的 PRD 目标需 loadgen 与被测栈分离复测（4 核单机上 loadgen 是测量上限）
-- 多副本运行时状态（余额/并发/CPS/风控滑窗/套餐用量/注册镜像）已收口 Redis（配置 `GVOS_REDIS_URL`，未配置 = 单副本内存语义）；计费门 fail-closed，其余 fail-open
-- **gv-core 多副本语义待定**：呼叫态在内存（m.calls），多副本需要队列组粘滞或呼叫态外置 Redis——K8s 化的最后一个结构项
+- 信令边缘已过 100CPS 全栈/2000 并发/20 万注册压测；架构补充后 10 轮 SIPp **3999/4000 ≈ 99.975%**（见 [bench10 2026-11-22](docs/bench/bench10-report-2026-11-22.md)）；300CPS+ 的 PRD 目标需 loadgen 与被测栈分离复测
+- 多副本运行时状态（余额/并发/CPS/风控滑窗/套餐用量/注册镜像）已收口 Redis（`GVOS_REDIS_URL`；未配置 = 单副本内存语义）；计费门 fail-closed，风控/套餐可用 `GVOS_RISK_MODE` / `GVOS_PKG_MODE` 切换
+- **gv-core 多副本已解禁（粘性 + 远程结算）**：热路径呼叫态仍在本机 map（Interim/拆线），生产须 **Call-ID LB 粘性**；粘性失效时 Redis `callmeta`/`callsettled` 兜底单次结算（架构压测 4000 通双结算 0）
+- 计费语义为 **Mode A 叶子扣款**（只动主叫叶子余额；上级不分摊同额预扣）
 - 管理令牌默认 `dev-admin-token`、DB 密码 `gvos_dev`——均为演示默认值，**生产部署必须更换**（见 [operations manual](docs/operations-manual.md)）；生产节点需设 `net.core.rmem_default=4MB`（UDP 缓冲，实测 416KB 在 200CPS 丢 401）
 - K8s 形态清单：RTPengine/Kamailio hostNetwork、节点 sysctl initContainer、安全组收敛 28080/Grafana
 - TLS 证书未随仓库分发，部署时自签：`openssl req -x509 -newkey rsa:2048 -nodes -keyout kamailio-key.pem -out kamailio-cert.pem -days 365 -subj "/CN=gvos.local"`
@@ -116,7 +121,7 @@ go test ./...
 - [Voice Agent 接入：Pipecat 原生 SIP（主路径）](docs/pipecat-integration-plan.md) · [LiveKit SIP（WebRTC/多方）](docs/livekit-integration-plan.md)（规划稿）
 - 压测与容量：
   - [自测报告（130 项）](docs/bench/selftest-report-2026-11-19.md) · [验收报告 v0.3](docs/bench/acceptance-report-2026-10-07.md) · [RPC 档验收](docs/bench/rpc-tier-verification-2026-11-20.md)
-  - [10 轮缺陷压测](docs/bench/bench10-report-2026-11-20.md) · [100CPS 修复收官](docs/bench/bench100-report-2026-11-20.md)
+  - [10 轮缺陷压测（11-20）](docs/bench/bench10-report-2026-11-20.md) · [架构补充后 10 轮（11-22）](docs/bench/bench10-report-2026-11-22.md) · [100CPS 修复收官](docs/bench/bench100-report-2026-11-20.md)
   - [容量基线 vs 裸 Kamailio](docs/bench/capacity-baseline-2026-11-20.md) · [天花板报告](docs/bench/ceiling-report-2026-11-21.md) · [云 ECS 天花板 + 20 万注册](docs/bench/cloud-ceiling-2026-11-21.md)
   - [渗透自测](docs/bench/pentest-selfaudit-2026-11-21.md) · [SRTP/DTLS 验证规程](docs/srtp-dtls-verification-plan.md)
 

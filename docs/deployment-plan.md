@@ -107,7 +107,7 @@ chart 的边界（按 values.yaml 设计）：
 **结论：现阶段以 compose-ha 为主力交付形态，docker-compose 服务 POC；Helm/K8s 留给 M12 GA 后的大客户与自营 SaaS。**
 
 1. **首批客户（ICP-1）**：compose-ha 双机交付。上生产前完成 §3.2 的缺口 1（NATS 集群化，配置改动一天内）与缺口 2（LB/DNS SRV）；缺口 3（Patroni）在单客户容量触及上限或客户要求 RTO<60s 自动切换时再上。
-2. **gv-core 多副本的前置条件是 Redis 收口**：当前余额/并发/CPS/风控滑窗权威在各副本进程内存，N 副本即上限 ×N 超卖（详见 [redis-adoption-plan](redis-adoption-plan.md) 的 8 项缺口表）。**compose-ha 里 gv-core 保持单副本是正确现状**——多副本前先实施该方案。
+2. **gv-core 多副本前置已齐（2026-11-22）**：Redis 收口 + `callmeta`/`callsettled` 跨副本结算 + Mode A 叶子扣款。生产扩副本时须配置 `GVOS_REDIS_URL`，并对 `/v1/call/*` / `gvos.svc.call.*` 做 **Call-ID LB 粘性**（详见 [operations-manual §6](operations-manual.md)、[02-architecture §6](02-architecture.md)）。compose-ha 可升 N>1；仍建议先开 NATS 3 节点再扩控制面。
 3. **大客户/SaaS（M12 GA 起）**：Helm chart + 外部 Patroni PG + NATS 集群 + 媒体主机池。信令 HPA、控制面按容量扩，存储层 SLA 外置。
 4. **硬件基线**（继承容量报告口径）：媒体节点 16 vCPU / 32GB / 万兆；信令节点 8 vCPU / 16GB。压测环境与生产环境一致性写进交付报告。
 
@@ -117,8 +117,8 @@ chart 的边界（按 values.yaml 设计）：
 |---|---|---|---|
 | 形态 | docker-compose | docker-compose | compose-ha |
 | PG | 单机 16 | 单机 16 | 16 主备流复制（→Patroni） |
-| NATS | 单节点 | 单节点 | 单节点（→3 节点集群） |
-| gv-core 副本 | 1 | 1 | 1（多副本待 Redis 收口） |
+| NATS | 3 节点 R3（compose） | 3 节点 R3 | 单节点（→3 节点集群） |
+| gv-core 副本 | 1（可 N>1 + Redis） | 1 | 1→N（须 Redis + Call-ID 粘性） |
 | Kamailio 节点 | 1 | 1 | 2（前置 LB/DNS SRV） |
 | 令牌/密码 | `dev-*` 默认值 | `dev-*` 默认值 | **必须全部更换**（operations-manual §5） |
 | TLS | 自签演示证书 | 自签 | 正式证书（SIP TLS + SRTP 全默认开启） |
@@ -141,4 +141,4 @@ chart 的边界（按 values.yaml 设计）：
 | 首批交付（当前） | compose-ha + HA 演练脚本/RTO-RPO 报告 | ✅ 载体就绪 |
 | 生产化补齐 | NATS 3 节点集群 + SIP LB 接入 | 待做（§3.2 缺口 1/2） |
 | M12（GA） | Helm chart 生产化 + 双机 HA 演练视频 + 渗透测试报告 | 规划 |
-| 后续 | gv-core 多副本（Redis 收口前置）+ Patroni | 规划（[redis-adoption-plan](redis-adoption-plan.md)） |
+| 后续 | gv-core 多副本上 compose-ha / Helm + Patroni | ✅ 代码解禁；部署层粘性 + HA 升档待客户档 |
