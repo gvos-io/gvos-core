@@ -197,3 +197,43 @@ func TestGatewayBroadcastLCROrder(t *testing.T) {
 	}
 	_ = cap
 }
+
+// TestGatewaySnapshot: edge cold-start poll endpoint — internal token
+// gated, returns version + LCR-ordered gateways (bench N-3 heal path).
+func TestGatewaySnapshot(t *testing.T) {
+	s := NewServer()
+	s.gws.Reload([]gateway.Gateway{
+		{ID: "g1", Name: "demo", SipAddr: "demo-gw:5060", Priority: 0, Enabled: true, Prefixes: []string{"86"}},
+	})
+	srv := httptest.NewServer(MuxFor(s))
+	defer srv.Close()
+	defer flush(s)
+
+	req, _ := http.NewRequest("GET", srv.URL+"/v1/internal/gateway-snapshot", nil)
+	req.Header.Set("X-GVOS-Internal", os.Getenv("GVOS_INTERNAL_TOKEN"))
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var body struct {
+		Version  string            `json:"version"`
+		Count    int               `json:"count"`
+		Gateways []gateway.Gateway `json:"gateways"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Version == "" || body.Count != 1 || len(body.Gateways) != 1 || body.Gateways[0].ID != "g1" {
+		t.Fatalf("snapshot = %+v", body)
+	}
+	req2, _ := http.NewRequest("GET", srv.URL+"/v1/internal/gateway-snapshot", nil)
+	resp2, _ := srv.Client().Do(req2)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 401 {
+		t.Fatalf("missing token status=%d", resp2.StatusCode)
+	}
+}

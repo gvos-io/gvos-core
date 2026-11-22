@@ -620,6 +620,7 @@ func MuxFor(s *Server) http.Handler {
 
 	// Internal control plane (SIP edge pollers + ADR-0002 fallback).
 	mux.HandleFunc("GET /v1/internal/ipallow-snapshot", s.handleIPAllowSnapshot)
+	mux.HandleFunc("GET /v1/internal/gateway-snapshot", s.handleGatewaySnapshot)
 	mux.HandleFunc("GET /v1/internal/reg-lookup", s.handleRegLookup)
 
 	// Media stream (WebSocket).

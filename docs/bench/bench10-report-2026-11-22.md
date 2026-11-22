@@ -85,14 +85,15 @@
 40–400 CPS 下稳态键数 ≈ CPS × TTL；结算互斥只需覆盖双 End 竞态窗口。  
 **修复**: `ClaimSettle` 改用 `callSettledTTL=2m`。
 
-### N-3（中）Kamailio 重启后网关 htable 空窗
+### N-3（中，**已修**）Kamailio 重启后网关 htable 空窗
 
-重建 `kamailio`/`gv-core` 后，SIPp 全部 `503 No Gateway`（`empty or all cooling down`），直到 core 的 CFG-RELOAD/`GW_SYNC` 写入 `gw` htable（观测延迟可达数十秒）。期间失败还会推高 `gwfail` 冷却，放大空窗。  
-**方向**: kamailio 启动主动拉 snapshot；或 `GW_SYNC` 失败/空表时不计入 fail 冷却。
+重建 `kamailio`/`gv-core` 后，SIPp 全部 `503 No Gateway`（`empty or all cooling down`），直到 core 的 CFG-RELOAD/`GW_SYNC` 写入 `gw` htable（观测延迟可达数十秒）。  
+**修复**: `GET /v1/internal/gateway-snapshot` + Kamailio `GW_POLL`（5s）HTTP 拉取；`StartCfgRebroadcaster` 启动立即广播（不再等首个 60s tick）；INVITE 路径 rtpengine 挪到 bill-lock resume（见下）。
 
-### N-4（低，残留）rtpengine `Unknown call-id`
+### N-4 / E-2（中，**已修**）INVITE 路径 rtpengine 在 t_newtran 之前
 
-BYE/重传路径仍见 `rtpengine_manage` → Unknown call-id（与 11-20 E-2 同源：in-dialog 缺事务守卫 / 重传放大）。本轮成功率已不再被其主导。
+挂起中的 INVITE 重传重跑 `rtpengine_manage`（同步 ng）。in-dialog 侧此前已有 `t_check_trans` + 无 SDP 不调 ng。  
+**修复**: WITH_NATS_RPC 下 `rtpengine_manage` 移到 `BILL_LOCK_REPLY`（成功 resume 后、dispatch 前）；HTTP bill-lock 路径移到 `BILL_LOCK` 之后。
 
 ### N-5（低）SIPp 偶发 Dead call（1/4000）
 
@@ -141,6 +142,5 @@ go run ./cmd/gvos-loadgen -target http://127.0.0.1:28080 -cps 40 -duration 10s \
 
 ## 建议修复顺序（剩余）
 
-1. Kamailio 启动拉 gateway snapshot（消 N-3 空窗）。  
-2. 继续 E-2：in-dialog 先 `t_check_trans` 再 `rtpengine_manage`。  
-3. 可选：settle 键监控告警（`gvos:callsettled:*` 计数）。
+1. 可选：settle 键监控告警（`gvos:callsettled:*` 计数）。  
+2. 可选：空 gw 表时的 503 不累计 `gwfail`（防放大）。

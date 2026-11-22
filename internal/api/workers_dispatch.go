@@ -389,39 +389,47 @@ func StartCdrRawConsumer(s *Server) {
 // heals the gap — at most one minute of drift on the edge. All
 // payloads are full-array and idempotent, so replicas and the edge
 // can apply them any number of times.
+//
+// The first emit runs immediately (not after the first 60s tick): a
+// Kamailio that comes up just after core boot otherwise sits with an
+// empty gw htable until the ticker fires (bench N-3: full 503 window).
 func StartCfgRebroadcaster(s *Server) {
+	emitEdgeSnapshots := func() {
+		if s.redisLocks {
+			// Single-runner: one replica replays the snapshots
+			// (idempotent either way; this dedups the bus noise).
+			ctx, cancel := context.WithTimeout(context.Background(), rds.CallTimeout)
+			ok, err := s.rds.Acquire(ctx, "lock:rebroadcast", 55*time.Second)
+			cancel()
+			if err != nil || !ok {
+				return
+			}
+		}
+		s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": s.lcrGateways()})
+		// ip_allowlist: pre-joined CIDR lists (ipAllowPayload) —
+		// the edge cannot rebuild them from the rules array.
+		s.emit(events.SubjectCfgReload, ipAllowPayload(s.ipallow.Rules()))
+		// Blocklist: full replay from the live compiled set (the
+		// per-op broadcasts carry single entries only). add-ops are
+		// idempotent on every consumer.
+		for _, e := range s.blocklist.Snapshot() {
+			// Lowercase keys: the Kamailio BL_APPLY route parses
+			// kind/scope/pattern (the Go struct field names would
+			// serialize capitalized and never match).
+			s.emit(events.SubjectCfgReload, map[string]any{
+				"entity": "blocklist", "op": "add",
+				"entry": map[string]any{
+					"kind": e.Kind, "scope": e.Scope, "pattern": e.Pattern,
+				},
+			})
+		}
+	}
 	go func() {
+		emitEdgeSnapshots()
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for range t.C {
-			if s.redisLocks {
-				// Single-runner: one replica replays the snapshots
-				// (idempotent either way; this dedups the bus noise).
-				ctx, cancel := context.WithTimeout(context.Background(), rds.CallTimeout)
-				ok, err := s.rds.Acquire(ctx, "lock:rebroadcast", 55*time.Second)
-				cancel()
-				if err != nil || !ok {
-					continue
-				}
-			}
-			s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": s.lcrGateways()})
-			// ip_allowlist: pre-joined CIDR lists (ipAllowPayload) —
-			// the edge cannot rebuild them from the rules array.
-			s.emit(events.SubjectCfgReload, ipAllowPayload(s.ipallow.Rules()))
-			// Blocklist: full replay from the live compiled set (the
-			// per-op broadcasts carry single entries only). add-ops are
-			// idempotent on every consumer.
-			for _, e := range s.blocklist.Snapshot() {
-				// Lowercase keys: the Kamailio BL_APPLY route parses
-				// kind/scope/pattern (the Go struct field names would
-				// serialize capitalized and never match).
-				s.emit(events.SubjectCfgReload, map[string]any{
-					"entity": "blocklist", "op": "add",
-					"entry": map[string]any{
-						"kind": e.Kind, "scope": e.Scope, "pattern": e.Pattern,
-					},
-				})
-			}
+			emitEdgeSnapshots()
 		}
 	}()
 }
@@ -736,6 +744,37 @@ func (s *Server) handleIPAllowSnapshot(w http.ResponseWriter, r *http.Request) {
 		"rules":       rules,
 		"allow_cidrs": allows,
 		"deny_cidrs":  denies,
+	})
+}
+
+// handleGatewaySnapshot serves the LCR-ordered gateway directory to
+// the Kamailio edge on GET /v1/internal/gateway-snapshot. Same
+// internal-token gate as ipallow-snapshot. Kamailio polls this on a
+// short timer so a restart does not wait for the next NATS
+// rebroadcast (bench N-3 empty-gw 503 window).
+func (s *Server) handleGatewaySnapshot(w http.ResponseWriter, r *http.Request) {
+	want := os.Getenv("GVOS_INTERNAL_TOKEN")
+	if want == "" {
+		httpError(w, 503, "internal snapshot disabled (GVOS_INTERNAL_TOKEN unset)")
+		return
+	}
+	if r.Header.Get("X-GVOS-Internal") != want && r.URL.Query().Get("token") != want {
+		httpError(w, 401, "bad internal token")
+		return
+	}
+	if r.Method != http.MethodGet {
+		httpError(w, 405, "GET required")
+		return
+	}
+	gws := s.lcrGateways()
+	h := fnv.New64a()
+	for _, g := range gws {
+		fmt.Fprintf(h, "%s|%s|%d|%v\n", g.ID, g.SipAddr, g.Priority, g.Enabled)
+	}
+	writeJSON(w, 200, map[string]any{
+		"version":  fmt.Sprintf("%016x", h.Sum64()),
+		"count":    len(gws),
+		"gateways": gws,
 	})
 }
 
