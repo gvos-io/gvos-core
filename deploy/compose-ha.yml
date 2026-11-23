@@ -101,7 +101,7 @@ services:
     build:
       context: .
       dockerfile: kamailio.Dockerfile
-    image: gvos-kamailio:6.0.1-gvos.1
+    image: gvos-kamailio:6.1.5-gvos.1
     depends_on: [gv-core, nats]
     volumes:
       - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
@@ -117,7 +117,7 @@ services:
       - "5060:5060/udp"
 
   kamailio-2:
-    image: gvos-kamailio:6.0.1-gvos.1
+    image: gvos-kamailio:6.1.5-gvos.1
     depends_on: [gv-core, nats]
     volumes:
       - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro

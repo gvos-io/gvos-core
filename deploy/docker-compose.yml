@@ -118,13 +118,12 @@ services:
       - "${GVOS_API_PORT:-28080}:8080"
 
   kamailio:
-    # Self-built image: the upstream CI alpine build lacks nats.so
-    # (see kamailio.Dockerfile). Debian bookworm ships
-    # kamailio-nats-modules (Kamailio 5.6).
+    # Self-built image: pin Kamailio APT archive 6.1.5 + nats.so
+    # (see kamailio.Dockerfile). Upstream alpine CI still lacks nats.
     build:
       context: .
       dockerfile: kamailio.Dockerfile
-    image: gvos-kamailio:6.0.1-gvos.1
+    image: gvos-kamailio:6.1.5-gvos.1
     # The signaling edge is a single point of the stack: a dead VM
     # hiccup (observed SIGTERM storms on Docker Desktop under
     # sustained 100-200CPS benches, exit 139 with no restart) must
@@ -174,12 +173,12 @@ services:
       - "14444:4444/tcp"
 
   rtpengine:
-    # Media relay built from Debian packages (see rtpengine.Dockerfile);
+    # Media relay built from upstream mr26.3.1.4 (see rtpengine.Dockerfile);
     # userspace forwarding (no kernel module in-container).
     build:
       context: .
       dockerfile: rtpengine.Dockerfile
-    image: gvos-rtpengine:bookworm-gvos.1
+    image: gvos-rtpengine:26.3.1.4-gvos.1
     # CLI binds 127.0.0.1 (the in-image config's [::1]:2224 fails on
     # hosts without IPv6 localhost — Alibaba Cloud Linux kernel).
     volumes:
@@ -208,7 +207,7 @@ services:
     build:
       context: .
       dockerfile: recording.Dockerfile
-    image: gvos-recording
+    image: gvos-recording:26.3.1.4-gvos.1
     profiles: ["recording"]
     depends_on: [rtpengine]
     volumes:

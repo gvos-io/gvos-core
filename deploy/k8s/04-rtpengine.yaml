@@ -12,7 +12,7 @@ spec:
     spec:
       containers:
       - name: rtpengine
-        image: gvos-rtpengine:bookworm-gvos.1
+        image: gvos-rtpengine:26.3.1.4-gvos.1
         imagePullPolicy: IfNotPresent
         ports: [{containerPort: 2223, protocol: UDP}]
         resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 512Mi}}

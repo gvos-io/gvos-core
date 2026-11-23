@@ -49,7 +49,7 @@ gvos-kamailio:<upstream-ver>-gvos.<N>
 gvos-rtpengine:<upstream-ver>-gvos.<N>
 ```
 
-示例：`gvos-kamailio:6.0.1-gvos.1`、`gvos-rtpengine:11.5.1.18-gvos.1`。  
+示例：`gvos-kamailio:6.1.5-gvos.1`、`gvos-rtpengine:26.3.1.4-gvos.1`。  
 `<N>` 只在 gvos 侧补丁或打包方式变化时递增；纯配置挂载变化不换镜像 tag。
 
 生产 / K8s / Helm **禁止** `:latest` 漂浮标签。
@@ -59,19 +59,21 @@ gvos-rtpengine:<upstream-ver>-gvos.<N>
 | 载体 | Kamailio | RTPengine |
 |---|---|---|
 | compose / compose-ha | 本地构建 tag（见 `deploy/docker-compose.yml`） | 同左 |
-| `deploy/k8s/` | `gvos-kamailio:6.0.1-gvos.1` | `gvos-rtpengine:bookworm-gvos.1` |
+| `deploy/k8s/` | `gvos-kamailio:6.1.5-gvos.1` | `gvos-rtpengine:26.3.1.4-gvos.1` |
 | Helm `values.yaml` | 与自建镜像对齐（不再默认 `kamailio-ci` alpine——上游 alpine **无 nats.so**） | 与自建镜像对齐 |
 
-Debian 包阶段尚未按上游精确 patch 版本钉 apt 时，tag 里的版本取「已知工作基线」；切到 fork 源码构建后改为精确 git describe / 上游版本号。
+- **Kamailio**：官方 APT 归档 `kamailio-6.1.5`（trixie）钉死包版本，含 `nats.so`。
+- **RTPengine / recording**：从上游 tag `mr26.3.1.4` 源码构建用户态二进制（不再用 bookworm 10.5.x 发行包）。
 
 ### 3.3 构建命令（本地）
 
 ```bash
-docker build -f deploy/kamailio.Dockerfile -t gvos-kamailio:6.0.1-gvos.1 deploy/
-docker build -f deploy/rtpengine.Dockerfile -t gvos-rtpengine:bookworm-gvos.1 deploy/
+docker build -f deploy/kamailio.Dockerfile -t gvos-kamailio:6.1.5-gvos.1 deploy/
+docker build -f deploy/rtpengine.Dockerfile -t gvos-rtpengine:26.3.1.4-gvos.1 deploy/
+docker build -f deploy/recording.Dockerfile -t gvos-recording:26.3.1.4-gvos.1 deploy/
 # 可选：同时打 compose 短名
-docker tag gvos-kamailio:6.0.1-gvos.1 gvos-kamailio:latest
-docker tag gvos-rtpengine:bookworm-gvos.1 gvos-rtpengine:latest
+docker tag gvos-kamailio:6.1.5-gvos.1 gvos-kamailio:latest
+docker tag gvos-rtpengine:26.3.1.4-gvos.1 gvos-rtpengine:latest
 ```
 
 推送私有 registry 时把 repository 换成 `ghcr.io/gvos-io/...`（或客户侧 registry），**tag 字符串保持不变**。
@@ -80,12 +82,13 @@ docker tag gvos-rtpengine:bookworm-gvos.1 gvos-rtpengine:latest
 
 ## 4. 两阶段演进
 
-**阶段 A（现在）**— Debian 包 + 挂载 `kamailio.cfg`  
-- fork 用于开发/评审补丁与社区 PR，不强制进构建链路  
-- 运行时仍钉死自建镜像 tag，避免 `apt` 无缓存重建时静默升包  
+**阶段 A（现在）**— 钉死上游稳定版 + 挂载 `kamailio.cfg`  
+- Kamailio：官方 APT 归档精确版本；RTPengine：上游 release tag 源码构建  
+- fork 用于开发/评审补丁与社区 PR；无私有补丁时构建仍可直接指向官方 tag  
+- 运行时钉死自建镜像 tag，避免无缓存重建时静默升包  
 
 **阶段 B（有内核/模块级补丁时）**— 从 `gvos/vendor` 源码构建  
-- Dockerfile 改为 `git clone` / multi-stage 编译，`ARG GVOS_EDGE_REF=gvos/vendor`  
+- Dockerfile 的 `RTPENGINE_GIT_URL` / Kamailio 构建源切到 org fork，`ARG GVOS_EDGE_REF=gvos/vendor`  
 - CI：上游有新 release → 开同步 PR 到 fork → 重建镜像 → gvos-core 里 bump tag  
 
 ---

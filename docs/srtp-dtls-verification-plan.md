@@ -1,6 +1,6 @@
 # SRTP/DTLS 端到端验证规程（2026-11-21 / 2026-11-23 修订）
 
-**当前状态**：rtpengine 10.5.3（bookworm）**编译含 DTLS-SRTP**；Kamailio `rtpengine_manage` 按 SDP 协商；entrypoint 已加 `--dtls-passive`。缺的是带媒体栈的客户端断言。
+**当前状态**：rtpengine 26.3.1.4（上游稳定 tag 源码构建）**含 DTLS-SRTP**；Kamailio 6.1.5 `rtpengine_manage` 按 SDP 协商；entrypoint 已加 `--dtls-passive`。缺的是带媒体栈的客户端断言。
 
 ## 验证路径 A：脚本化冒烟（配置面 + rtpengine flags）
 

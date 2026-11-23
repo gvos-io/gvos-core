@@ -28,8 +28,8 @@
 | **计费引擎** | 前缀最长匹配（10 万条费率 133ns/次）、时段窗口（节假日/夜间）、步长 60+6 / 6+6 / 1+1 / N+M、首步价/增量价 |
 | **账户体系** | 租户→多级代理→账户树；**Mode A 叶子扣款**（只预锁/结算主叫叶子，上级仅并发/CPS）；后付账户 |
 | **实时风控** | 频次/日成本/地区准入规则（block/alert）、黑白名单（前缀索引 220ns/次）、余额耗尽强制拆线；`GVOS_RISK_MODE` |
-| **信令边缘** | Kamailio 6.0 + nats 模块：鉴权 htable 缓存、IP 准入、异步 bill-lock RPC（suspend/resume 4 分片回复消费）、重传吸收、网关门限故障切换 |
-| **媒体面** | RTPengine 用户态转发（端口池 30k）、录音管道（pcap→MP3→OSS）、20 万注册实测承载 |
+| **信令边缘** | Kamailio 6.1.5 + nats 模块：鉴权 htable 缓存、IP 准入、异步 bill-lock RPC（suspend/resume 4 分片回复消费）、重传吸收、网关门限故障切换 |
+| **媒体面** | RTPengine 26.3.1.4 用户态转发（端口池 30k）、录音管道（pcap→MP3→OSS）、20 万注册实测承载 |
 | **事件总线** | NATS JetStream 3 节点 R3：CDR 流、审计流、拆线指令队列、Webhook 分发（NAK 重投 + MaxDeliver 防毒丸）、多副本配置广播 |
 | **租户自助面** | `/v1/tenant/*`：me/accounts/cdrs/stats/packages/webhooks——API key 按 tenant_id 强制过滤（逃逸测试覆盖） |
 | **Webhook 契约** | v1 版本化信封（{v,event,occurred_at,tenant,seq,data}）、Stripe 风格 HMAC 签名、at-least-once + 幂等键、SSRF 门（https+公网强制） |

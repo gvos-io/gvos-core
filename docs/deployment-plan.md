@@ -27,8 +27,8 @@
 | 组件 | 镜像/构建 | 角色 | 状态性 |
 |---|---|---|---|
 | gv-core | `deploy/gv-core.Dockerfile`（自建） | 计费控制平面 + REST API | 无状态（运行时状态在内存，见 §4.4） |
-| Kamailio | `deploy/kamailio.Dockerfile`（Debian trixie 自建，带 nats.so） | SIP 信令边缘 | 无状态（配置/黑名单走 NATS 镜像到本地 htable） |
-| RTPengine | `deploy/rtpengine.Dockerfile`（Debian 包，用户态转发） | 媒体中继/录音 | 有状态（通话媒体流）；直通模式下信令面故障不影响进行中通话 |
+| Kamailio | `deploy/kamailio.Dockerfile`（官方 APT 6.1.5 + nats.so） | SIP 信令边缘 | 无状态（配置/黑名单走 NATS 镜像到本地 htable） |
+| RTPengine | `deploy/rtpengine.Dockerfile`（上游 mr26.3.1.4 源码构建，用户态转发） | 媒体中继/录音 | 有状态（通话媒体流）；直通模式下信令面故障不影响进行中通话 |
 | PostgreSQL | `postgres:16-alpine` | 账务/CDR 权威 | **有状态，唯一硬权威** |
 | NATS | `nats:2-alpine`（`-js` JetStream） | 事件总线 | 有状态（JetStream stream；core NATS 部分可丢） |
 | gvos-asr | 自建 | 阿里 DashScope ASR 桥接（P2） | 按需部署 |
