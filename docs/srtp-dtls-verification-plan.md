@@ -1,30 +1,43 @@
-# SRTP/DTLS 端到端验证规程（2026-11-21）
+# SRTP/DTLS 端到端验证规程（2026-11-21 / 2026-11-23 修订）
 
-**当前状态**：rtpengine 10.5.3（bookworm 官方包）**编译时即含 DTLS-SRTP**（ngcp 标准 build）；Kamailio 侧 `rtpengine_manage` 按 SDP offer 自动协商（offer 带 `UDP/TLS/RTP/SAVP` 或 `a=crypto` 即启用）。**配置面零改动即就绪**——缺的是带媒体栈的验证客户端。
+**当前状态**：rtpengine 10.5.3（bookworm）**编译含 DTLS-SRTP**；Kamailio `rtpengine_manage` 按 SDP 协商；entrypoint 已加 `--dtls-passive`。缺的是带媒体栈的客户端断言。
 
-## 验证路径 A：pjsua（SIP+SRTP 客户端，推荐）
+## 验证路径 A：脚本化冒烟（配置面 + rtpengine flags）
 
-1. 构建 pjsua 容器（Debian bookworm + pjsua 源码编译，约 30min）：
-   - 依赖：build-essential + pjproject 2.14 源码（codeload.github.com/pjsip/pjproject）
-   - `./configure --with-openssl && make dep && make && make install`
-2. 场景：pjsua（SRTP=mandatory, DTLS-SRTP）→ gvos → SIPp gw（明文 RTP）
-   - rtpengine 做 SRTP(A-leg) ↔ RTP(B-leg) 的转封装
+```bash
+# 栈起来后（不要 GVOS_BENCH_MEDIA_OFF）
+bash test/srtp/smoke-config.sh
+```
+
+断言：rtpengine 进程参数含 `dtls-passive`；`rtpengine-ctl`/`ng` list 可用；Kamailio 模块已加载。
+
+## 验证路径 B：pjsua（SIP+SRTP 客户端，推荐 E2E）
+
+1. 构建 pjsua 容器（Debian bookworm + pjproject，约 30min）——见 `test/srtp/pjsua.Dockerfile`。
+2. 场景：pjsua（SRTP=mandatory）→ gvos → SIPp/demo-gw（明文 RTP）  
+   rtpengine 做 **SRTP(A-leg) ↔ RTP(B-leg)**。
 3. 验证点：
-   - pjsua 日志显示 `SRTP status: Active ... DTLS-SRTP`
-   - rtpengine `query` 统计中该 call 的 `SDES`/`DTLS` flags 置位
-   - 录音 pcap（recording-dir 已配）A-leg 段 payload 为 SRTP（tshark 显示 RTP over encrypted transport）
-   - 通话时长计费正确（CDR duration 与 pjsua 通话时间一致）
+   - pjsua 日志 `SRTP status: Active`
+   - rtpengine query 该 call 带 DTLS/SDES
+   - CDR duration 合理
 
-## 验证路径 B：浏览器 WebRTC（产品级 DTLS-SRTP）
+```bash
+# 构建（一次）
+docker build -f test/srtp/pjsua.Dockerfile -t gvos-pjsua test/srtp
+# 跑（需 compose 网络 gvos_default，账号 1000 已种子）
+bash test/srtp/run-pjsua-srtp.sh
+```
 
-- gvos 已有 WSS 端点（1444，自签 TLS）；浏览器 WebRTC 的媒体**强制 DTLS-SRTP**（RFC 8122 已内建于规范）
-- 实现：管理台增加 sip.js/WebRTC 软电话页（jssip 3.x 通过 WSS 注册 + 呼叫），RTPengine 收到浏览器 SDP（UDP/TLS/RTP/SAVPF）即 DTLS-SRTP
-- 这是产品功能（Web 软电话），规划进 M15/WebRTC 计划，验证随实现交付
+## 验证路径 C：浏览器 WebRTC（产品级 DTLS-SRTP）
 
-## 配置面核对清单（无需改动即就绪）
+- WSS :1444 已开；浏览器媒体强制 DTLS-SRTP。
+- 产品软电话（sip.js）随 WebRTC 计划交付；本规程不阻塞路径 A/B。
 
-- [x] rtpengine 10.5.3 DTLS-SRTP 编译内置（bookworm ngcp 包）
-- [x] kamailio rtpengine_manage 透传 SDP 协商（无明文-only 强制）
-- [x] recording-dir 已配（pcap 验证材料）
-- [ ] pjsua/浏览器客户端接入（本规程）
-- [ ] tshark 断言脚本（pcap 里 A-leg encrypted / B-leg plaintext）
+## 配置面核对清单
+
+- [x] rtpengine DTLS-SRTP 编译内置
+- [x] kamailio rtpengine_manage 透传协商
+- [x] `--dtls-passive`（entrypoint 2026-11-23）
+- [x] recording-dir 已配
+- [ ] pjsua E2E 在目标环境跑绿（脚本就绪，依赖镜像构建）
+- [ ] tshark 断言 A-leg encrypted / B-leg plaintext（可选增强）

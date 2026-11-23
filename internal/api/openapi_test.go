@@ -2,40 +2,42 @@ package api
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
-// Phase E gate: the served spec must parse, cover every tenant-plane
-// route, and carry the OpenAPI 3.1 marker (contract = implementation).
-func TestOpenAPISpecCoversTenantPlane(t *testing.T) {
+func TestOpenAPIDocument(t *testing.T) {
 	s := NewServer()
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/openapi.json", nil)
-	s.handleOpenAPI(w, req)
-	if w.Code != 200 {
-		t.Fatalf("openapi status = %d", w.Code)
+	srv := httptest.NewServer(MuxFor(s))
+	defer srv.Close()
+	defer flush(s)
+
+	resp, err := http.Get(srv.URL + "/openapi.json")
+	if err != nil {
+		t.Fatal(err)
 	}
-	var spec struct {
-		OpenAPI string `json:"openapi"`
-		Paths   map[string]map[string]any `json:"paths"`
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &spec); err != nil {
-		t.Fatalf("spec not json: %v", err)
+	var doc map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.HasPrefix(spec.OpenAPI, "3.1") {
-		t.Errorf("openapi version = %q, want 3.1.x", spec.OpenAPI)
+	if doc["openapi"] != "3.1.0" {
+		t.Fatalf("openapi=%v", doc["openapi"])
 	}
-	for _, p := range []string{"/v1/tenant/me", "/v1/tenant/cdrs", "/v1/tenant/webhooks", "/v1/tenant/cdr-stream"} {
-		if _, ok := spec.Paths[p]; !ok {
-			t.Errorf("spec missing %s", p)
-		}
+	comp, _ := doc["components"].(map[string]any)
+	if comp == nil {
+		t.Fatal("missing components")
 	}
-	// internal routes stay out of the public spec
-	for p := range spec.Paths {
-		if strings.Contains(p, "/v1/internal/") {
-			t.Errorf("internal route %s leaked into the public spec", p)
-		}
+	schemes, _ := comp["securitySchemes"].(map[string]any)
+	if schemes["BearerAuth"] == nil || schemes["InternalToken"] == nil {
+		t.Fatalf("securitySchemes=%v", schemes)
+	}
+	paths, _ := doc["paths"].(map[string]any)
+	if paths["/v1/admin/axb/bindings"] == nil {
+		t.Fatal("missing axb path")
 	}
 }

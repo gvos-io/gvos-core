@@ -121,12 +121,65 @@ func buildOpenAPI() map[string]any {
 		}
 		p[string([]byte(e.Method))] = op
 	}
+	for path, methods := range paths {
+		pm := methods.(map[string]any)
+		for method, opAny := range pm {
+			op := opAny.(map[string]any)
+			tag := ""
+			if tags, ok := op["tags"].([]string); ok && len(tags) > 0 {
+				tag = tags[0]
+			}
+			switch tag {
+			case "signaling":
+				op["security"] = []map[string]any{{"InternalToken": []string{}}}
+			case "ops":
+				// healthz / stats: stats may be public; leave open
+			default:
+				op["security"] = []map[string]any{{"BearerAuth": []string{}}}
+			}
+			_ = method
+		}
+		_ = path
+	}
 	return map[string]any{
 		"openapi": "3.1.0",
 		"info": map[string]any{
 			"title":       "gvos API",
-			"version":     "1.0.0",
-			"description": "Event-driven soft exchange + billing + routing + risk control. Conventions: docs/api-conventions.md. Auth: Bearer API key (admin planes), X-GVOS-Internal (signaling planes).",
+			"version":     "1.1.0",
+			"description": "Event-driven soft exchange + billing + routing + risk control. Conventions: docs/api-conventions.md. Auth: Bearer API key (admin/tenant), X-GVOS-Internal (signaling).",
+		},
+		"components": map[string]any{
+			"securitySchemes": map[string]any{
+				"BearerAuth": map[string]any{
+					"type": "http", "scheme": "bearer", "bearerFormat": "gvos_api_key",
+					"description": "Admin or tenant API key (Authorization: Bearer …)",
+				},
+				"InternalToken": map[string]any{
+					"type": "apiKey", "in": "header", "name": "X-GVOS-Internal",
+					"description": "Machine token for Kamailio ↔ gv-core signaling face",
+				},
+			},
+			"schemas": map[string]any{
+				"ErrorEnvelope": errEnvelopeSchema(),
+				"CallStart": map[string]any{
+					"type": "object",
+					"required": []string{"call_id", "from_user", "to_user"},
+					"properties": map[string]any{
+						"call_id":   map[string]any{"type": "string"},
+						"from_user": map[string]any{"type": "string"},
+						"to_user":   map[string]any{"type": "string"},
+					},
+				},
+				"AXBBind": map[string]any{
+					"type": "object",
+					"required": []string{"a_number", "b_number"},
+					"properties": map[string]any{
+						"a_number": map[string]any{"type": "string"},
+						"b_number": map[string]any{"type": "string"},
+						"ttl_secs": map[string]any{"type": "integer"},
+					},
+				},
+			},
 		},
 		"paths": paths,
 	}

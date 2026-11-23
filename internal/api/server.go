@@ -60,6 +60,7 @@ type Server struct {
 	idem          *idemStore           // Idempotency-Key registry for money routes
 	rds           *rds.Client          // Redis runtime-state authority (nil = off, memory authoritative)
 	recpipe       *recpipe.Uploader   // recording pipeline (nil = off)
+	recStore      recpipe.Storage     // archive backend (LocalFS or MinIO/S3)
 	whDispatch    *webhook.Dispatcher // outbound webhook fan-out (nil = off)
 	whStore       WebhookStore        // subscription storage (nil = memory-local)
 	redisLocks    bool                 // single-runner locks active (rollup/rebroadcast dedup)
@@ -773,23 +774,49 @@ func Shutdown(s *Server) {
 // SetClock overrides the call manager's clock (test seam).
 func SetClock(s *Server, now func() time.Time) { s.calls.SetClock(now) }
 
-// AttachRecording wires the recording pipeline: LocalFS archive root
-// + output dir scanner + PG index (GVOS_RECORDING_OUTPUT /
-// GVOS_RECORDING_ARCHIVE env). Empty output = pipeline off.
+// AttachRecording wires the recording pipeline: output dir scanner +
+// archive backend + PG index. Empty output = pipeline off.
+// Backend selection: when GVOS_RECORDING_S3_ENDPOINT (+ AK/SK/BUCKET)
+// is set, use MinIO/S3 (OSS-compatible) with presigned play URLs;
+// otherwise LocalFS under archiveDir (GVOS_RECORDING_ARCHIVE).
 func AttachRecording(s *Server, outputDir, archiveDir string) *recpipe.Uploader {
 	if outputDir == "" {
 		return nil
 	}
-	_ = os.MkdirAll(archiveDir, 0o755)
 	var idx recpipe.PGERecordIndex
 	if s.pg != nil {
 		idx = s.pg
 	}
-	u := recpipe.NewUploader(outputDir, &recpipe.LocalFS{Root: archiveDir}, idx, func(subject string, payload any) {
+	store, err := recordingStorageFromEnv(archiveDir)
+	if err != nil {
+		log.Printf("recording storage: %v (pipeline off)", err)
+		return nil
+	}
+	s.recStore = store
+	u := recpipe.NewUploader(outputDir, store, idx, func(subject string, payload any) {
 		s.emit(subject, payload)
 	})
 	s.recpipe = u
 	return u
+}
+
+func recordingStorageFromEnv(archiveDir string) (recpipe.Storage, error) {
+	ep := os.Getenv("GVOS_RECORDING_S3_ENDPOINT")
+	if ep == "" {
+		if archiveDir == "" {
+			archiveDir = "/var/lib/gvos/recordings"
+		}
+		_ = os.MkdirAll(archiveDir, 0o755)
+		return &recpipe.LocalFS{Root: archiveDir}, nil
+	}
+	ak := os.Getenv("GVOS_RECORDING_S3_AK")
+	sk := os.Getenv("GVOS_RECORDING_S3_SK")
+	bucket := os.Getenv("GVOS_RECORDING_S3_BUCKET")
+	if bucket == "" {
+		bucket = "gvos-recordings"
+	}
+	secure := os.Getenv("GVOS_RECORDING_S3_SECURE") != "0" && os.Getenv("GVOS_RECORDING_S3_SECURE") != "false"
+	return recpipe.NewMinIO(ep, ak, sk, bucket, secure)
 }
 
 // StartRecordingPipeline runs the uploader scan loop (call after the

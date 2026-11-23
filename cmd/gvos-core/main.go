@@ -89,16 +89,16 @@ func main() {
 		defer feedCancel()
 		api.AttachBlocklistFeeds(s, spec, feedCtx)
 	}
-	// Recording pipeline (R2): on when GVOS_RECORDING_OUTPUT is set;
-	// artifacts archive to GVOS_RECORDING_ARCHIVE (LocalFS backend;
-	// OSS plugs into the same Storage interface once creds exist).
+	// Recording pipeline (R2/R3): on when GVOS_RECORDING_OUTPUT is set.
+	// Archive: LocalFS (GVOS_RECORDING_ARCHIVE) or S3/MinIO/OSS via
+	// GVOS_RECORDING_S3_ENDPOINT + _AK/_SK/_BUCKET (presigned play).
 	recOut := os.Getenv("GVOS_RECORDING_OUTPUT")
 	if recOut != "" {
 		if u := api.AttachRecording(s, recOut, os.Getenv("GVOS_RECORDING_ARCHIVE")); u != nil {
 			pipelineCtx, pipelineCancel := context.WithCancel(context.Background())
 			defer pipelineCancel()
 			api.StartRecordingPipeline(s, pipelineCtx)
-			log.Printf("recording pipeline on (output=%s archive=%s)", recOut, os.Getenv("GVOS_RECORDING_ARCHIVE"))
+			log.Printf("recording pipeline on (output=%s backend env S3=%v)", recOut, os.Getenv("GVOS_RECORDING_S3_ENDPOINT") != "")
 		}
 	}
 	// Event bus is auxiliary, not authority: a missing/unreachable

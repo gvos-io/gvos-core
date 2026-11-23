@@ -1,0 +1,88 @@
+# Patroni 三节点 PostgreSQL HA（生产推荐档，替代 compose-ha 轻量 watchdog）。
+# 用法（独立网络，DSN 指向 haproxy:5000）:
+#   docker compose -f deploy/patroni/docker-compose.yml -p gvos-pg up -d
+# gv-core:
+#   GVOS_DB_DSN=postgres://gvos:gvos_dev@pg-proxy:5000/gvos?sslmode=disable
+#
+# 依赖镜像：bitnami/etcd + zalando/spilo（Patroni+Postgres）+ haproxy。
+# 这是「可启动的参考拓扑」；生产请换强密码、持久卷与 TLS。
+
+services:
+  etcd:
+    image: bitnami/etcd:3.5
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
+    volumes:
+      - etcd-data:/bitnami/etcd
+
+  pg-node1:
+    image: ghcr.io/zalando/spilo-15:3.0-p1
+    hostname: pg-node1
+    environment:
+      SCOPE: gvos
+      PGPASSWORD_SUPERUSER: gvos_dev
+      PGPASSWORD_STANDBY: gvos_repl
+      ETCD_HOSTS: etcd:2379
+      SPILO_CONFIGURATION: |
+        bootstrap:
+          dcs:
+            ttl: 30
+            loop_wait: 10
+            retry_timeout: 10
+            maximum_lag_on_failover: 1048576
+          initdb:
+            - encoding: UTF8
+            - locale: en_US.UTF-8
+          users:
+            gvos:
+              password: gvos_dev
+              options:
+                - createrole
+          databases:
+            gvos: gvos
+        postgresql:
+          parameters:
+            shared_buffers: 256MB
+            max_connections: 200
+    volumes:
+      - pg1-data:/home/postgres/pgdata
+    depends_on: [etcd]
+
+  pg-node2:
+    image: ghcr.io/zalando/spilo-15:3.0-p1
+    hostname: pg-node2
+    environment:
+      SCOPE: gvos
+      PGPASSWORD_SUPERUSER: gvos_dev
+      PGPASSWORD_STANDBY: gvos_repl
+      ETCD_HOSTS: etcd:2379
+    volumes:
+      - pg2-data:/home/postgres/pgdata
+    depends_on: [etcd]
+
+  pg-node3:
+    image: ghcr.io/zalando/spilo-15:3.0-p1
+    hostname: pg-node3
+    environment:
+      SCOPE: gvos
+      PGPASSWORD_SUPERUSER: gvos_dev
+      PGPASSWORD_STANDBY: gvos_repl
+      ETCD_HOSTS: etcd:2379
+    volumes:
+      - pg3-data:/home/postgres/pgdata
+    depends_on: [etcd]
+
+  pg-proxy:
+    image: haproxy:2.9-alpine
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "${GVOS_PG_PATRONI_PORT:-15433}:5000"
+    depends_on: [pg-node1, pg-node2, pg-node3]
+
+volumes:
+  etcd-data:
+  pg1-data:
+  pg2-data:
+  pg3-data:

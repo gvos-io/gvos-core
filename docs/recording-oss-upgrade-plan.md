@@ -1,8 +1,20 @@
 # 后期改进方案：录音 WAV/MP3 化 + OSS 归档 + 坐席/用户分轨
 
-**状态**：规划稿（未实施；含已完成的调研验证结论）
-**日期**：2026-11-19
+**状态**：部分交付（2026-11-23 修订）  
+**日期**：2026-11-19（初稿）/ 2026-11-23（进度刷新）  
 **范围**：录音链路从「pcap 落本地卷」升级为「rtpengine-recording 转码 WAV/MP3 → Go uploader 上传 OSS → presigned URL 下载/调听」，支持坐席/用户分轨。
+
+### 完成度快照（2026-11-23）
+
+| Phase | 状态 | 说明 |
+|---|---|---|
+| R0 POC | ✅ | DUX spool + recording daemon 容器可建 |
+| R1 daemon 常驻 | ⚠️ | `deploy/recording*` + compose `profile: recording`；spool metadata 偶发 Unterminated 仍实验态 |
+| R2 Go uploader | ✅ | `internal/recpipe` + PG `recordings` + LocalFS / MinIO Storage |
+| R3 调听 API | ✅ 本地流 / ✅ S3 **presigned**（本轮补齐） | `GET /v1/recording/...`；S3 时 302 + `presigned_url` |
+| R4 HA/K8s + lifecycle | ❌ | compose-ha/Helm 录音链路与 OSS lifecycle 仍缺 |
+
+**结论**：不是「完全没做」——控制面管道与调听 API 已在；缺的是 **生产默认打开 recording profile、daemon 稳定性收口、HA 形态与桶生命周期**。
 
 ---
 

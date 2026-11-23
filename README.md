@@ -115,8 +115,9 @@ go test ./...
 
 ## 文档
 
-- [架构设计](docs/02-architecture.md) · [部署规划](docs/deployment-plan.md) · [运维手册](docs/operations-manual.md) · [API 约定](docs/api-conventions.md)（含 Webhook 契约与版本规则）
+- [架构设计](docs/02-architecture.md) · [部署规划](docs/deployment-plan.md) · [运维手册](docs/operations-manual.md) · [API 约定](docs/api-conventions.md)（含 Webhook 契约与版本规则）· [OpenAPI](http://127.0.0.1:28080/openapi.json)（运行时 `GET /openapi.json`）
 - [竞品对标（昆石 VOS/SBC）](docs/competitive-analysis-vos-sbc.md)（功能差距 + 排期输入）
+- [AXB 隐私号技术方案](docs/axb-privacy-number-design.md)（预留实现）· [录音 OSS 方案](docs/recording-oss-upgrade-plan.md)（R0–R3 部分交付）· [Patroni 参考拓扑](deploy/patroni/README.md)
 - [Redis 收口方案](docs/redis-adoption-plan.md)（已实施 Phase 0-5）
 - [Voice Agent 接入：Pipecat 原生 SIP（主路径）](docs/pipecat-integration-plan.md) · [LiveKit SIP（WebRTC/多方）](docs/livekit-integration-plan.md)（规划稿）
 - 压测与容量：

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -27,6 +28,12 @@ type Storage interface {
 	Delete(ctx context.Context, objectKey string) error
 	// Kind names the backend ("local", "oss", ...) — surfaced in stats.
 	Kind() string
+}
+
+// Presigner is optional: S3-compatible backends return a time-boxed
+// GET URL so the browser plays audio without proxying through gv-core.
+type Presigner interface {
+	PresignGet(ctx context.Context, objectKey string, ttl time.Duration) (url string, err error)
 }
 
 // LocalFS stores objects under a root directory; the locator is the
@@ -141,4 +148,30 @@ func (m *MinIO) Kind() string { return "s3" }
 // Locator is the canonical object URI (play API resolves via the SDK).
 func (m *MinIO) Locator(objectKey string) string {
 	return fmt.Sprintf("s3://%s/%s", m.Bucket, objectKey)
+}
+
+// ObjectKeyFromLocator parses s3://bucket/key → key (same bucket assumed).
+func (m *MinIO) ObjectKeyFromLocator(locator string) (string, bool) {
+	const pfx = "s3://"
+	if !strings.HasPrefix(locator, pfx) {
+		return "", false
+	}
+	rest := locator[len(pfx):]
+	_, key, ok := strings.Cut(rest, "/")
+	if !ok || key == "" {
+		return "", false
+	}
+	return key, true
+}
+
+// PresignGet implements Presigner (R3 OSS play path).
+func (m *MinIO) PresignGet(ctx context.Context, objectKey string, ttl time.Duration) (string, error) {
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	u, err := m.Client.PresignedGetObject(ctx, m.Bucket, objectKey, ttl, nil)
+	if err != nil {
+		return "", err
+	}
+	return u.String(), nil
 }
