@@ -156,6 +156,10 @@ func (s *Server) tapAndPublish(cdr *callcore.CDR) {
 		s.fanCDRTap(b, cdr.AccountID)
 	}
 	if s.whDispatch != nil {
-		s.whDispatch.PublishEnvelope(webhook.EventCDRCompleted, demoTenant, data)
+		// Scoped: a tenant-owned subscription receives this call only
+		// when its tenant is the caller's account or one of its
+		// ancestors. Unscoped, every tenant on the platform was mailed
+		// every call.
+		s.whDispatch.PublishEnvelopeScoped(webhook.EventCDRCompleted, demoTenant, s.callOwners(cdr.AccountID), data)
 	}
 }

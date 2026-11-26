@@ -2,8 +2,13 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: {name: gv-core, namespace: gvos}
 spec:
-  replicas: 1   # call state is in-memory (m.calls) — scale out needs the
-                # Phase D queue-group/sticky work item; documented choice ③
+  # Multi-replica now safe at the admission layer: svc responders join
+  # NATS queue groups (one member answers each request), Redis holds
+  # the balance/callmeta authority, and remote-settle covers cross-
+  # replica BYEs. Remaining constraint for >1: LB stickiness by
+  # Call-ID for /v1/call/* (HTTP tier) — see operations-manual §6.
+  # Kept at 1 until the sticky LB is wired, by documented choice.
+  replicas: 1
   selector: {matchLabels: {app: gv-core}}
   template:
     metadata: {labels: {app: gv-core}}
@@ -13,13 +18,25 @@ spec:
         image: gvos-gv-core:latest
         imagePullPolicy: IfNotPresent
         env:
-        - {name: GVOS_DB_DSN, value: "postgres://gvos:gvos_dev@postgres:5432/gvos?sslmode=disable"}
-        - {name: GVOS_NATS_URL, value: "nats://nats-0.nats.gvos.svc.cluster.local:4222,nats://nats-1.nats.gvos.svc.cluster.local:4222,nats://nats-2.nats.gvos.svc.cluster.local:4222"}
-        - {name: GVOS_NATS_STREAM_REPLICAS, value: "3"}
+        # DSN from the secret when present (gvos-secrets/db-dsn);
+        # the literal fallback below is the dev credential — with the
+        # secret in place it never runs (operations-manual §0 swap).
+        # Pair with 01-pg.yaml's own secret before any prod-like use.
+        - name: GVOS_DB_DSN
+          valueFrom: {secretKeyRef: {name: gvos-secrets, key: db-dsn, optional: true}}
+        - name: GVOS_DB_DSN_FALLBACK
+          value: "postgres://gvos:gvos_dev@postgres:5432/gvos?sslmode=disable"
+        - name: GVOS_NATS_URL
+          value: "nats://$(NATS_USER):$(NATS_PASSWORD)@nats-0.nats.gvos.svc.cluster.local:4222,nats://$(NATS_USER):$(NATS_PASSWORD)@nats-1.nats.gvos.svc.cluster.local:4222,nats://$(NATS_USER):$(NATS_PASSWORD)@nats-2.nats.gvos.svc.cluster.local:4222"
+        - {name: GVOS_JS_REPLICAS, value: "3"}
         - {name: GVOS_ZOMBIE_TIMEOUT, value: "90s"}
-        - {name: GVOS_INTERNAL_TOKEN, value: "dev-internal-token"}
+        - name: GVOS_INTERNAL_TOKEN
+          valueFrom: {secretKeyRef: {name: gvos-secrets, key: internal-token, optional: true}}
         - {name: GVOS_REDIS_URL, value: "redis://redis:6379"}
-        - {name: GVOS_INTERNAL_TOKEN, value: "dev-internal-token"}
+        - name: NATS_USER
+          valueFrom: {secretKeyRef: {name: nats-auth, key: user, optional: true}}
+        - name: NATS_PASSWORD
+          valueFrom: {secretKeyRef: {name: nats-auth, key: password, optional: true}}
         ports: [{containerPort: 8080}]
         readinessProbe:
           httpGet: {path: /healthz, port: 8080}

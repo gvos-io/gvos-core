@@ -70,6 +70,7 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if s.acl == nil || s.acl.Count() == 0 {
 		if presented == adminToken {
 			log.Printf("WARN admin auth via legacy constant token (no API keys registered; Phase B deprecation)")
+			mDevCreds.Inc(1)
 			ctx := context.WithValue(r.Context(), identityKey, identity{
 				TenantID: demoTenant, Role: acl.RoleAdmin, Prefix: "legacy",
 			})

@@ -11,8 +11,8 @@ package riskctrl
 
 import (
 	"context"
-	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"fmt"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"strings"
 	"sync"
 	"time"
@@ -21,7 +21,7 @@ import (
 // Rule is one fraud-control rule.
 type Rule struct {
 	ID     string `json:"id"`
-	Kind   string `json:"kind"` // "freq" calls/minute | "cost_day" daily spend | "dest_prefix" | "reg_freq" registrations/minute
+	Kind   string `json:"kind"`   // "freq" calls/minute | "cost_day" daily spend | "dest_prefix" | "reg_freq" registrations/minute
 	Action string `json:"action"` // "block" | "alert"
 	// freq: max calls per window
 	Limit int `json:"limit"`
@@ -235,14 +235,27 @@ func (e *Engine) CheckCall(account, dest string, estCost money.Amount) Hit {
 
 	if !hit.Blocked {
 		// Admitted: advance the local counters (fail-open fallback and
-		// single-replica truth) under a short lock.
+		// single-replica truth) under a short lock. The freq window is
+		// pruned here too: on the Redis path the local entries are a
+		// shadow record (the ZSET is the shared truth) and used to
+		// accumulate without bound — 30k calls left 30k timestamps in
+		// memory, growing with traffic forever.
 		e.mu.Lock()
-		e.calls[account] = append(e.calls[account], now.Unix())
+		cutoff := now.Unix() - 60
+		ts := e.calls[account]
+		recent := make([]int64, 0, len(ts))
+		for _, t := range ts {
+			if t >= cutoff {
+				recent = append(recent, t)
+			}
+		}
+		e.calls[account] = append(recent, now.Unix())
 		day := dayKey(now)
 		if e.dayCost[day] == nil {
 			e.dayCost[day] = map[string]money.Amount{}
 		}
 		e.dayCost[day][account] += estCost
+		e.pruneDaysLocked(now)
 		e.mu.Unlock()
 		// Shared day counter: TryAdd already reserved when it succeeded;
 		// otherwise (no cost_day rule, or Redis fail-open) INCRBY here.
@@ -351,6 +364,19 @@ func decide(hit Hit, r Rule, reason string) Hit {
 func dayKey(t time.Time) int64 {
 	y, m, d := t.Date()
 	return time.Date(y, m, d, 0, 0, 0, 0, t.Location()).Unix()
+}
+
+// pruneDaysLocked drops dayCost maps older than yesterday. The maps
+// otherwise live for the process lifetime: the counter TTLs in Redis
+// are 48h, the local fallback should not outlive them. Caller holds
+// e.mu.
+func (e *Engine) pruneDaysLocked(now time.Time) {
+	live := dayKey(now.AddDate(0, 0, -1))
+	for day := range e.dayCost {
+		if day < live {
+			delete(e.dayCost, day)
+		}
+	}
 }
 
 // Counters returns the live counter state (monitoring).

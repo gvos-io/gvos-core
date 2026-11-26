@@ -18,19 +18,19 @@ import (
 // Entry is one user's registration state (latest wins per user; the
 // event count accumulates since process start).
 type Entry struct {
-	User    string    `json:"user"`
-	LastReg int64     `json:"last_reg"` // unix seconds
-	Expires int64     `json:"expires"`  // unix seconds (0 when expired/unset)
-	SrcIP   string    `json:"src_ip"`
-	Events  int       `json:"events"` // total reg events seen (reg+expire)
-	Online  bool      `json:"online"` // last event was a registration, not expiry
+	User    string `json:"user"`
+	LastReg int64  `json:"last_reg"` // unix seconds
+	Expires int64  `json:"expires"`  // unix seconds (0 when expired/unset)
+	SrcIP   string `json:"src_ip"`
+	Events  int    `json:"events"` // total reg events seen (reg+expire)
+	Online  bool   `json:"online"` // last event was a registration, not expiry
 }
 
 // Table holds the per-user entries.
 type Table struct {
-	mu   sync.RWMutex
+	mu     sync.RWMutex
 	byUser map[string]*Entry
-	rr   *RegR // redis mirror (nil = memory only)
+	rr     *RegR // redis mirror (nil = memory only)
 }
 
 // New returns an empty table.

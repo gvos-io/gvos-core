@@ -21,19 +21,31 @@ docker compose -p gvos up -d --build 2>&1 | grep -vE "^ +(Network|Container|Volu
 echo "-- waiting for services..."
 OK=down
 for i in $(seq 1 30); do
-  OK=$(curl -s -m 3 http://127.0.0.1:8080/healthz 2>/dev/null || echo down)
+  OK=$(curl -s -m 3 http://127.0.0.1:${GVOS_API_PORT:-28080}/healthz 2>/dev/null || echo down)
   [ "$OK" = "ok" ] && break
   sleep 2
 done
 [ "$OK" = "ok" ] || fail "gv-core did not become healthy in 60s"
 
-# 4. Seed demo data (idempotent).
+# 4. Apply the schema (idempotent). The initdb hook covers a FRESH
+# volume; a retained one (demo re-run, stack kept up) skips initdb, so
+# run the migrations explicitly: psql errors on the already-applied
+# statements are tolerated (every file is IF NOT EXISTS / guarded).
+echo "-- applying migrations..."
+docker exec -i gvos-postgres-1 psql -U gvos -v ON_ERROR_STOP=0 -q \
+  < ../migrations/001_init.sql >/dev/null 2>&1 || true
+for f in ../migrations/0*.sql; do
+  docker exec -i gvos-postgres-1 psql -U gvos -q < "$f" >/dev/null 2>&1 || \
+    echo "   (migration $f reported errors — expected on a re-run)"
+done
+
+# 5. Seed demo data (idempotent).
 docker exec gvos-postgres-1 psql -U gvos -c "
   UPDATE accounts SET credit = 10000 WHERE username='1000';" >/dev/null
 docker restart gvos-gv-core-1 >/dev/null 2>&1
 sleep 5
 
-# 5. Smoke test: one real SIP call.
+# 6. Smoke test: one real SIP call.
 echo "-- smoke call (authed INVITE through the billing path)..."
 docker restart gvos-demo-gw-1 kamailio >/dev/null 2>&1
 sleep 6
@@ -46,18 +58,18 @@ else
   echo "-- smoke call: did not complete (check 'docker logs gvos-kamailio-1')"
 fi
 
-# 6. Report.
-STATS=$(curl -s http://127.0.0.1:8080/v1/stats)
+# 7. Report.
+STATS=$(curl -s http://127.0.0.1:${GVOS_API_PORT:-28080}/v1/stats)
 echo
 echo "=============================================="
 echo " gvos demo is up."
 echo "----------------------------------------------"
-echo " Admin console : http://127.0.0.1:8080/ui"
+echo " Admin console : http://127.0.0.1:${GVOS_API_PORT:-28080}/ui"
 echo " Admin token   : dev-admin-token (legacy; deprecated once a key"
 echo "                 is set - create one: POST /v1/admin/keys)"
 echo " SIP endpoint  : udp/tcp 127.0.0.1:5060"
 echo " SIP over WSS  : wss://127.0.0.1:4444 (self-signed)"
-echo " API health    : http://127.0.0.1:8080/healthz"
+echo " API health    : http://127.0.0.1:${GVOS_API_PORT:-28080}/healthz"
 echo " Demo account  : user 1000 / password demo1000"
 echo " Stats         : $STATS"
 echo "=============================================="

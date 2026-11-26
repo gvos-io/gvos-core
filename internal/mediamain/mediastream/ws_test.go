@@ -7,10 +7,10 @@ import (
 
 func TestFrameRoundtrip(t *testing.T) {
 	cases := [][]byte{
-		[]byte("hello"),                     // small
-		bytes.Repeat([]byte("x"), 200),      // 16-bit length
-		{},                                  // empty
-		bytes.Repeat([]byte("y"), 3),        // tiny binary
+		[]byte("hello"),                // small
+		bytes.Repeat([]byte("x"), 200), // 16-bit length
+		{},                             // empty
+		bytes.Repeat([]byte("y"), 3),   // tiny binary
 	}
 	for _, payload := range cases {
 		var buf bytes.Buffer
@@ -36,9 +36,9 @@ func TestMaskedClientFrame(t *testing.T) {
 	mask := [4]byte{0xA7, 0x31, 0x5C, 0x90}
 
 	var buf bytes.Buffer
-	buf.WriteByte(0x80 | OpBinaryValue)      // FIN + binary
+	buf.WriteByte(0x80 | OpBinaryValue) // FIN + binary
 	n := len(payload)
-	buf.WriteByte(0x80 | byte(n))       // MASK + len (<126)
+	buf.WriteByte(0x80 | byte(n)) // MASK + len (<126)
 	buf.Write(mask[:])
 	masked := make([]byte, n)
 	for i, b := range payload {

@@ -6,6 +6,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,33 +19,34 @@ import (
 	"time"
 
 	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"github.com/gvos-io/gvos-core/internal/billingdomain/pkgplan"
 	"github.com/gvos-io/gvos-core/internal/billingdomain/rate"
 	"github.com/gvos-io/gvos-core/internal/callcore"
-	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/axb"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/did"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/gateway"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/ipallow"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/regtable"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/riskctrl"
-	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
-	"github.com/gvos-io/gvos-core/internal/shared/acl"
 	"github.com/gvos-io/gvos-core/internal/mediamain/mediastream"
 	"github.com/gvos-io/gvos-core/internal/recpipe"
+	"github.com/gvos-io/gvos-core/internal/shared/acl"
 	"github.com/gvos-io/gvos-core/internal/shared/events"
 	"github.com/gvos-io/gvos-core/internal/shared/rds"
-	"github.com/gvos-io/gvos-core/internal/webhook"
 	"github.com/gvos-io/gvos-core/internal/shared/store"
+	"github.com/gvos-io/gvos-core/internal/webhook"
 )
 
 type Server struct {
 	store         *account.Store
 	rates         *rate.Table
-	rateList      []rate.Rate // memory-mode source of truth for the table
-	cfgMu         sync.RWMutex         // guards rates, rateList, userIndex
+	rateList      []rate.Rate  // memory-mode source of truth for the table
+	cfgMu         sync.RWMutex // guards rates, rateList, userIndex
 	calls         *callcore.Manager
 	cdrs          []*callcore.CDR
-	cdrsMu        sync.Mutex // guards cdrs (NATS responders append concurrently with HTTP reads)
+	cdrsMu        sync.Mutex           // guards cdrs (NATS responders append concurrently with HTTP reads)
 	pg            *store.PG            // nil in memory mode
 	userIndex     map[string]string    // SIP username -> account ID (PG mode)
 	recordEnabled bool                 // global recording opt-in (admin toggle)
@@ -56,15 +58,16 @@ type Server struct {
 	gws           *gateway.List        // outbound gateway directory (API-authoritative)
 	regs          *regtable.Table      // SIP registration mirror (fed by gvos.reg.event)
 	axb           *axb.Store           // privacy-number bindings (AXB module)
+	dids          *did.Store           // inbound-DID registry (callee-billed, migration 013)
 	acl           *acl.Store           // API-key registry (Phase B; nil = keys off, legacy fallback)
 	idem          *idemStore           // Idempotency-Key registry for money routes
 	rds           *rds.Client          // Redis runtime-state authority (nil = off, memory authoritative)
-	recpipe       *recpipe.Uploader   // recording pipeline (nil = off)
-	recStore      recpipe.Storage     // archive backend (LocalFS or MinIO/S3)
-	whDispatch    *webhook.Dispatcher // outbound webhook fan-out (nil = off)
-	whStore       WebhookStore        // subscription storage (nil = memory-local)
+	recpipe       *recpipe.Uploader    // recording pipeline (nil = off)
+	recStore      recpipe.Storage      // archive backend (LocalFS or MinIO/S3)
+	whDispatch    *webhook.Dispatcher  // outbound webhook fan-out (nil = off)
+	whStore       WebhookStore         // subscription storage (nil = memory-local)
 	redisLocks    bool                 // single-runner locks active (rollup/rebroadcast dedup)
-	bal           *account.BalanceR   // redis balance face (nil = in-memory authority)
+	bal           *account.BalanceR    // redis balance face (nil = in-memory authority)
 	events        *events.Publisher    // NATS event bus (nil = publishing off)
 	webhookURL    string               // webhook dispatcher target ("" = off)
 	asyncCdr      bool                 // CDRW worker owns CDR persistence
@@ -94,7 +97,7 @@ func (s *Server) emit(subject string, payload any) {
 		// dispatcher). CDR completed is owned solely by tapAndPublish
 		// (contract envelope) — publishing here too double-delivers
 		// and double-increments seq.
-		s.whDispatch.Publish(subject, payload)
+		s.whDispatch.PublishScoped(subject, s.eventOwners(subject, payload), payload)
 	}
 	if s.events == nil {
 		return
@@ -109,6 +112,46 @@ func (s *Server) emit(subject string, payload any) {
 		s.events.Publish(events.SubjectEdgeTeardown, payload)
 	}
 }
+
+// callOwners lists the tenant identities whose scope holds an account:
+// the account itself and every ancestor up to its root. A tenant/agent
+// key is bound to one of them (see tenantAccounts), so a webhook
+// subscription owned by that key sees exactly the calls under it.
+func (s *Server) callOwners(accountID string) []string {
+	chain, err := s.store.Chain(accountID)
+	if err != nil {
+		return []string{accountID}
+	}
+	owners := make([]string, 0, len(chain))
+	for _, a := range chain {
+		owners = append(owners, a.ID)
+	}
+	return owners
+}
+
+// eventOwners names the tenant identities an event belongs to, for
+// webhook scoping. An event whose account cannot be named from its
+// payload belongs to nobody: platform subscriptions alone see it.
+func (s *Server) eventOwners(subject string, payload any) []string {
+	m, _ := payload.(map[string]string)
+	accountID := m["account"]
+	if accountID == "" {
+		accountID = m["account_id"]
+	}
+	if accountID == "" && m["call_id"] != "" {
+		if acc, ok := s.calls.AccountOf(m["call_id"]); ok {
+			accountID = acc
+		}
+	}
+	if accountID == "" {
+		return []string{}
+	}
+	return s.callOwners(accountID)
+}
+
+// partitionMonthsAhead is how many future monthly CDR partitions the
+// boot / hourly ensure step keeps ready.
+const partitionMonthsAhead = 3
 
 // lcrRater adapts the per-group rate tables to the gateway.Rater
 // face (LCR). Tables load lazily per CostRate group and cache.
@@ -170,7 +213,7 @@ func (s *Server) rebuildRates() {
 
 // NewServer builds the in-memory demo server (dev/test mode).
 func NewServer() *Server {
-	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), axb: axb.NewStore(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), axb: axb.NewStore(), dids: did.NewStore(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now()}
 	s.userIndex = map[string]string{}
 
 	// Demo seed: one tenant chain and a small rate table. The tenant
@@ -199,7 +242,14 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), axb: axb.NewStore(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), axb: axb.NewStore(), dids: did.NewStore(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now()}
+	// CDR partitions: the schema ships a fixed window only, and the
+	// first month without one fails every CDR insert. Make sure this
+	// month and the next few exist before any CDR needs one (the
+	// hourly report pass repeats it).
+	if err := pg.EnsureCDRPartitions(ctx, partitionMonthsAhead); err != nil {
+		log.Printf("CDR partition ensure failed: %v", err)
+	}
 	n, err := pg.LoadAccounts(ctx, s.store)
 	if err != nil {
 		pg.Close()
@@ -221,6 +271,14 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 		log.Printf("restored %d IP allowlist rules from settings (default-deny)", s.ipallow.Count())
 	} else if !errors.Is(err, store.ErrSettingNotFound) {
 		log.Printf("IP allowlist setting load failed: %v", err)
+	}
+	// Inbound DID registry (callee-billed termination).
+	var didList []did.DID
+	if err := pg.GetSetting(ctx, "dids", &didList); err == nil {
+		s.dids.Reload(didList)
+		log.Printf("restored %d inbound DIDs from settings", s.dids.Count())
+	} else if !errors.Is(err, store.ErrSettingNotFound) {
+		log.Printf("dids setting load failed: %v", err)
 	}
 	// Global runtime settings: admin toggles persisted across the bus
 	// broadcasts (a restart or new replica resumes the recorded state).
@@ -303,6 +361,17 @@ func (s *Server) newCallManager() *callcore.Manager {
 			dispatchTeardown(callID, reason)
 		}
 	}, 10*time.Second)
+	// Never-answered calls give up their pre-answer lock after the ring
+	// timeout (it must exceed the edge's worst-case INVITE lifetime).
+	ring := callcore.DefaultRingTimeout
+	if v := os.Getenv("GVOS_RING_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			ring = d
+		} else {
+			log.Printf("GVOS_RING_TIMEOUT=%q invalid, using %s", v, ring)
+		}
+	}
+	m.SetRingTimeout(ring)
 	// Zombie sweeper: calls with no Interim activity (LastActive)
 	// beyond the timeout — BYE never arrived — settle and teardown
 	// instead of leaking pre-answer locks. Long live calls that keep
@@ -347,21 +416,43 @@ func demoRates() []rate.Rate {
 // billing traffic. Kamailio cfg sends the header on every call
 // event once GVOS_INTERNAL_TOKEN is set.
 func requireInternal(w http.ResponseWriter, r *http.Request) bool {
-	want := os.Getenv("GVOS_INTERNAL_TOKEN")
-	if want == "" {
+	if os.Getenv("GVOS_INTERNAL_TOKEN") == "" {
 		httpErrorC(w, 503, "INTERNAL_AUTH_UNSET", "signaling face disabled (GVOS_INTERNAL_TOKEN unset)")
 		return false
 	}
-	// Header form (standard) or query form (?token= — the Kamailio
-	// http_client module cannot attach headers to POST bodies; the
-	// internal face is network-isolated, recorded as a known tradeoff).
-	if r.Header.Get("X-GVOS-Internal") == want || r.URL.Query().Get("token") == want {
+	if internalTokenOK(r) {
 		return true
 	}
 	// Never log presented tokens — they are credentials and may land
 	// in access/log aggregators.
 	log.Printf("AUTH-DEBUG %s %s: bad or missing internal token", r.Method, r.URL.Path)
 	httpErrorC(w, 401, "UNAUTHORIZED", "bad internal token")
+	return false
+}
+
+// internalTokenOK reports whether the request carries the configured
+// internal token. Accepted forms: the X-GVOS-Internal header
+// (standard) or ?token= (the Kamailio http_client module cannot
+// attach headers to POST bodies; the internal face is
+// network-isolated, a known tradeoff). False when no token is
+// configured. The comparison is constant-time: this token guards the
+// signaling billing face, the media stream and the edge pollers.
+func internalTokenOK(r *http.Request) bool {
+	want := os.Getenv("GVOS_INTERNAL_TOKEN")
+	if want == "" {
+		return false
+	}
+	viaHeader := subtle.ConstantTimeCompare([]byte(r.Header.Get("X-GVOS-Internal")), []byte(want)) == 1
+	viaQuery := subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(want)) == 1
+	if viaHeader || viaQuery {
+		// Dev-credential guard: the compose default must be visible in
+		// monitoring, not just in the docs (it authenticates the
+		// billing signaling face when someone forgets the swap).
+		if want == "dev-internal-token" {
+			mDevCreds.Inc(1)
+		}
+		return true
+	}
 	return false
 }
 
@@ -543,6 +634,11 @@ func MuxFor(s *Server) http.Handler {
 		})
 	}
 
+	// Operator-facing planes (admin/tenant) share a per-caller token
+	// bucket (ratelimit.go); the signaling/internal planes below stay
+	// unlimited — their natural rate IS the CPS admission gate, and a
+	// second limiter would shadow the billing 429s.
+	limited := s.withRateLimit(mux)
 
 	// Signaling event plane (internal token, fail-closed — Phase A).
 	mux.HandleFunc("POST /v1/call/start", s.handleStart)
@@ -587,6 +683,11 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("DELETE /v1/admin/axb/bindings/{x}", s.handleAXBDel)
 	mux.HandleFunc("GET /v1/admin/axb/stats", s.handleAXBStats)
 
+	// Inbound DID registry (callee-billed termination, migration 013).
+	mux.HandleFunc("POST /v1/admin/dids", s.handleDIDPut)
+	mux.HandleFunc("GET /v1/admin/dids", s.handleDIDList)
+	mux.HandleFunc("DELETE /v1/admin/dids/{number}", s.handleDIDDelete)
+
 	// Outbound webhooks (Phase D).
 	mux.HandleFunc("POST /v1/admin/webhooks", s.handleWebhookCreate)
 	mux.HandleFunc("GET /v1/admin/webhooks", s.handleWebhookList)
@@ -622,6 +723,7 @@ func MuxFor(s *Server) http.Handler {
 	// Internal control plane (SIP edge pollers + ADR-0002 fallback).
 	mux.HandleFunc("GET /v1/internal/ipallow-snapshot", s.handleIPAllowSnapshot)
 	mux.HandleFunc("GET /v1/internal/gateway-snapshot", s.handleGatewaySnapshot)
+	mux.HandleFunc("GET /v1/internal/did-snapshot", s.handleDIDSnapshot)
 	mux.HandleFunc("GET /v1/internal/reg-lookup", s.handleRegLookup)
 
 	// Media stream (WebSocket).
@@ -638,8 +740,13 @@ func MuxFor(s *Server) http.Handler {
 	// Prometheus scrape (unauthenticated: counters only, no secrets —
 	// gate at the ingress if 8080 is ever exposed publicly).
 	mux.HandleFunc("/metrics", s.handleMetrics)
-	return logWrap(mux)
+	return logWrap(limited)
 }
+
+// MuxForTest exposes MuxFor to tests in the same package (the real
+// builder is unexported to keep external wiring going through
+// cmd/gvos-core's Attach* path).
+func (s *Server) MuxForTest() http.Handler { return MuxFor(s) }
 
 // GET /v1/admin/cdrs?limit=50 - latest CDRs (in-memory ring; PG mode
 // reads would come from the DB, same shape).

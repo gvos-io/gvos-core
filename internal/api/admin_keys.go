@@ -44,7 +44,7 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	})
 	s.audit(r, "create", "api_key", prefix, nil, map[string]any{"role": role, "tenant_id": tenant})
 	writeJSON(w, 201, map[string]any{
-		"key": pt, // one-time display
+		"key":    pt, // one-time display
 		"prefix": prefix, "role": role, "tenant_id": tenant,
 		"note": "store this key now; it is not retrievable later",
 	})

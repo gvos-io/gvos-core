@@ -187,13 +187,13 @@
 | Digest 认证 | Password | ha1 MD5(SIP Digest 协议约束,auth_db)| ✅ |
 | IP 准入 | 白名单 | CIDR 规则+默认拒绝;清空白名单需 `confirm_empty:true`(409 守卫,防手滑全网断话);冷启动 fail-open 有界:默认 90s(`GVOS_IPALLOW_BOOT_GRACE`)后翻 fail-closed,超时后每 60s 打 L_ERR 面包屑 | ✅ |
 | **管理面鉴权** | API Key(Phase B) | `internal/shared/acl`,key 绑 (tenant,role),sha256 落库,一次性明文,bootstrap 从 GVOS_ADMIN_TOKEN;legacy 常量仅无 key 时回退(警告) | ✅ |
-| **信令计费面鉴权** | (隐含可用) | `/v1/call/*` 仅 requirePOST,`main.go:251` | ❌ F4 |
+| **信令计费面鉴权** | 内部令牌 | `/v1/call/*` 走 `requireInternal`(fail-closed):`GVOS_INTERNAL_TOKEN` 未配置=503 拒新事件,令牌错=401;恒时比较;令牌永不落日志。边缘 http_connect 走 `?token=`,NATS 走 broker 认证 | ✅(文档曾滞后于代码,2026-11-26 修订) |
 | 密码存储 argon2id | 有 | **无此实现**(管理面无密码存储;ha1 是协议内 MD5)| v0.1 失实,删除 |
 | 审计表 | append-only | ✅ audit_log;operator = key prefix(sync+bus 双路) | ✅ |
 | 防盗打默认 | 账户级上限 | ✅ 日/月消费上限、并发上限、异常封禁 | ✅ |
 | License 闭源校验 | 有 | 未启动 | 🎯(等保/离线交付批次) |
 
-**结论**:安全面的实缺口集中于三项(F4:常量凭据/信令面鉴权/审计身份),修复全部在 [api-roadmap.md](api-roadmap.md) Phase A+B 内,无需新规划。SIP TLS/SRTP 的"全默认开启"叙事在验证完成前降级为"支持已配置,验证待做"。
+**结论**:F4(信令面鉴权)已由 `requireInternal` 落地(上表已修订);剩余实缺口为管理面限流与审计身份细化,均在 [api-roadmap.md](api-roadmap.md) Phase C 内。SIP TLS/SRTP 的"全默认开启"叙事在验证完成前降级为"支持已配置,验证待做"。
 
 ## 9. 事件总线契约与治理(v0.2 新增——客户对接前的必设门槛)
 

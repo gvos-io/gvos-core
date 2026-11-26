@@ -10,9 +10,9 @@
 package blocklist
 
 import (
-	"time"
 	"regexp"
 	"sync"
+	"time"
 )
 
 // Entry is one screening rule.

@@ -89,6 +89,7 @@ func TestTeardownOnExhaustion(t *testing.T) {
 	m.SetClock(func() time.Time { return cur })
 
 	m.Start("call-1", "end1", "86", endToEndEntry(), 60, false)
+	m.Answer("call-1") // connected: interim billing starts at the 200 OK
 
 	// Advance 60s: interim charge 0.06. Both end1 and agent1 had 100,
 	// minus the 0.06 start lock = 99.94. Drain 99.9 so end1 is left with
@@ -142,6 +143,7 @@ func TestInterimDriverForcesTeardown(t *testing.T) {
 	m.SetClock(func() time.Time { return cur })
 
 	m.Start("call-1", "end1", "86", endToEndEntry(), 60, false)
+	m.Answer("call-1") // connected: interim billing starts at the 200 OK
 
 	// Drain end1 below the interim charge (same setup as the direct
 	// Interim test): 60s elapsed, balance left at 0.04 < one tick.

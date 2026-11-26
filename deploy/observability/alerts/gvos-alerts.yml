@@ -29,3 +29,12 @@ groups:
         for: 3m
         labels: {severity: critical}
         annotations: {summary: "NATS JetStream publish failures — event bus unhealthy"}
+  - name: gvos-security
+    rules:
+      # Demo credentials in a live deployment (dev-internal-token on the
+      # signaling face / legacy admin constant): any use is a finding.
+      - alert: GvosDevCredentialsInUse
+        expr: sum(rate(gvos_dev_credentials_total[10m])) > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: "requests authenticated with demo/legacy credentials — swap GVOS_INTERNAL_TOKEN / register API keys"}

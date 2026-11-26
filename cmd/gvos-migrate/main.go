@@ -1,10 +1,11 @@
 // Command gvos-migrate imports VOS exports into a gvos deployment.
 //
 // Pipeline:
-//   gvos-migrate extract -accounts a.csv -rates r.csv -gateways g.csv -out snapshot.json
-//   gvos-migrate validate -snapshot snapshot.json
-//   gvos-migrate plan     -snapshot snapshot.json -out plan.md
-//   gvos-migrate load     -snapshot snapshot.json -api http://host:8080 -token T [-dry-run]
+//
+//	gvos-migrate extract -accounts a.csv -rates r.csv -gateways g.csv -out snapshot.json
+//	gvos-migrate validate -snapshot snapshot.json
+//	gvos-migrate plan     -snapshot snapshot.json -out plan.md
+//	gvos-migrate load     -snapshot snapshot.json -api http://host:8080 -token T [-dry-run]
 package main
 
 import (

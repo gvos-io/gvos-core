@@ -1,11 +1,12 @@
 // Command gvos-asr bridges audio into real DashScope ASR.
 //
 // Modes:
-//   gvos-asr file   -in speech.wav            transcribe a local file
-//   gvos-asr bridge -api http://host:8080 -call <call-id>   subscribe a
-//                    gv-core media stream, transcribe uplink audio live
-//   gvos-asr feed   -in speech.wav -api http://host:8080 -call <id>  push
-//                    file audio into a call's stream (test hook)
+//
+//	gvos-asr file   -in speech.wav            transcribe a local file
+//	gvos-asr bridge -api http://host:8080 -call <call-id>   subscribe a
+//	                 gv-core media stream, transcribe uplink audio live
+//	gvos-asr feed   -in speech.wav -api http://host:8080 -call <id>  push
+//	                 file audio into a call's stream (test hook)
 package main
 
 import (

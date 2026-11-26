@@ -1,6 +1,7 @@
 // bench_lock_test.go: microbenchmark of the Start path under the
 // shared-ledger wiring — the lock-refactor A/B. Run with:
-//   go test -bench . -run xxx ./internal/callcore/
+//
+//	go test -bench . -run xxx ./internal/callcore/
 package callcore
 
 import (

@@ -29,8 +29,8 @@ const (
 )
 
 type roundStats struct {
-		ok, fail, doubleCharge, parentDebit int64
-	latMs                                   []float64
+	ok, fail, doubleCharge, parentDebit int64
+	latMs                               []float64
 }
 
 func (r *roundStats) record(ms float64, ok bool) {

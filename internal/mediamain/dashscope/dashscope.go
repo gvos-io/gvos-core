@@ -67,7 +67,7 @@ func NewSession(cfg Config) (*Session, error) {
 	}
 
 	conn, err := mediastream.DialWS(wsURL, map[string]string{
-		"Authorization": "Bearer " + cfg.APIKey,
+		"Authorization":              "Bearer " + cfg.APIKey,
 		"X-DashScope-DataInspection": "enable",
 	}, 15*time.Second)
 	if err != nil {
@@ -100,17 +100,17 @@ type taskEnvelope struct {
 		ErrorMsg  string `json:"error_message,omitempty"`
 	} `json:"header"`
 	Payload struct {
-		TaskGroup  string            `json:"task_group"`
-		Task       string            `json:"task"`
-		Function   string            `json:"function"`
-		Model      string            `json:"model"`
-		Parameters map[string]any    `json:"parameters,omitempty"`
-		Input      map[string]any    `json:"input"`
+		TaskGroup  string         `json:"task_group"`
+		Task       string         `json:"task"`
+		Function   string         `json:"function"`
+		Model      string         `json:"model"`
+		Parameters map[string]any `json:"parameters,omitempty"`
+		Input      map[string]any `json:"input"`
 		Output     *struct {
 			Sentence *struct {
-				Text     string `json:"text"`
-				EndTime  int64  `json:"end_time"`
-				BeginNo  int    `json:"begin_no"`
+				Text    string `json:"text"`
+				EndTime int64  `json:"end_time"`
+				BeginNo int    `json:"begin_no"`
 			} `json:"sentence"`
 		} `json:"output,omitempty"`
 	} `json:"payload"`

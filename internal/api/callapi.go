@@ -18,6 +18,7 @@ import (
 	"github.com/gvos-io/gvos-core/internal/billingdomain/billing"
 	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"github.com/gvos-io/gvos-core/internal/callcore"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/did"
 	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
 
@@ -25,63 +26,129 @@ type callStartReq struct {
 	CallID string `json:"call_id"`
 	From   string `json:"from_user"`
 	To     string `json:"to_user"`
+	// FromTag is the SIP From-tag. With call_id it names the dialog:
+	// a second dialog under a live Call-ID is refused instead of riding
+	// it unbilled. Edges that predate it send none.
+	FromTag string `json:"from_tag"`
+	// Direction: "inbound" marks a carrier INVITE for a DID number
+	// (trunk-admitted, no Digest credentials). The billing account is
+	// then the DID owner (callee-billed) instead of the From user.
+	// Absent/any other value = the historical outbound path.
+	Direction string `json:"direction"`
 }
 
 // callStart is the pre-answer lock: screen, resolve the caller, check
 // risk, rate, and reserve. Status: 200 locked, 403 blocked/broke,
 // 404 unratable/unknown, 429 limits (Retry-After on the HTTP face).
+//
+// Inbound (direction="inbound"): a carrier INVITE for a DID. The
+// billing account is the DID OWNER (callee-billed, pipecat O1
+// resolved 2026-11) — $fU is the carrier's MSISDN and must never
+// resolve to a billing account. The DID's destination pre-resolves
+// the routing: "user" terminates locally, "external" dispatches out
+// via the answer's gw_id, "media_agent" is the reserved AI seam and
+// answers 501 (billing never locks a call the platform cannot route).
 func (s *Server) callStart(req callStartReq) (int, any) {
 	start := time.Now()
 	defer func() {
 		mRPCSeconds.Observe(time.Since(start).Seconds())
 	}()
+	var inbound did.DID
+	if req.Direction == "inbound" {
+		bd, ok := s.dids.Resolve(req.To)
+		if !ok {
+			return 404, map[string]errorEnvelope{"error": {Code: "NOT_FOUND", Message: "no DID registered for " + req.To}}
+		}
+		inbound = bd
+	}
 	// Caller resolution first: the risk engine and billing both need
-	// the final account ID.
+	// the final account ID. Inbound skips it entirely: the DID owner
+	// below IS the billing account.
 	accID := req.From
 	if accID == "" {
 		accID = "1000" // spike default caller
 	}
-	// Unknown callers resolve by SIP username (Kamailio sends $fU,
-	// the auth username). The "fall back to the demo account" spike
-	// shortcut is memory-mode only: in PG mode an unknown caller is a
-	// hard 404 — billing must never silently land on another
-	// account's balance.
-	if _, err := s.store.Get(accID); err != nil {
-		s.cfgMu.RLock()
-		id, ok := s.userIndex[accID]
-		s.cfgMu.RUnlock()
-		if ok {
-			accID = id
-		} else if s.pg == nil {
-			if _, err2 := s.store.Get("1000"); err2 == nil {
-				accID = "1000"
+	if req.Direction != "inbound" {
+		// Unknown callers resolve by SIP username (Kamailio sends $fU,
+		// the auth username). The "fall back to the demo account" spike
+		// shortcut is memory-mode only: in PG mode an unknown caller is a
+		// hard 404 — billing must never silently land on another
+		// account's balance.
+		if _, err := s.store.Get(accID); err != nil {
+			s.cfgMu.RLock()
+			id, ok := s.userIndex[accID]
+			s.cfgMu.RUnlock()
+			if ok {
+				accID = id
+			} else if s.pg == nil {
+				if _, err2 := s.store.Get("1000"); err2 == nil {
+					accID = "1000"
+				}
 			}
+		}
+	}
+	if req.Direction == "inbound" {
+		// Callee-billed: the DID owner's account is the lock target.
+		// An owner that no longer exists is a 404, never a silent
+		// fallback — the number must be deregistered first.
+		if _, err := s.store.Get(inbound.AccountID); err != nil {
+			return 404, map[string]errorEnvelope{"error": {Code: "NOT_FOUND", Message: "DID " + req.To + " owner account missing: " + inbound.AccountID}}
+		}
+		accID = inbound.AccountID
+		if inbound.DestinationType == did.DestAgent {
+			// Reserved AI voice-agent seam: refuse to bill what we
+			// cannot route (501, not 403 — the callee is not at fault).
+			return 501, map[string]errorEnvelope{"error": {Code: "NOT_IMPLEMENTED", Message: "DID " + req.To + " destination media_agent is not implemented yet"}}
 		}
 	}
 	// AXB privacy resolution: dialing a virtual X number rewrites the
 	// destination to the bound B number (billing + routing follow B;
 	// the edge rewrites the R-URI from the rewrite_dest instruction).
+	// Inbound DID calls skip AXB: the DID binding IS the translation.
 	actualDest := req.To
-	if s.axb != nil {
-		if bd, ok := s.axb.Resolve(req.To); ok {
-			actualDest = bd.BNumber
+	if req.Direction != "inbound" {
+		if s.axb != nil {
+			if bd, ok := s.axb.Resolve(req.To); ok {
+				actualDest = bd.BNumber
+			}
 		}
 	}
 	// Number screening AFTER the AXB resolve: the blacklist semantics
 	// is "this destination is forbidden" — screening only the dialed
 	// X would let a banned B number be reached through any binding.
 	// Both the dialed number and the real destination are screened.
+	// Inbound: the caller ID is screened as src (the carrier's caller
+	// is the untrusted party), the DID as dest.
+	screenScope := "dest"
+	if req.Direction == "inbound" {
+		screenScope = "src"
+	}
 	for _, screened := range []string{req.To, actualDest} {
-		if ok, why := s.blocklist.CheckScreen(screened, "dest"); !ok {
-			return 403, map[string]errorEnvelope{"error": {Code: "FORBIDDEN", Message: "destination blocked: " + why}}
+		if ok, why := s.blocklist.CheckScreen(screened, screenScope); !ok {
+			return 403, map[string]errorEnvelope{"error": {Code: "FORBIDDEN", Message: "number blocked: " + why}}
+		}
+	}
+	if req.Direction == "inbound" && inbound.DestinationType == did.DestExternal {
+		// Outbound screening of the DID's real destination still
+		// applies (an external second leg must pass dest rules).
+		if ok, why := s.blocklist.CheckScreen(inbound.Destination, "dest"); !ok {
+			return 403, map[string]errorEnvelope{"error": {Code: "FORBIDDEN", Message: "DID second-leg blocked: " + why}}
 		}
 	}
 
+	// Rate lookup: inbound rates by the DID prefix (the callee's own
+	// tariff — a dedicated inbound rate group is just a different
+	// group on the owner account), outbound as before on the dialed
+	// destination.
 	now := time.Now()
 	s.cfgMu.RLock()
 	rates := s.rates
 	s.cfgMu.RUnlock()
-	entry := rates.Lookup(actualDest, int(now.Weekday()), now.Hour()*60+now.Minute())
+	rateDest := actualDest
+	if req.Direction == "inbound" {
+		rateDest = inbound.Number // rate the DID leg, not the carrier's caller
+	}
+	entry := rates.Lookup(rateDest, int(now.Weekday()), now.Hour()*60+now.Minute())
 	if entry == nil {
 		return 404, map[string]errorEnvelope{"error": {Code: "NOT_FOUND", Message: "no rate for destination " + actualDest}}
 	}
@@ -104,14 +171,26 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 			"account": accID, "username": username, "rule_id": h.RuleID, "reason": h.Reason, "to": actualDest,
 		})
 	}
-	if err := s.calls.Start(req.CallID, accID, actualDest, entry, 60, s.recordEnabled); err != nil {
+	if err := s.calls.StartDialogOpts(req.CallID, accID, req.FromTag, actualDest, entry, 60, s.recordEnabled, callcore.CallOpts{
+		Direction: req.Direction, // callcore normalizes "inbound" -> "in"
+	}); err != nil {
 		// Insufficient balance is a 403 for the caller; account limits
 		// are a 429 (retry later); unknown account a 404.
 		var limit *callcore.ErrLimit
-		if errors.As(err, &limit) {
+		switch {
+		case errors.As(err, &limit):
 			return 429, map[string]errorEnvelope{"error": {Code: "RATE_LIMITED", Message: err.Error()}}
-		}
-		if strings.Contains(err.Error(), "not found") {
+		case errors.Is(err, callcore.ErrCallIDInUse):
+			// Another dialog is live under this Call-ID: the edge must
+			// not let a second call ride it unbilled.
+			return 409, map[string]errorEnvelope{"error": {Code: "CALL_ID_INUSE", Message: err.Error()}}
+		case errors.Is(err, account.ErrUnavailable), errors.Is(err, account.ErrNotSeeded),
+			errors.Is(err, callcore.ErrAdmissionUnavailable):
+			// A platform fault (authority down, or holding no balance for
+			// the account). 503, not 403: the caller is not broke and the
+			// answer must not tell the edge that it is.
+			return 503, map[string]errorEnvelope{"error": {Code: "AUTHORITY_UNAVAILABLE", Message: "billing authority unavailable, retry shortly"}}
+		case strings.Contains(err.Error(), "not found"):
 			return 404, map[string]errorEnvelope{"error": {Code: "NOT_FOUND", Message: err.Error()}}
 		}
 		return 403, map[string]errorEnvelope{"error": {Code: "INSUFFICIENT_CREDIT", Message: err.Error()}}
@@ -128,7 +207,30 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 		// Recording opt-in: Kamailio calls start_recording() when true.
 		"record": s.recordEnabled,
 	}
-	if actualDest != req.To {
+	if req.Direction == "inbound" {
+		// Routing instruction for the edge (pipecat §7 item 2): the
+		// control plane pre-resolved the DID's destination.
+		answer["direction"] = "inbound"
+		answer["destination_type"] = string(inbound.DestinationType)
+		switch inbound.DestinationType {
+		case did.DestUser:
+			// lookup("location") target: the edge rewrites the R-URI
+			// user part to the registered username.
+			answer["rewrite_dest"] = inbound.Destination
+		case did.DestExternal:
+			// Second leg out via the carrier: the destination rides
+			// rewrite_dest AND the gateway is pre-picked (per-dest LCR,
+			// replacing the global best-index approximation).
+			answer["rewrite_dest"] = inbound.Destination
+			if gw, ok := s.gws.PickForDest(inbound.Destination); ok {
+				answer["gw_id"] = gw.ID
+			}
+			// No gateway serves this prefix: the edge falls back to
+			// global GW_DISPATCH, which 503s when the table is empty.
+		case did.DestAgent:
+			// unreachable: refused with 501 above
+		}
+	} else if actualDest != req.To {
 		// AXB rewrite instruction: the edge replaces the R-URI user
 		// part with the real destination before relaying to the gateway.
 		answer["rewrite_dest"] = actualDest
@@ -137,19 +239,42 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	return 200, answer
 }
 
-// callAnswer switches the call from lock to live.
+// callAnswer records the 200 OK: the billing clock starts here, and
+// Interim only charges answered calls (a ringing or failed INVITE
+// accrues nothing). A call this replica does not own still gets its
+// answer parked on the shared meta for the owner; the edge gets a 200
+// either way — it has nothing to retry.
 func (s *Server) callAnswer(callID string) (int, any) {
-	// Interim starts on the first tick; the manager has no explicit
-	// answer event in the spike, so acknowledge.
+	_ = s.calls.Answer(callID)
 	return 200, map[string]string{"call_id": callID, "status": "live"}
+}
+
+// answeredSeconds is the fallback duration for an end event without a
+// usable one: the wall clock since the answer, when the call is known
+// to have been answered (the edge's answer timestamp, else the locally
+// recorded one); 0 otherwise. Must run before End (it reads the call).
+func (s *Server) answeredSeconds(callID string, answerTsMs int64) int {
+	var at time.Time
+	if answerTsMs > 0 {
+		at = time.UnixMilli(answerTsMs)
+	} else if t, ok := s.calls.AnswerTime(callID); ok {
+		at = t
+	}
+	if at.IsZero() {
+		return 0
+	}
+	if d := int(time.Since(at).Seconds()); d > 0 {
+		return d
+	}
+	return 0
 }
 
 type callEndReq struct {
 	CallID     string `json:"call_id"`
 	DurSecs    int    `json:"duration"`    // optional: defaulted from call start
 	DurMs      int    `json:"duration_ms"` // µs-clock duration from the edge (sub-second precision; the $TS second-granular field truncated 11% of calls to 0)
-	AnswerTsMs int64  `json:"answer_ts"`  // epoch-ms of the 200 answer (0 = unanswered)
-	PDDMs      int    `json:"pdd_ms"`     // post-dial delay measured by Kamailio
+	AnswerTsMs int64  `json:"answer_ts"`   // epoch-ms of the 200 answer (0 = unanswered)
+	PDDMs      int    `json:"pdd_ms"`      // post-dial delay measured by Kamailio
 	SIPCode    int    `json:"sip_code"`
 	Release    string `json:"release"` // normal | balance-exhausted | ...
 	QoS        string `json:"qos"`     // rtpengine $rtpstat text (U6)
@@ -193,26 +318,15 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 		// semantics while escaping the $TS truncation).
 		seconds = (req.DurMs + 999) / 1000
 	}
-	if seconds == 0 {
-		// Kamailio sends the BYE without duration: derive it from the
-		// call's start time (SIPp's failed call lasted ~0s, real calls
-		// bill their true length).
-		if info, ok := s.calls.Info(req.CallID); ok {
-			seconds = int(time.Since(info).Seconds())
-		}
-	}
-	if seconds < 0 {
-		// Edge clocks can publish a negative duration_ms (NTP step or
-		// $TS/$TV mix). Clamp and fall back to wall-clock since Start
-		// instead of 400 — a 400 on the CDRR path NAKs and burns the
-		// consumer (MaxDeliver×1s) for a non-retryable payload.
-		seconds = 0
-		if info, ok := s.calls.Info(req.CallID); ok {
-			seconds = int(time.Since(info).Seconds())
-			if seconds < 0 {
-				seconds = 0
-			}
-		}
+	if seconds <= 0 {
+		// No usable duration arrived (a negative duration_ms from an
+		// NTP step or a $TS/$TV mix lands here too). Only a call known
+		// to be ANSWERED may be timed off the wall clock, since its
+		// answer. An unanswered call bills nothing: deriving since the
+		// INVITE — the old rule — charged ring time on calls that never
+		// connected, and a 400 here would only NAK the consumer for a
+		// payload that will never get better.
+		seconds = s.answeredSeconds(req.CallID, req.AnswerTsMs)
 	}
 	cdr, err := s.calls.End(req.CallID, seconds)
 	if err != nil {
@@ -278,18 +392,8 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 		// Fallback direct write (bus off or consumer unavailable).
 		// With the CDRW worker active, persistence is event-driven:
 		// the consumer owns this write and redelivers on failure.
-		if _, err := s.pg.InsertCDR(ctx, cdr); err != nil {
-			log.Printf("CDR persist failed (call %s): %v", cdr.CallID, err)
-		}
-		// Ledger snapshot reads the authority (Redis when wired).
-		var bal money.Amount
-		if s.bal != nil {
-			bal, _ = s.bal.Get(context.Background(), cdr.AccountID)
-		} else if b, err := account.Balance(s.store, cdr.AccountID); err == nil {
-			bal = b
-		}
-		if err := s.pg.AppendLedger(ctx, cdr.AccountID, -cdr.Cost, bal, "call-settle", cdr.CallID); err != nil {
-			log.Printf("ledger persist failed (call %s): %v", cdr.CallID, err)
+		if err := s.persistSettlement(ctx, cdr); err != nil {
+			log.Printf("settlement persist failed (call %s): %v", cdr.CallID, err)
 		}
 	}
 	mCallsEnded.Inc(1)

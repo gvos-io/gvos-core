@@ -10,15 +10,15 @@ package store
 //     go test ./internal/store/ -v
 
 import (
-	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"context"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
-	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
 	"github.com/gvos-io/gvos-core/internal/callcore"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
 )
 
 func testDSN() string {
@@ -62,8 +62,8 @@ func TestLoadAccounts(t *testing.T) {
 	if !chain[2].Postpaid {
 		t.Error("tenant root should be postpaid")
 	}
-	if chain[0].Credit != 10 {
-		t.Errorf("user credit = %v, want 10", chain[0].Credit)
+	if chain[0].Credit != money.MustFromYuan(10) {
+		t.Errorf("user credit = %s, want 10.0000", chain[0].Credit)
 	}
 }
 

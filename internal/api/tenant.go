@@ -1,12 +1,14 @@
 // Tenant self-service plane (api-roadmap Phase C): read-only queries
-// scoped to the caller's tenant. Every query filters by the API key's
-// tenant_id — the account tree and CDR ring carry the tenant linkage
-// already, so this plane is exposure discipline, not new data paths.
+// scoped to the caller's tenant. Every query filters by the caller's
+// tenant scope — the account tree and CDR ring carry the tenant
+// linkage already, so this plane is exposure discipline, not new data
+// paths.
 //
-// Auth: role must be tenant|agent (admin callers use the admin plane;
-// a 403 with a pointer there keeps the contract crisp). The legacy
-// constant token does NOT work here — tenant scoping is
-// security-relevant and the legacy identity has no tenant binding.
+// Auth: the key's role must be tenant|agent. A platform key
+// (admin|operator) may act FOR a tenant only when the trusted backend
+// names it in TenantActHeader — see requireTenant. The legacy constant
+// token does NOT work here: tenant scoping is security-relevant and the
+// legacy identity has no tenant binding.
 package api
 
 import (
@@ -15,10 +17,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
 	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
-	"github.com/gvos-io/gvos-core/internal/webhook"
 	"github.com/gvos-io/gvos-core/internal/shared/acl"
+	"github.com/gvos-io/gvos-core/internal/webhook"
 )
+
+// TenantActHeader lets a trusted backend (the management console) act
+// for a tenant with its platform API key. It grants nothing the key
+// did not have: an admin key already owns the whole platform.
+const TenantActHeader = "X-GVOS-Tenant"
 
 // requireTenant authenticates a tenant-plane request: a gvos_ API key
 // resolving to role tenant|agent. Returns the bound identity.
@@ -34,24 +42,51 @@ func (s *Server) requireTenant(w http.ResponseWriter, r *http.Request) (identity
 		httpErrorC(w, 401, "UNAUTHORIZED", "unknown key")
 		return identity{}, false
 	}
-	if k.Role != acl.RoleTenant && k.Role != acl.RoleAgent {
-		httpErrorC(w, 403, "FORBIDDEN", "role "+string(k.Role)+" cannot use the tenant plane")
-		return identity{}, false
+	switch k.Role {
+	case acl.RoleTenant, acl.RoleAgent:
+		return identity{TenantID: k.TenantID, Role: k.Role, Prefix: k.Prefix}, true
+	case acl.RoleAdmin, acl.RoleOperator:
+		// Delegation: act for the tenant the trusted backend names.
+		act := strings.TrimSpace(r.Header.Get(TenantActHeader))
+		if act == "" {
+			httpErrorC(w, 403, "FORBIDDEN", "role "+string(k.Role)+" cannot use the tenant plane (set "+TenantActHeader+" to act for a tenant)")
+			return identity{}, false
+		}
+		return identity{TenantID: act, Role: acl.RoleTenant, Prefix: k.Prefix}, true
 	}
-	id := identity{TenantID: k.TenantID, Role: k.Role, Prefix: k.Prefix}
-	return id, true
+	httpErrorC(w, 403, "FORBIDDEN", "role "+string(k.Role)+" cannot use the tenant plane")
+	return identity{}, false
 }
 
-// tenantAccounts returns the tenant root account plus its direct
-// children (the demo tree is shallow; deep chains resolve via Chain
-// when the tree grows). The returned set is the tenant filter for
-// every query on this plane.
+// tenantAccounts returns every account inside a tenant's scope: the
+// bound account itself and its whole sub-tree, at any depth. It is the
+// tenant filter for every query on this plane. It used to stop at the
+// direct children, so a tenant never saw the calls of its agents' own
+// customers.
 func (s *Server) tenantAccounts(tenantID string) map[string]bool {
 	set := map[string]bool{tenantID: true}
-	if all, err := s.store.List(); err == nil {
-		for _, a := range all {
-			if a.ParentID == tenantID {
+	all, err := s.store.List()
+	if err != nil {
+		return set
+	}
+	byID := make(map[string]*account.Account, len(all))
+	for _, a := range all {
+		byID[a.ID] = a
+	}
+	for _, a := range all {
+		if a.ID == tenantID {
+			continue
+		}
+		cur := a.ID
+		for i := 0; i < 64 && cur != ""; i++ { // 64: a broken tree cannot loop forever
+			p := byID[cur]
+			if p == nil {
+				break
+			}
+			cur = p.ParentID
+			if cur == tenantID {
 				set[a.ID] = true
+				break
 			}
 		}
 	}
@@ -66,8 +101,8 @@ func (s *Server) handleTenantMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{
-		"tenant_id": id.TenantID,
-		"role":      string(id.Role),
+		"tenant_id":  id.TenantID,
+		"role":       string(id.Role),
 		"key_prefix": id.Prefix,
 	}
 	if root, err := s.store.Get(id.TenantID); err == nil {
@@ -76,20 +111,12 @@ func (s *Server) handleTenantMe(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resp["account"] = nil
 	}
-	count := 0
-	if all, err := s.store.List(); err == nil {
-		for _, a := range all {
-			if a.ParentID == id.TenantID {
-				count++
-			}
-		}
-	}
-	resp["child_accounts"] = count
+	resp["child_accounts"] = len(s.tenantAccounts(id.TenantID)) - 1
 	writeJSON(w, 200, resp)
 }
 
-// GET /v1/tenant/accounts — the tenant's child accounts (read-only
-// projections: no secret_hash, no internal bookkeeping).
+// GET /v1/tenant/accounts — every account in the tenant's scope
+// (read-only projections: no secret_hash, no internal bookkeeping).
 func (s *Server) handleTenantAccounts(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.requireTenant(w, r)
 	if !ok {
@@ -100,14 +127,16 @@ func (s *Server) handleTenantAccounts(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err.Error())
 		return
 	}
+	set := s.tenantAccounts(id.TenantID)
 	out := []map[string]any{}
 	for _, a := range all {
-		if a.ParentID != id.TenantID {
+		if a.ID == id.TenantID || !set[a.ID] {
 			continue
 		}
 		out = append(out, map[string]any{
 			"id": a.ID, "username": a.Username, "name": a.Name,
-			"credit": a.Credit, "currency": a.Currency,
+			"parent_id": a.ParentID,
+			"credit":    a.Credit, "currency": a.Currency,
 			"postpaid": a.Postpaid, "concurrent": a.Concurrent, "cps": a.CPS,
 		})
 	}
@@ -143,7 +172,12 @@ func (s *Server) handleTenantCDRs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out := make([]*tenantCDRRow, 0, limit)
-	for i := n - 1 - cursor; i >= 0 && len(out) < limit; i-- {
+	// The cursor counts ring rows scanned (newest first), not rows
+	// returned: other tenants' rows are skipped by the scan too. It
+	// used to advance by the returned count, so a tenant with few
+	// calls among many got the same page back forever.
+	i := n - 1 - cursor
+	for ; i >= 0 && len(out) < limit; i-- {
 		cdr := s.cdrs[i]
 		if !set[cdr.AccountID] {
 			continue
@@ -155,12 +189,13 @@ func (s *Server) handleTenantCDRs(w http.ResponseWriter, r *http.Request) {
 			Currency: "CNY", Release: cdr.Release, SIPCode: cdr.SIPCode,
 		})
 	}
-	nextCursor := 0
-	if n-cursor-len(out) > 0 {
-		nextCursor = cursor + len(out)
+	// i now points below the last row examined.
+	nextCursor, hasMore := 0, false
+	if i >= 0 {
+		nextCursor, hasMore = n-1-i, true
 	}
 	s.cdrsMu.Unlock()
-	writeJSON(w, 200, map[string]any{"cdrs": out, "count": len(out), "cursor": nextCursor})
+	writeJSON(w, 200, map[string]any{"cdrs": out, "count": len(out), "cursor": nextCursor, "has_more": hasMore})
 }
 
 // tenantCDRRow is the stable projection for the tenant plane (same
@@ -304,7 +339,10 @@ func (s *Server) handleTenantWebhookList(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		for _, rw := range rows {
-			if rw.TenantID != "" && rw.TenantID != id.TenantID {
+			// Only the caller's own subscriptions. Operator-created ones
+			// (no tenant) used to be listed to every tenant, endpoints
+			// included.
+			if rw.TenantID != id.TenantID {
 				continue
 			}
 			out = append(out, map[string]any{"id": rw.ID, "url": rw.URL, "events": rw.Events, "active": rw.Active})
@@ -312,5 +350,3 @@ func (s *Server) handleTenantWebhookList(w http.ResponseWriter, r *http.Request)
 	}
 	writeJSON(w, 200, map[string]any{"webhooks": out, "count": len(out)})
 }
-
-

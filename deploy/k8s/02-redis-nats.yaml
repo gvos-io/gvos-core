@@ -70,9 +70,21 @@ spec:
         - nats://0.0.0.0:6222
         - --routes
         - nats://nats-0.nats.gvos.svc.cluster.local:6222,nats://nats-1.nats.gvos.svc.cluster.local:6222,nats://nats-2.nats.gvos.svc.cluster.local:6222
+        # Authentication: the bus carries call control (bill-lock RPC,
+        # call events, config broadcasts) — an unauthenticated broker
+        # is anyone's billing plane. Set real values before anything
+        # resembling production (a Secret is the cleaner carrier).
+        - --user
+        - $(NATS_USER)
+        - --pass
+        - $(NATS_PASSWORD)
         env:
         - name: POD_NAME
           valueFrom: {fieldRef: {fieldPath: metadata.name}}
+        - name: NATS_USER
+          valueFrom: {secretKeyRef: {name: nats-auth, key: user, optional: true}}
+        - name: NATS_PASSWORD
+          valueFrom: {secretKeyRef: {name: nats-auth, key: password, optional: true}}
         ports:
         - {containerPort: 4222, name: client}
         - {containerPort: 6222, name: cluster}

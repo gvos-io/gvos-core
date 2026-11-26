@@ -2,9 +2,9 @@
 package api
 
 import (
-	"strings"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/ipallow"
@@ -144,9 +144,9 @@ func (s *Server) handleIPAllow(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		var req struct {
-			Rules         []ipallow.Rule `json:"rules"`
-			RemoveID      string         `json:"remove_id"`
-			ConfirmEmpty  bool           `json:"confirm_empty"`
+			Rules        []ipallow.Rule `json:"rules"`
+			RemoveID     string         `json:"remove_id"`
+			ConfirmEmpty bool           `json:"confirm_empty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, 400, "body required")
@@ -236,7 +236,6 @@ func ipAllowPayload(rules []ipallow.Rule) map[string]any {
 		"allow_cidrs": allows, "deny_cidrs": denies,
 	}
 }
-
 
 // --- Phase A resource-route wrappers over the legacy verb handlers ---
 
@@ -336,7 +335,6 @@ func (s *Server) handleIPAllowDelete(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleIPAllowLegacy(w http.ResponseWriter, r *http.Request) {
 	s.handleIPAllow(w, r)
 }
-
 
 // handleBlocklistSources serves GET /v1/admin/blocklist-sources:
 // entry counts per source (api / static / feed tags).

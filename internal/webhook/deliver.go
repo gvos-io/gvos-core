@@ -6,13 +6,15 @@ package webhook
 
 import (
 	"bytes"
-	"fmt"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,7 +57,7 @@ func validateWebhookURL(raw string) error {
 	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
 		return fmt.Errorf("host %q not allowed", lower)
 	}
-	if ip := net.ParseIP(host); ip != nil {
+	if ip := hostIP(host); ip != nil {
 		if isPrivateOrLoopback(ip) {
 			return fmt.Errorf("ip %q not allowed (private/loopback)", host)
 		}
@@ -66,16 +68,52 @@ func validateWebhookURL(raw string) error {
 		return fmt.Errorf("resolve %q: %w", host, err)
 	}
 	for _, a := range addrs {
-		if ip := net.ParseIP(a); ip != nil && isPrivateOrLoopback(ip) {
+		if ip := hostIP(a); ip != nil && isPrivateOrLoopback(ip) {
 			return fmt.Errorf("host %q resolves to private %q", host, a)
 		}
 	}
 	return nil
 }
 
+// isPrivateOrLoopback reports the addresses a webhook must never reach
+// from inside the cluster: loopback, RFC1918 / fc00::/7, link-local
+// (169.254.0.0/16 carries the cloud metadata service), carrier-grade
+// NAT (100.64.0.0/10 — where Alibaba Cloud's metadata service lives),
+// multicast, unspecified and broadcast.
 func isPrivateOrLoopback(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsUnspecified() || ip.Equal(net.IPv4bcast)
+	if ip == nil {
+		return true
+	}
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	return isForbiddenAddr(a.Unmap())
+}
+
+func isForbiddenAddr(a netip.Addr) bool {
+	if !a.IsValid() || a.IsUnspecified() {
+		return true
+	}
+	if a.Is4() {
+		b := a.As4()
+		if b[0] == 100 && b[1]&0xc0 == 64 { // 100.64.0.0/10
+			return true
+		}
+	}
+	return a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() ||
+		a.IsMulticast() || a == netip.AddrFrom4([4]byte{255, 255, 255, 255})
+}
+
+// hostIP parses a resolved address string into an IP for
+// classification. netip is used first because it understands zoned
+// IPv6 literals ("fe80::1%eth0"), which net.ParseIP rejects — a
+// link-local address written that way used to slip past the check.
+func hostIP(s string) net.IP {
+	if a, err := netip.ParseAddr(s); err == nil {
+		return net.IP(a.AsSlice())
+	}
+	return net.ParseIP(s)
 }
 
 // ValidateSubscription is the admin-plane gate: create/update paths
@@ -90,11 +128,21 @@ type Deliverer struct {
 }
 
 // NewDeliverer wires a deliverer with sane timeouts and an SSRF-safe
-// redirect policy (each hop re-runs validateWebhookURL).
+// transport: https only, every redirect hop re-validated, and — the
+// part the creation-time check cannot give — the address actually
+// dialed is checked at dial time. A host that resolves public when the
+// subscription is created and private when the delivery dials (DNS
+// rebinding) is refused.
+//
+// Exception: with an egress proxy configured through the environment
+// (HTTPS_PROXY / ALL_PROXY) the proxy resolves the subscriber's host
+// itself, so the dial-time check would only end up judging the proxy;
+// creation- and redirect-time validation still apply.
 func NewDeliverer() *Deliverer {
 	d := &Deliverer{}
 	d.Client = &http.Client{
-		Timeout: 15 * time.Second,
+		Timeout:   15 * time.Second,
+		Transport: newSSRFSafeTransport(),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return fmt.Errorf("stopped after 5 redirects")
@@ -106,6 +154,64 @@ func NewDeliverer() *Deliverer {
 		},
 	}
 	return d
+}
+
+func newSSRFSafeTransport() http.RoundTripper {
+	if egressProxyConfigured() {
+		return &http.Transport{Proxy: http.ProxyFromEnvironment, TLSHandshakeTimeout: 10 * time.Second}
+	}
+	return &http.Transport{DialContext: safeDialContext, TLSHandshakeTimeout: 10 * time.Second}
+}
+
+func egressProxyConfigured() bool {
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
+		if os.Getenv(k) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// safeDialContext is the dial-time half of the SSRF guard: it resolves
+// the host itself, refuses the connection when any resolved address is
+// private, loopback or link-local, and dials the validated address —
+// never the name, which would be resolved a second time.
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("webhook dial %q: %w", addr, err)
+	}
+	var targets []string
+	if ip := net.ParseIP(host); ip != nil {
+		if isPrivateOrLoopback(ip) {
+			return nil, fmt.Errorf("webhook address %q is private (dial-time check)", host)
+		}
+		targets = []string{addr}
+	} else {
+		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("webhook resolve %q: %w", host, err)
+		}
+		for _, a := range addrs {
+			if isPrivateOrLoopback(a.IP) {
+				return nil, fmt.Errorf("webhook host %q resolves to private %q (dial-time check)", host, a.IP)
+			}
+			targets = append(targets, net.JoinHostPort(a.IP.String(), port))
+		}
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("webhook host %q has no address", host)
+	}
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	var lastErr error
+	for _, t := range targets {
+		conn, err := dialer.DialContext(ctx, network, t)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("webhook dial %q: %w", addr, lastErr)
 }
 
 // DeliverResult is one delivery attempt's outcome.
@@ -188,17 +294,12 @@ func (d *Deliverer) Deliver(ctx context.Context, sub Subscription, subject strin
 
 // Dispatcher holds the active subscription set and fans out events.
 type Dispatcher struct {
-	mu    sync.RWMutex
-	subs  []Subscription
-	seq   map[string]int64 // per-subscription contract seq (Envelope.Seq)
-	d     *Deliverer
-	ctx   context.Context
+	mu     sync.RWMutex
+	subs   []Subscription
+	seq    map[string]int64 // per-subscription contract seq (Envelope.Seq)
+	d      *Deliverer
+	ctx    context.Context
 	events chan eventJob
-}
-
-type eventJob struct {
-	subject string
-	payload any
 }
 
 // NewDispatcher wires the fan-out loop (buffered jobs; delivery runs
@@ -218,13 +319,40 @@ func (dsp *Dispatcher) SetSubscriptions(subs []Subscription) {
 }
 
 // Publish queues one event for fan-out (non-blocking; a full queue
-// drops — observability beats blocking the billing path).
+// drops — observability beats blocking the billing path). It is not
+// scoped: every active subscriber of the subject sees it.
 func (dsp *Dispatcher) Publish(subject string, payload any) {
+	dsp.PublishScoped(subject, nil, payload)
+}
+
+// PublishScoped is Publish for an event that belongs to specific
+// tenant identities (owners: the account it concerns and its
+// ancestors). A tenant-owned subscription receives it only when one of
+// its owners is the tenant the subscription is bound to; an empty,
+// non-nil owners list reaches platform subscriptions alone. nil means
+// unscoped.
+func (dsp *Dispatcher) PublishScoped(subject string, owners []string, payload any) {
 	select {
-	case dsp.events <- eventJob{subject, payload}:
+	case dsp.events <- eventJob{subject: subject, owners: owners, payload: payload}:
 	default:
 		log.Printf("webhook queue full, event %s dropped (observability tier)", subject)
 	}
+}
+
+// visibleTo applies the scoping rule of PublishScoped.
+func visibleTo(sub Subscription, owners []string) bool {
+	if owners == nil {
+		return true
+	}
+	if sub.Tenant == "" { // platform (operator-created) subscription
+		return true
+	}
+	for _, o := range owners {
+		if o == sub.Tenant {
+			return true
+		}
+	}
+	return false
 }
 
 func (dsp *Dispatcher) loop() {
@@ -239,6 +367,9 @@ func (dsp *Dispatcher) loop() {
 			env, isEnv := job.payload.(envelopeJob)
 			for i := range subs {
 				sub := subs[i]
+				if !visibleTo(sub, job.owners) {
+					continue
+				}
 				want := job.subject
 				if isEnv {
 					want = "gvos." + env.Event
@@ -254,13 +385,23 @@ func (dsp *Dispatcher) loop() {
 				seq := dsp.seq[sub.ID]
 				dsp.mu.Unlock()
 				if isEnv {
-					go dsp.deliverEnvelope(sub, env.Event, env.Tenant, seq, env.Data)
+					go dsp.deliverEnvelope(sub, env.Event, envelopeTenant(env, sub), seq, env.Data)
 				} else {
 					go dsp.deliverLogged(sub, job.subject, seq, job.payload)
 				}
 			}
 		}
 	}
+}
+
+// envelopeTenant names the tenant in the contract envelope: the
+// receiving subscription's own when it is tenant-owned, else the
+// event's primary tenant.
+func envelopeTenant(env envelopeJob, sub Subscription) string {
+	if sub.Tenant != "" {
+		return sub.Tenant
+	}
+	return env.Tenant
 }
 
 // deliverLogged runs the retry schedule and logs the outcome (the
@@ -280,19 +421,35 @@ func (dsp *Dispatcher) SubscriptionCount() []Subscription {
 }
 
 // PublishEnvelope queues one CONTRACT event: event is the contract
-// name (cdr.completed / call.teardown), tenant the owning tenant, and
-// data the typed projection struct. The envelope (v/seq/occurred_at)
-// is built at delivery time per subscription. Delivery is funneled
-// through the same buffered events channel as Publish so fan-out has
-// backpressure instead of unbounded goroutines.
+// name (cdr.completed / call.teardown), tenant the primary tenant, and
+// data the typed projection struct. It is unscoped (every subscriber
+// of the event sees it) — the API layer uses PublishEnvelopeScoped for
+// customer-facing events. The envelope (v/seq/occurred_at) is built at
+// delivery time per subscription. Delivery is funneled through the
+// same buffered events channel as Publish so fan-out has backpressure
+// instead of unbounded goroutines.
 func (dsp *Dispatcher) PublishEnvelope(event, tenant string, data any) {
-	// Contract subscribers match on "gvos.<event>"; reuse the Publish
-	// queue with a synthetic subject so loop applies the same caps.
-	dsp.Publish("gvos."+event, envelopeJob{Event: event, Tenant: tenant, Data: data})
+	dsp.PublishEnvelopeScoped(event, tenant, nil, data)
 }
 
-// envelopeJob is recognized by the dispatch loop so contract events
-// build the typed envelope instead of posting the raw payload.
+// PublishEnvelopeScoped is PublishEnvelope with tenant scoping (see
+// PublishScoped): a tenant-owned subscription receives the event only
+// when its tenant is among owners.
+func (dsp *Dispatcher) PublishEnvelopeScoped(event, tenant string, owners []string, data any) {
+	// Contract subscribers match on "gvos.<event>"; reuse the Publish
+	// queue with a synthetic subject so loop applies the same caps.
+	dsp.PublishScoped("gvos."+event, owners, envelopeJob{Event: event, Tenant: tenant, Data: data})
+}
+
+// eventJob is one queued fan-out. owners carries the scoping rule of
+// PublishScoped. The loop recognizes envelopeJob payloads so contract
+// events build the typed envelope instead of posting the raw payload.
+type eventJob struct {
+	subject string
+	owners  []string
+	payload any
+}
+
 type envelopeJob struct {
 	Event  string
 	Tenant string

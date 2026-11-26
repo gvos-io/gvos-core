@@ -2,11 +2,23 @@
 package account
 
 import (
-	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
+	"errors"
+
 	"fmt"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"sync"
 	"time"
 )
+
+// ErrUnavailable: the balance authority (Redis) could not be reached.
+// Not the caller's fault — admission answers 503, interim keeps calls up.
+var ErrUnavailable = errors.New("balance authority unavailable")
+
+// ErrNotSeeded: the authority holds no balance for the account (data
+// lost, or the boot seed never reached it). Reported apart from
+// "insufficient balance" so a platform fault is never told to a
+// customer as a broke account.
+var ErrNotSeeded = errors.New("balance authority has no balance for account")
 
 // Account is one billable identity in a chain (tenant -> agents ->
 // end account). Parent chains drive cascade charging: each level's rate
@@ -15,14 +27,14 @@ type Account struct {
 	ID         string       `json:"id"`
 	Username   string       `json:"username"` // SIP auth username (PG mode index key)
 	Name       string       `json:"name"`
-	ParentID   string       `json:"parent_id"` // "" for tenant root
+	ParentID   string       `json:"parent_id"`  // "" for tenant root
 	RateGroup  string       `json:"rate_group"` // which rate.Table applies
 	Currency   string       `json:"currency"`
-	Postpaid   bool         `json:"postpaid"` // skip prepaid locks when true
-	Credit     money.Amount `json:"credit"` // prepaid balance (ADR-0003 fixed point)
-	MaxDebt    money.Amount `json:"max_debt"` // allowed negative balance
+	Postpaid   bool         `json:"postpaid"`   // skip prepaid locks when true
+	Credit     money.Amount `json:"credit"`     // prepaid balance (ADR-0003 fixed point)
+	MaxDebt    money.Amount `json:"max_debt"`   // allowed negative balance
 	Concurrent int          `json:"concurrent"` // concurrent-call cap, 0 = unlimited
-	CPS        int          `json:"cps"` // calls-per-second cap, 0 = unlimited
+	CPS        int          `json:"cps"`        // calls-per-second cap, 0 = unlimited
 }
 
 // ParseID guards the PG-mode topup path: only strict non-UUID shapes
@@ -113,8 +125,10 @@ func (s *Store) Chain(id string) ([]*Account, error) {
 }
 
 // Reserve locks est on the leaf prepaid account only (Mode A: terminal
-// billing). Ancestors keep concurrent/CPS caps via admission, not
-// co-debit. Postpaid leaf accounts skip the lock (invoice cycle).
+// billing). MaxDebt is the credit line — an ALLOWED NEGATIVE balance —
+// so the affordable amount is Credit + MaxDebt. Ancestors keep
+// concurrent/CPS caps via admission, not co-debit. Postpaid leaf
+// accounts skip the lock (invoice cycle).
 func (s *Store) Reserve(id string, est money.Amount) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -125,7 +139,7 @@ func (s *Store) Reserve(id string, est money.Amount) (string, error) {
 	if a.Postpaid {
 		return id + ":call:" + fmt.Sprintf("%d", now()), nil
 	}
-	if a.Credit.Sub(a.MaxDebt) < est {
+	if a.Credit.Add(a.MaxDebt) < est {
 		return "", fmt.Errorf("account %q insufficient balance %s < %s", a.ID, a.Credit, est)
 	}
 	a.Credit = a.Credit.Sub(est)
@@ -151,6 +165,21 @@ func (s *Store) Commit(token string, id string, est, actual money.Amount) error 
 // Release cancels a reservation fully (call never connected).
 func (s *Store) Release(token string, id string, est money.Amount) error {
 	return s.Commit(token, id, est, 0)
+}
+
+// AddCredit moves an account's balance by a signed delta under the
+// store lock and returns the new balance (the top-up face: a delta
+// stays correct when a call settle races it, where a read-modify-write
+// of an absolute number does not).
+func (s *Store) AddCredit(id string, delta money.Amount) (money.Amount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.accounts[id]
+	if !ok {
+		return 0, fmt.Errorf("account %q not found", id)
+	}
+	a.Credit = a.Credit.Add(delta)
+	return a.Credit, nil
 }
 
 // chainLocked is Chain without re-locking (caller holds s.mu).

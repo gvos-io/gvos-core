@@ -16,8 +16,8 @@ package pkgplan
 
 import (
 	"context"
-	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"fmt"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"sync"
 	"time"
 )
@@ -35,10 +35,10 @@ type Package struct {
 	ID           string
 	Name         string
 	Cycle        Cycle
-	FreeMinutes  int     // included zero-cost minutes per cycle
-	Discount     float64 // 1.0 = list price; 0.8 = 8折
+	FreeMinutes  int          // included zero-cost minutes per cycle
+	Discount     float64      // 1.0 = list price; 0.8 = 8折
 	MinSpend     money.Amount // minimum spend per cycle
-	GraceMinutes float64 // minutes allowed beyond balance (debt floor)
+	GraceMinutes float64      // minutes allowed beyond balance (debt floor)
 }
 
 // Mode controls Redis-unavailable behaviour for free-minute claims.

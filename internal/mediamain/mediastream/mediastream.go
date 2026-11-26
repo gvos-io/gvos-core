@@ -19,9 +19,9 @@ import (
 // subscription (e.g. 8kHz PCMU 20ms = 160 bytes, the native telco
 // framing).
 type Chunk struct {
-	Data    []byte
-	Seq     uint64 // monotonic per stream direction
-	TS      time.Time
+	Data []byte
+	Seq  uint64 // monotonic per stream direction
+	TS   time.Time
 }
 
 // Direction of a chunk relative to the telephony leg.

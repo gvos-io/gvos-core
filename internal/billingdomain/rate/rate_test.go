@@ -58,7 +58,6 @@ func TestTimeWindowOverride(t *testing.T) {
 	}
 }
 
-
 func BenchmarkLookup(b *testing.B) {
 	var rs []Rate
 	for i := 0; i < 100000; i++ {

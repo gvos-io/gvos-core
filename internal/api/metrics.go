@@ -26,6 +26,7 @@ var (
 	mNatsPublishErr = metrics.Default.Counter("gvos_nats_publish_errors_total", "NATS JetStream publish failures (before pump retries)")
 	mConsumerNak    = metrics.Default.Counter("gvos_consumer_nak_total", "durable-consumer handler failures (NAKs, before redelivery)")
 	mRedisErrors    = metrics.Default.Counter("gvos_redis_errors_total", "Redis operation failures (admission/balance chain)")
+	mDevCreds       = metrics.Default.Counter("gvos_dev_credentials_total", "requests authenticated with demo/legacy credentials (alert on >0 in prod)")
 	mBuildInfo      = metrics.Default.Gauge("gvos_build_info", "process identity (value 1; labels are the point)")
 )
 

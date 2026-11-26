@@ -72,7 +72,7 @@ func TestSettleCostReconciles(t *testing.T) {
 	e := base(t)
 	e.SetRules([]Rule{{ID: "c1", Kind: "cost_day", Action: "block", CostLimit: 0.1}})
 
-	e.CheckCall("u1", "861", money.MustFromYuan(0.04)) // est 0.04
+	e.CheckCall("u1", "861", money.MustFromYuan(0.04))                     // est 0.04
 	e.SettleCost("u1", money.MustFromYuan(0.04), money.MustFromYuan(0.02)) // actual 0.02 -> 0.02 spent
 	if h := e.CheckCall("u1", "861", money.MustFromYuan(0.08)); h.Blocked {
 		t.Fatalf("settle should free headroom (0.02+0.08=0.1 at the edge): %+v", h)

@@ -106,6 +106,11 @@ func (a *AdmissionR) LiveConcurrent(ctx context.Context, accountID string) (int,
 	return int(n), err
 }
 
+// ErrAdmissionUnavailable: the admission ledger (Redis) could not be
+// consulted. Admission still refuses the call (money-adjacent,
+// fail-closed), but the caller answers 503 instead of a limit rejection.
+var ErrAdmissionUnavailable = errors.New("admission authority unavailable")
+
 // AdmitCall is the atomic single-round-trip admission+registration.
 // One Lua script over the whole chain key set: the concurrent check
 // (ZCARD+1 <= cap on every capped key), the CPS INCR check, then the
@@ -114,23 +119,27 @@ func (a *AdmissionR) LiveConcurrent(ctx context.Context, accountID string) (int,
 // the two-step AdmitConcurrent→StartChain pair leaves between replicas.
 //
 // KEYS   = chain calls keys, in chain order (own first)
-// ARGV   = [callID, startUnix, unused pad, cpsKey, cpsCap,
-//          then per-KEYS: cap (0 = uncapped)]
-// Return = 0 admitted; a KEYS index i (>0) when KEYS[i] is over its
-// cap; -1 when the CPS cap rejected.
+// ARGV   = [callID, startUnix, unused pad, unused pad,
+//
+//	per-KEYS concurrency cap (0 = uncapped),
+//	then per-KEYS the CPS counter key ('' = uncapped),
+//	then per-KEYS the CPS cap]
+//
+// Return = 0 admitted; KEYS index i (>0) when KEYS[i] is over its
+//
+//	concurrency cap; -i when chain member i is over its CPS cap.
 var admitScript = rds.NewScript(`
 local cid = ARGV[1]
 local score = tonumber(ARGV[2])
-local cps = ARGV[4]
-local cpsCap = tonumber(ARGV[5])
+local n = #KEYS
 -- Drop ledger members older than the zombie TTL before ZCARD so a
 -- busy account's key-level EXPIRE refresh cannot keep crashed-replica
 -- callIDs forever.
 local cutoff = score - ` + fmt.Sprint(ZombieTTLSeconds) + `
-for i = 1, #KEYS do
+for i = 1, n do
   redis.call('ZREMRANGEBYSCORE', KEYS[i], '-inf', cutoff)
 end
-for i = 1, #KEYS do
+for i = 1, n do
   local cap = tonumber(ARGV[5 + i])
   if cap > 0 then
     local live = redis.call('ZCARD', KEYS[i])
@@ -139,55 +148,92 @@ for i = 1, #KEYS do
     end
   end
 end
-if cpsCap > 0 then
-  local n = redis.call('INCR', cps)
-  if n == 1 then redis.call('EXPIRE', cps, 1) end
-  if n > cpsCap then
-    return -1
+-- CPS: every capped member of the chain counts this start against its
+-- own window (an ancestor's cap bounds its whole sub-tree). On a
+-- reject the windows already bumped are rolled back so the refused
+-- start leaves no ghost slot behind.
+local bumped = {}
+for i = 1, n do
+  local k = ARGV[5 + n + i]
+  if k ~= '' then
+    local c = redis.call('INCR', k)
+    if c == 1 then redis.call('EXPIRE', k, 1) end
+    bumped[#bumped + 1] = k
+    if c > tonumber(ARGV[5 + 2 * n + i]) then
+      for j = 1, #bumped do
+        if redis.call('DECR', bumped[j]) < 0 then redis.call('DEL', bumped[j]) end
+      end
+      return -i
+    end
   end
 end
-for i = 1, #KEYS do
+for i = 1, n do
   redis.call('ZADD', KEYS[i], score, cid)
   redis.call('EXPIRE', KEYS[i], ` + fmt.Sprint(ZombieTTLSeconds) + `)
 end
 return 0
 `)
 
-// AdmitCall runs admitScript. chain = account IDs (own first, then
-// ancestors), caps maps account ID -> concurrent cap (0/absent =
-// uncapped). Errors: *ErrLimit carries which chain key or the CPS
-// window rejected. Redis failure is admission failure — the merged
-// path is money-adjacent, so "could not check" must refuse the call
-// (the old two-step path logged and continued on StartChain errors,
-// which under-counted a shared ledger).
+// AdmitCall is AdmitCallChain with a CPS cap on the calling account
+// only (the pre-ancestor-CPS contract; existing callers and tests).
 func (a *AdmissionR) AdmitCall(ctx context.Context, chain []string, caps map[string]int, callID string, start time.Time, cpsCap int) error {
+	cpsCaps := map[string]int{}
+	if cpsCap > 0 {
+		cpsCaps[chain[0]] = cpsCap
+	}
+	return a.AdmitCallChain(ctx, chain, caps, cpsCaps, callID, start)
+}
+
+// AdmitCallChain runs admitScript. chain = account IDs (own first, then
+// ancestors); caps maps account ID -> concurrent cap and cpsCaps
+// account ID -> calls-per-second cap (0/absent = uncapped). Errors:
+// *ErrLimit names the chain member that rejected (concurrency or CPS);
+// Redis failure is admission failure — the merged path is
+// money-adjacent, so "could not check" must refuse the call.
+func (a *AdmissionR) AdmitCallChain(ctx context.Context, chain []string, caps, cpsCaps map[string]int, callID string, start time.Time) error {
 	if len(chain) == 0 {
 		return errors.New("admit: empty chain")
 	}
+	sec := start.Unix()
 	keys := make([]string, 0, len(chain))
-	args := make([]any, 0, len(chain)+6)
-	args = append(args, callID, start.Unix())
-	// Pad ARGV[3] (unused by the script's current form, kept so the
-	// KEYS/ARGV contract above stays stable).
-	args = append(args, 0)
-	args = append(args, cpsKey(chain[0], start.Unix()), cpsCap)
+	args := make([]any, 0, 3*len(chain)+5)
+	// ARGV[3] and ARGV[4] are unused pads (the KEYS/ARGV contract
+	// above keeps the per-KEYS blocks aligned at ARGV[6]).
+	args = append(args, callID, sec, 0, "", 0)
 	for _, id := range chain {
 		keys = append(keys, callsKey(id))
 		args = append(args, caps[id])
+	}
+	for _, id := range chain {
+		if cpsCaps[id] > 0 {
+			args = append(args, cpsKey(id, sec))
+		} else {
+			args = append(args, "")
+		}
+	}
+	for _, id := range chain {
+		args = append(args, cpsCaps[id])
 	}
 	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)
 	defer cancel()
 	res, err := admitScript.Run(ctx, a.rdb, keys, args...)
 	if err != nil {
-		return fmt.Errorf("admission authority unavailable: %w", err)
+		return fmt.Errorf("%w: %w", ErrAdmissionUnavailable, err)
 	}
 	v, _ := res.(int64)
 	switch {
 	case v == 0:
 		return nil
-	case v == -1:
-		return &ErrLimit{AccountID: chain[0], Kind: "cps",
-			Detail: "starts this second (ledger) over cap"}
+	case v < 0:
+		i := int(-v) - 1 // KEYS index -> chain index
+		if i < 0 || i >= len(chain) {
+			return fmt.Errorf("admit: bad script result %d", v)
+		}
+		detail := "starts this second (ledger) over cap"
+		if i > 0 {
+			detail = "sub-tree " + detail
+		}
+		return &ErrLimit{AccountID: chain[i], Kind: "cps", Detail: detail}
 	default:
 		i := int(v) - 1 // KEYS index -> chain index
 		if i < 0 || i >= len(chain) {
@@ -200,6 +246,37 @@ func (a *AdmissionR) AdmitCall(ctx context.Context, chain []string, caps map[str
 		return &ErrLimit{AccountID: chain[i], Kind: "concurrent",
 			Detail: "sub-tree live (ledger) over cap"}
 	}
+}
+
+// ReleaseCPS rolls the CPS windows back after a successful AdmitCall
+// whose subsequent reserve failed — without this the slots are ghost
+// occupancy until the 1s TTL expires. Only the chain's capped members
+// have a window.
+func (a *AdmissionR) ReleaseCPS(ctx context.Context, chain []string, cpsCaps map[string]int, start time.Time) error {
+	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)
+	defer cancel()
+	pipe := a.rdb.Raw().Pipeline()
+	var bumped []string
+	for _, id := range chain {
+		if cpsCaps[id] > 0 {
+			k := cpsKey(id, start.Unix())
+			bumped = append(bumped, k)
+			pipe.Decr(ctx, k)
+		}
+	}
+	if len(bumped) == 0 {
+		return nil
+	}
+	res, err := pipe.Exec(ctx)
+	if err != nil {
+		return err
+	}
+	for i, cmd := range res {
+		if n, err := cmd.(*redis.IntCmd).Result(); err == nil && n < 0 {
+			_ = a.rdb.Raw().Del(ctx, bumped[i]).Err()
+		}
+	}
+	return nil
 }
 
 // AdmitConcurrent checks "own live < cap" for the exact account and

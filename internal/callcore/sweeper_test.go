@@ -25,6 +25,7 @@ func TestSweeperSettlesZombies(t *testing.T) {
 	if err := m.Start("z1", "u1", "86", entry2(), 60, false); err != nil {
 		t.Fatal(err)
 	}
+	m.Answer("z1") // a connected call whose BYE never came
 	if m.Live() != 1 {
 		t.Fatalf("live = %d, want 1", m.Live())
 	}
@@ -79,6 +80,7 @@ func TestSweeperIgnoresActiveLongCalls(t *testing.T) {
 	if err := m.Start("long1", "u1", "86", entry2(), 60, false); err != nil {
 		t.Fatal(err)
 	}
+	m.Answer("long1") // connected: interim keeps it alive
 	// Age the call past the zombie timeout, then refresh LastActive.
 	cur = base.Add(15 * time.Minute)
 	if _, err := m.Interim("long1"); err != nil {

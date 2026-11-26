@@ -19,13 +19,13 @@
 - **控制面自研（Go）**：计费、路由决策、租户/代理链、风控全部代码透明，测试先行
 - **事件驱动**：CDR 落库、审计、强制拆线执行、Webhook 分发全是 NATS durable 消费者——**计费应答永不等待数据库**，写失败进重投队列而非丢失
 - **多副本即时同步**：费率/黑名单/账户/余额/录音开关/风控规则/套餐变更经总线广播，副本零重启生效，重启后从 `settings` 表恢复
-- **对账优先**：金额 7 位小数第 8 位进一（兼容主流计费精度语义），CDR 与账本逐分对账是持续验证的不变量
+- **对账优先**：金额定点化（ADR-0003，1 单位 = 0.0001 元，4 位小数第 5 位进一），CDR 与账本逐分对账是持续验证的不变量
 
 ## 核心能力
 
 | 域 | 能力 |
 |---|---|
-| **计费引擎** | 前缀最长匹配（10 万条费率 133ns/次）、时段窗口（节假日/夜间）、步长 60+6 / 6+6 / 1+1 / N+M、首步价/增量价 |
+| **计费引擎** | 前缀最长匹配（10 万条费率 133ns/次）、时段窗口（夜间/周内；跨时段不拆分、无节假日）、步长 60+6 / 6+6 / 1+1 / N+M、首步价/增量价 |
 | **账户体系** | 租户→多级代理→账户树；**Mode A 叶子扣款**（只预锁/结算主叫叶子，上级仅并发/CPS）；后付账户 |
 | **实时风控** | 频次/日成本/地区准入规则（block/alert）、黑白名单（前缀索引 220ns/次）、余额耗尽强制拆线；`GVOS_RISK_MODE` |
 | **信令边缘** | Kamailio 6.1.5 + nats 模块：鉴权 htable 缓存、IP 准入、异步 bill-lock RPC（suspend/resume 4 分片回复消费）、重传吸收、网关门限故障切换 |
@@ -103,15 +103,19 @@ go test ./...
 
 ## 已知限制（诚实声明）
 
-- 信令边缘已过 100CPS 全栈/2000 并发/20 万注册压测；架构补充后 10 轮 SIPp **3999/4000 ≈ 99.975%**（见 [bench10 2026-11-22](docs/bench/bench10-report-2026-11-22.md)）；300CPS+ 的 PRD 目标需 loadgen 与被测栈分离复测
-- 多副本运行时状态（余额/并发/CPS/风控滑窗/套餐用量/注册镜像）已收口 Redis（`GVOS_REDIS_URL`；未配置 = 单副本内存语义）；计费门 fail-closed，风控/套餐可用 `GVOS_RISK_MODE` / `GVOS_PKG_MODE` 切换
-- **gv-core 多副本已解禁（粘性 + 远程结算）**：热路径呼叫态仍在本机 map（Interim/拆线），生产须 **Call-ID LB 粘性**；粘性失效时 Redis `callmeta`/`callsettled` 兜底单次结算（架构压测 4000 通双结算 0）
-- 计费语义为 **Mode A 叶子扣款**（只动主叫叶子余额；上级不分摊同额预扣）
-- 管理令牌默认 `dev-admin-token`、DB 密码 `gvos_dev`——均为演示默认值，**生产部署必须更换**（见 [operations manual](docs/operations-manual.md)）；生产节点需设 `net.core.rmem_default=4MB`（UDP 缓冲，实测 416KB 在 200CPS 丢 401）
+- **单租户（demo tenant）形态**：所有账户共用写死的 `demo` 费率表，CDR 的 `tenant_id` 为常量；账户上的 `rate_group` 字段只存不用。多租户数据模型（每租户独立费率组/账户树/CDR 归属）是尚未实现的功能，不是配置项
+- 计费语义为 **Mode A 叶子扣款**（只动主叫叶子余额；上级不分摊同额预扣）。时长费率按起呼时刻取一次（跨时段不拆分、无节假日）
+- **单机 2 万并发线已验证**（2026-11-26 阶梯压测 1k→20k 七档，CDR↔ledger 逐分零漂移、PDD p99 65ms @20k，见 [capacity ladder](docs/bench/capacity-ladder-2026-11-26.md)）；另有 100CPS 全栈/20 万注册既有实测（[bench10 2026-11-22](docs/bench/bench10-report-2026-11-22.md)）；300CPS+ 需 loadgen 与被测栈分离复测；**DID 呼入终结（被叫方计费）已交付并 e2e 验证**（[设计文档](docs/did-inbound-design.md)）
+- 多副本运行时状态（余额/并发/CPS/风控滑窗/套餐用量/注册镜像）已收口 Redis（`GVOS_REDIS_URL`；未配置 = 单副本内存语义）；计费门 fail-closed，风控/套餐可用 `GVOS_RISK_MODE` / `GVOS_PKG_MODE` 切换。无 Redis 的 PG 模式：通话结算会同步扣减 `accounts.credit`（2026-11 修复），但充值/结算并发量大时仍建议配 Redis
+- **gv-core 多副本已解禁（粘性 + 远程结算）**：热路径呼叫态仍在本机 map（Interim/拆线），生产须 **Call-ID LB 粘性**；粘性失效时 Redis `callmeta`/`callsettled` 兜底单次结算（架构压测 4000 通双结算 0）。结算锁按「Call-ID + 起呼时刻」区分通话实例（Call-ID 复用设备不再丢结算）
+- 历史数据注意：**2026-11 修复前的 CDR/账本金额在 PG 里放大了一万倍**（`money.Amount` 以定点整数直写 NUMERIC）。修复后新写入正常；旧库需按 ÷10^4 修正或重建（对账口径见运维手册 §1.1）
+- 管理令牌默认 `dev-admin-token`、DB 密码 `gvos_dev`、NATS 演示口令 `gvos-demo-nats`——均为演示默认值，**生产部署必须更换**（见 [operations manual](docs/operations-manual.md)）；NATS 已启用用户名/口令认证（`GVOS_NATS_USER/PASSWORD`，k8s 走 `nats-auth` Secret）
+- 生产节点需设 `net.core.rmem_default=4MB`（UDP 缓冲，实测 416KB 在 200CPS 丢 401）
 - K8s 形态清单：RTPengine/Kamailio hostNetwork、节点 sysctl initContainer、安全组收敛 28080/Grafana
 - TLS 证书未随仓库分发，部署时自签：`openssl req -x509 -newkey rsa:2048 -nodes -keyout kamailio-key.pem -out kamailio-cert.pem -days 365 -subj "/CN=gvos.local"`
 - SRTP/DTLS：rtpengine 编译内置、配置面就绪，E2E 验证待媒体客户端（pjsua 或 WebRTC 软电话，规程见 [docs/srtp-dtls-verification-plan.md](docs/srtp-dtls-verification-plan.md)）
-- admin API 无速率限制（建议 ingress 层做）；`ul.dump/ul.lookup` RPC 在 20 万条目下有缺陷（重注册数据完好）
+- admin/tenant API 已内置限流（默认 100 burst/20 rps，`GVOS_RATE_BURST`/`GVOS_RATE_RPS` 可调，0=关）；`ul.dump/ul.lookup` RPC 在 20 万条目下有缺陷（重注册数据完好）；dev 凭证一旦被使用会打 `gvos_dev_credentials_total` 指标并触发 critical 告警
+- 套餐「最低消费」只有差额计算（`MinSpendShortfall`），周期收尾的自动补扣未实现
 
 ## 文档
 

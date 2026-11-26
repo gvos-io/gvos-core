@@ -25,9 +25,9 @@ import (
 )
 
 type stats struct {
-	mu       sync.Mutex
+	mu        sync.Mutex
 	latencies []float64 // ms
-	ok, fail atomic.Int64
+	ok, fail  atomic.Int64
 }
 
 func (s *stats) record(ms float64, ok bool) {

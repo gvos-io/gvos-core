@@ -25,6 +25,9 @@ func (s *Server) startReportWorker() {
 			}
 		}
 		s.snapshotRedisBalances(ctx)
+		if err := s.pg.EnsureCDRPartitions(ctx, partitionMonthsAhead); err != nil {
+			logPrintf("REPORT partition ensure failed: %v", err)
+		}
 		for _, day := range []string{todayStr(-1), todayStr(0)} {
 			if n, err := s.pg.RollupDaily(ctx, day); err != nil {
 				logPrintf("REPORT rollup %s failed: %v", day, err)
@@ -165,7 +168,6 @@ func (s *Server) handleReportViews(w http.ResponseWriter, r *http.Request) {
 }
 
 // requireGET guards read-only endpoints.
-
 
 // handleReportList serves GET /v1/admin/reports (read side of the
 // write/read split).

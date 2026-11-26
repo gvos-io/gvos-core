@@ -146,6 +146,7 @@ func TestEventBusTeardown(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	s.calls.Answer("ev-td") // connected: interim billing runs on answered calls only
 	cur = base.Add(60 * time.Second)
 	s.store.Reserve("1001", money.MustFromYuan(10)) // leave 0.01 < the 0.05 interim charge
 	if alive, err := s.calls.Interim("ev-td"); err != nil || alive {

@@ -7,15 +7,18 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gvos-io/gvos-core/internal/api"
-	"github.com/gvos-io/gvos-core/internal/shared/rds"
 	"github.com/gvos-io/gvos-core/internal/shared/events"
+	"github.com/gvos-io/gvos-core/internal/shared/rds"
 )
 
 func main() {
@@ -33,6 +36,12 @@ func main() {
 	dsnVal := *dsn
 	if dsnVal == "" {
 		dsnVal = os.Getenv("GVOS_DB_DSN")
+	}
+	if dsnVal == "" {
+		// k8s form: secretKeyRef optional leaves the var unset when
+		// gvos-secrets/db-dsn is absent — the manifest's explicit
+		// dev fallback takes over (deploy/k8s/03-gv-core.yaml).
+		dsnVal = os.Getenv("GVOS_DB_DSN_FALLBACK")
 	}
 	redisVal := *redisURL
 	if redisVal == "" {
@@ -57,12 +66,28 @@ func main() {
 	}
 	var s *api.Server
 	if dsnVal != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		// F-7: a PG blip at boot (maintenance window, standby
+		// promotion, cluster restart) used to Fatal the process and
+		// hand the outage to the restart policy. Retry with capped
+		// backoff instead — boot is not the money path; the pool
+		// itself reconnects post-New once alive.
 		var err error
-		s, err = api.NewPGServer(ctx, dsnVal)
-		cancel()
-		if err != nil {
-			log.Fatalf("postgres mode failed: %v", err)
+		for attempt := 1; ; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			s, err = api.NewPGServer(ctx, dsnVal)
+			cancel()
+			if err == nil {
+				break
+			}
+			if attempt >= 20 {
+				log.Fatalf("postgres mode failed after %d attempts: %v", attempt, err)
+			}
+			backoff := time.Duration(attempt) * 3 * time.Second
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+			log.Printf("postgres unreachable (attempt %d, retry in %s): %v", attempt, backoff, err)
+			time.Sleep(backoff)
 		}
 	} else {
 		s = api.NewServer()
@@ -104,7 +129,6 @@ func main() {
 	// Event bus is auxiliary, not authority: a missing/unreachable
 	// broker must not take the control plane down (it reconnects on
 	// its own; publishes just log until the broker appears).
-	var webhookConsumer *events.Consumer
 	if natsVal != "" {
 		if pub, err := events.New(natsVal); err != nil {
 			log.Printf("NATS event bus disabled (connect failed: %v)", err)
@@ -118,27 +142,63 @@ func main() {
 			api.StartCdrRawConsumer(s)
 			api.StartCfgRebroadcaster(s)
 			if webhookVal != "" {
-				webhookConsumer = api.StartWebhookDispatcher(s)
+				// The legacy single-URL dispatcher: a consumer whose
+				// lifecycle api.Shutdown already drains with the other
+				// workers.
+				api.StartWebhookDispatcher(s)
 			}
 		}
 	}
 	log.Printf("gvos-core listening on %s (workers=%v)", *listen, api.WorkerNames(s))
-	var runErr error
+	handler := api.MuxFor(s)
+	// Timeouts: none of the faces are slow endpoints (the bill-lock RPC
+	// answers in milliseconds), so a slowloris-style open connection is
+	// pure attack surface — the previous bare ListenAndServe never
+	// timed out at all. Long-lived faces are exempt by size:
+	// ReadTimeout would kill the SSE stream mid-push, so only the
+	// header and idle halves are bounded there.
+	srv := &http.Server{
+		Addr:              *listen,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	if *tlsCert != "" && *tlsKey != "" {
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		log.Printf("TLS enabled (%s)", *tlsCert)
-		runErr = http.ListenAndServeTLS(*listen, *tlsCert, *tlsKey, api.MuxFor(s))
-	} else {
-		runErr = http.ListenAndServe(*listen, api.MuxFor(s))
 	}
-	if webhookConsumer != nil {
-		webhookConsumer.Stop() // drain in-flight webhook deliveries
+
+	// Graceful shutdown: SIGINT/SIGTERM stop taking calls, in-flight
+	// requests get a bounded drain, then the workers drain and the bus
+	// flushes. (And the webhook consumer stops exactly once — the old
+	// exit path called Stop twice and panicked.)
+	var runErr error
+	serveErr := make(chan error, 1)
+	go func() {
+		if *tlsCert != "" && *tlsKey != "" {
+			serveErr <- srv.ListenAndServeTLS(*tlsCert, *tlsKey)
+		} else {
+			serveErr <- srv.ListenAndServe()
+		}
+	}()
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	select {
+	case err := <-serveErr:
+		runErr = err
+	case sig := <-stop:
+		log.Printf("shutting down on %s", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("HTTP shutdown: %v", err)
+		}
 	}
-	api.Shutdown(s)   // drain workers, close the event bus
+
+	api.Shutdown(s) // drain workers, close the event bus
 	_ = rc.Close()  // then the redis authority (rc nil-safe)
-	if webhookConsumer != nil {
-		webhookConsumer.Stop()
-	}
-	if runErr != nil {
+	if runErr != nil && runErr != http.ErrServerClosed {
 		log.Fatal(runErr)
 	}
 }

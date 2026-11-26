@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -46,12 +47,12 @@ const (
 // (CDR, teardown reason, audit diff) — no envelope: each payload is
 // already self-describing and versioned through the stream itself.
 const (
-	SubjectCDRCompleted = "gvos.cdr.completed" // payload: callcore.CDR
-	SubjectCDRRaw       = "gvos.cdr.raw"       // payload: callEndReq (Kamailio-measured; CDRR consumer finalizes billing)
-	SubjectCallTeardown = "gvos.call.teardown" // payload: {call_id, reason}
-	SubjectRiskAlert    = "gvos.risk.alert"    // payload: {account, username, rule_id, reason, to}
-	SubjectRegEvent     = "gvos.reg.event"     // payload: {user, expires, src_ip, op} (Kamailio usrloc hooks)
-	SubjectAdminChanged = "gvos.admin.changed" // payload: {action, entity, entity_id, before, after}
+	SubjectCDRCompleted       = "gvos.cdr.completed"       // payload: callcore.CDR
+	SubjectCDRRaw             = "gvos.cdr.raw"             // payload: callEndReq (Kamailio-measured; CDRR consumer finalizes billing)
+	SubjectCallTeardown       = "gvos.call.teardown"       // payload: {call_id, reason}
+	SubjectRiskAlert          = "gvos.risk.alert"          // payload: {account, username, rule_id, reason, to}
+	SubjectRegEvent           = "gvos.reg.event"           // payload: {user, expires, src_ip, op} (Kamailio usrloc hooks)
+	SubjectAdminChanged       = "gvos.admin.changed"       // payload: {action, entity, entity_id, before, after}
 	SubjectRecordingCompleted = "gvos.recording.completed" // payload: {call_id, track, object_key, backend, size_bytes, format}
 )
 
@@ -77,9 +78,9 @@ const (
 // message; the aliases stay outside streamSubjects (the dotted
 // originals are the persisted, canonical stream records).
 const (
-	SubjectEdgeCfgReload = "gvos-edge-cfg"   // alias of gvos.cfg.reload
-	SubjectEdgeRiskAlert = "gvos-edge-risk"  // alias of gvos.risk.alert
-	SubjectEdgeTeardown  = "gvos-edge-tear"  // alias of gvos.call.teardown
+	SubjectEdgeCfgReload = "gvos-edge-cfg"  // alias of gvos.cfg.reload
+	SubjectEdgeRiskAlert = "gvos-edge-risk" // alias of gvos.risk.alert
+	SubjectEdgeTeardown  = "gvos-edge-tear" // alias of gvos.call.teardown
 
 	// edgePrefix is the IsEdgeAlias discriminator for the pump's
 	// poster routing (see IsEdgeAlias).
@@ -157,18 +158,79 @@ type Publisher struct {
 	mode string                // "jetstream" | "core" (surface in /v1/stats)
 }
 
+// DefaultStreamMaxAge bounds how long the stream keeps messages. It
+// used to grow without limit — every CDR, config rebroadcast and
+// registration event, forever — until the broker's disk was full. CDRs
+// live in PostgreSQL; the stream is a buffer for the consumers.
+const DefaultStreamMaxAge = 7 * 24 * time.Hour
+
+// streamMaxAge is the stream's retention (GVOS_JS_MAX_AGE overrides).
+func streamMaxAge() time.Duration {
+	if v := os.Getenv("GVOS_JS_MAX_AGE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+		log.Printf("GVOS_JS_MAX_AGE=%q invalid, using %s", v, DefaultStreamMaxAge)
+	}
+	return DefaultStreamMaxAge
+}
+
+// streamMaxBytes is an optional byte cap on the stream
+// (GVOS_JS_MAX_BYTES; unset or 0 = no cap).
+func streamMaxBytes() int64 {
+	if v := os.Getenv("GVOS_JS_MAX_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+		log.Printf("GVOS_JS_MAX_BYTES=%q invalid, using no byte cap", v)
+	}
+	return 0
+}
+
+// authOptions adds the credentials a deployment hands out through the
+// environment, next to the user:password that may already ride in the
+// URL. The bus carries call control (bill-lock RPC, call events, config
+// broadcasts): an unauthenticated broker is anyone's billing plane.
+func authOptions() []nats.Option {
+	var opts []nats.Option
+	if tok := os.Getenv("GVOS_NATS_TOKEN"); tok != "" {
+		opts = append(opts, nats.Token(tok))
+	}
+	if creds := os.Getenv("GVOS_NATS_CREDS"); creds != "" {
+		opts = append(opts, nats.UserCredentials(creds))
+	}
+	if ca := os.Getenv("GVOS_NATS_CA"); ca != "" {
+		opts = append(opts, nats.RootCAs(ca))
+	}
+	return opts
+}
+
+// redactURL hides credentials before a broker URL (possibly a
+// comma-separated server list) reaches the log.
+func redactURL(raw string) string {
+	parts := strings.Split(raw, ",")
+	for i, p := range parts {
+		if u, err := url.Parse(strings.TrimSpace(p)); err == nil && u.User != nil {
+			u.User = url.User(u.User.Username())
+			parts[i] = u.String()
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
 // New connects to NATS and returns a publisher. Connection is
 // resilient: if the broker is down at boot the client keeps retrying
 // (RetryOnFailedConnect + MaxReconnects(-1)), so the control plane
-// starts even before NATS does — publishes just log failures until
-// the broker appears. JetStream is preferred but optional.
+// starts even before NATS does — publishes just log failures until the
+// broker appears. JetStream is preferred but optional.
 func New(url string) (*Publisher, error) {
-	nc, err := nats.Connect(url,
+	opts := append([]nats.Option{
 		nats.Name("gvos-core"),
 		nats.RetryOnFailedConnect(true),
-		nats.ReconnectWait(2*time.Second),
+		nats.ReconnectWait(2 * time.Second),
 		nats.MaxReconnects(-1),
-	)
+	}, authOptions()...)
+	nc, err := nats.Connect(url, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +250,7 @@ func New(url string) (*Publisher, error) {
 	} else {
 		log.Printf("NATS JetStream unavailable, using core pub/sub: %v", err)
 	}
-	log.Printf("NATS event bus ready mode=%s url=%s", mode, url)
+	log.Printf("NATS event bus ready mode=%s url=%s", mode, redactURL(url))
 	p := &Publisher{
 		ch:     make(chan queued, queueSize),
 		done:   make(chan struct{}),
@@ -243,15 +305,21 @@ func ensureStream(js nats.JetStreamContext) error {
 			log.Printf("NATS GVOS_JS_REPLICAS=%q invalid (1-5), using 1", v)
 		}
 	}
+	maxAge, maxBytes := streamMaxAge(), streamMaxBytes()
 	info, err := js.StreamInfo(streamName)
 	if err == nil {
-		if !sameSubjects(info.Config.Subjects, streamSubjects) || info.Config.Replicas != replicas {
+		if !sameSubjects(info.Config.Subjects, streamSubjects) || info.Config.Replicas != replicas ||
+			info.Config.MaxAge != maxAge || info.Config.MaxBytes != maxBytes {
 			cfg := info.Config
 			cfg.Subjects = streamSubjects
 			cfg.Replicas = replicas
+			// Retention converges too: an existing unlimited stream
+			// starts trimming at MaxAge.
+			cfg.MaxAge = maxAge
+			cfg.MaxBytes = maxBytes
 			_, err = js.UpdateStream(&cfg)
 			if err == nil {
-				log.Printf("NATS stream %s converged (subjects, replicas=%d)", streamName, replicas)
+				log.Printf("NATS stream %s converged (subjects, replicas=%d, max_age=%s)", streamName, replicas, maxAge)
 			}
 			return err
 		}
@@ -264,6 +332,8 @@ func ensureStream(js nats.JetStreamContext) error {
 		Subjects: streamSubjects,
 		Storage:  nats.FileStorage,
 		Replicas: replicas,
+		MaxAge:   maxAge,
+		MaxBytes: maxBytes,
 	})
 	// Already-exists counts as success: restarts and replicas converge.
 	if err != nil && (errors.Is(err, nats.ErrStreamNameAlreadyInUse) ||
@@ -445,6 +515,13 @@ const responderWorkers = 16
 // Reply order is not preserved: safe, because every caller matches
 // its own _INBOX. Used by the service seams (call start/answer/end,
 // stats, teardown dispatch).
+//
+// Queue group: every replica joins "qg:<subject>", so a multi-replica
+// deployment delivers each request to exactly ONE member (the edge
+// node keeps its own non-queued reply subjects — node-addressed, not
+// shared). Before this, every replica answered every request:
+// double-reserves raced, and the loser's 403 could win the reply race
+// on a call the winner had already admitted.
 func (p *Publisher) Respond(subject string, fn func(req []byte) []byte) error {
 	if p.nc == nil {
 		return errors.New("nats: respond requires a live connection")
@@ -471,7 +548,7 @@ func (p *Publisher) Respond(subject string, fn func(req []byte) []byte) error {
 			}
 		}()
 	}
-	_, err := p.nc.Subscribe(subject, func(m *nats.Msg) {
+	_, err := p.nc.QueueSubscribe(subject, "qg:"+subject, func(m *nats.Msg) {
 		inbox <- m
 	})
 	return err

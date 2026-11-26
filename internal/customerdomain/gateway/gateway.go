@@ -21,18 +21,18 @@ import (
 // (lower value = tried first); Enabled=false removes it from
 // selection without deleting the entry.
 type Gateway struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	SipAddr  string   `json:"sip_addr"`
-	Protocol string   `json:"protocol"`  // udp | tcp | tls (informational; routing is by SipAddr)
-	Priority int      `json:"priority"`  // base priority (lower = preferred)
-	Weight   int      `json:"weight"`    // future ratio balancing (ignored by priority selection)
-	Enabled  bool     `json:"enabled"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	SipAddr  string `json:"sip_addr"`
+	Protocol string `json:"protocol"` // udp | tcp | tls (informational; routing is by SipAddr)
+	Priority int    `json:"priority"` // base priority (lower = preferred)
+	Weight   int    `json:"weight"`   // future ratio balancing (ignored by priority selection)
+	Enabled  bool   `json:"enabled"`
 	// LCR (competitive-analysis §3.1): the prefixes this gateway
 	// serves and the rate group that prices its *outbound cost*. The
 	// control plane reorders per-prefix (cheapest first) before the
 	// broadcast; the edge keeps its plain priority selection.
-	Prefixes []string `json:"prefixes"` // served destination prefixes, longest-match wins
+	Prefixes []string `json:"prefixes"`  // served destination prefixes, longest-match wins
 	CostRate string   `json:"cost_rate"` // rate group pricing this gateway's cost
 }
 
@@ -62,8 +62,8 @@ func Validate(g Gateway) error {
 // snapshot copy; writes replace the whole set atomically (the set is
 // small — operators manage dozens, not millions).
 type List struct {
-	mu   sync.RWMutex
-	gws  []Gateway
+	mu  sync.RWMutex
+	gws []Gateway
 }
 
 // New returns an empty set.
@@ -94,6 +94,30 @@ func (l *List) Gateways() []Gateway {
 	out := make([]Gateway, len(l.gws))
 	copy(out, l.gws)
 	return out
+}
+
+// PickForDest returns the first enabled gateway serving dest's
+// longest matching prefix (the DID external second leg: the control
+// plane pre-picks the carrier and the answer carries gw_id, so the
+// edge skips global selection for that call). Boolean false = no
+// gateway serves the prefix; the caller decides the fallback.
+func (l *List) PickForDest(dest string) (Gateway, bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	var best Gateway
+	bestLen := -1
+	for _, g := range l.gws {
+		if !g.Enabled {
+			continue
+		}
+		for _, p := range g.Prefixes {
+			if len(p) > bestLen && len(dest) >= len(p) && dest[:len(p)] == p {
+				best = g
+				bestLen = len(p)
+			}
+		}
+	}
+	return best, bestLen >= 0
 }
 
 // Count returns the total entry count (enabled + disabled).

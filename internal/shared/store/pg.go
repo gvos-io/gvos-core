@@ -4,20 +4,25 @@
 package store
 
 import (
-	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"runtime"
+	"strconv"
+	"time"
+
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
-	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
-	"github.com/gvos-io/gvos-core/internal/callcore"
-	"github.com/gvos-io/gvos-core/internal/customerdomain/gateway"
 	"github.com/gvos-io/gvos-core/internal/billingdomain/rate"
+	"github.com/gvos-io/gvos-core/internal/callcore"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/gateway"
 	"github.com/gvos-io/gvos-core/internal/shared/metrics"
 )
 
@@ -35,7 +40,30 @@ type PG struct {
 }
 
 func Open(ctx context.Context, dsn string) (*PG, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+	// Pool sizing: pgx defaults cap at max(4, NumCPU) connections with
+	// MinConns=0; CDR bursts (BYE storms settling CDRW/CDRR workers in
+	// parallel — env-tunable counts, see workers_dispatch.go) saturate
+	// a small pool long before the CPU does. Scale with CPUs, floor 8,
+	// ceiling 32; GVOS_PG_MAX_CONNS overrides for tuned deployments.
+	maxConns := runtime.NumCPU() * 4
+	if maxConns < 8 {
+		maxConns = 8
+	}
+	if maxConns > 32 {
+		maxConns = 32
+	}
+	if v := os.Getenv("GVOS_PG_MAX_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxConns = n
+		}
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse dsn: %w", err)
+	}
+	cfg.MaxConns = int32(maxConns)
+	cfg.MinConns = int32(maxConns / 4)
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
 	}
@@ -183,27 +211,45 @@ func (p *PG) LoadGateways(ctx context.Context) ([]gateway.Gateway, error) {
 	return gws, nil
 }
 
+// insertCDRSQL is the cdr write shared by InsertCDR and
+// InsertCDRWithSettle (ON CONFLICT DO NOTHING makes it idempotent
+// under redelivery: uq_cdr_call, migration 008). direction/gateway_id
+// (migration 013) default on the column: legacy CDRs and old callers
+// that leave them empty persist 'out'/NULL exactly as before.
+const insertCDRSQL = `
+        INSERT INTO cdr (call_id, tenant_id, account_id, dest, dest_prefix,
+                         start_time, answer_time, end_time, duration, billed_secs,
+                         price, cost, release, pdd_ms, sip_code, recorded,
+                         mos, jitter_ms, packet_loss, direction, gateway_id)
+        VALUES ($1, '00000000-0000-0000-0000-000000000001', $2::uuid, $3, $4,
+                $5::timestamptz,
+                CASE WHEN $17::timestamptz <= '1970-01-01' THEN NULL ELSE $17::timestamptz END,
+                $5::timestamptz + ($6::int * interval '1 second'),
+                $6::int, $7::int, $8::numeric, $9::numeric, $10, $11::int, $12::int, $13::bool,
+                $14::real, $15::real, $16::real,
+                CASE WHEN $18 = '' THEN 'out' ELSE $18 END,
+                NULLIF($19, '')::uuid)
+        ON CONFLICT DO NOTHING`
+
+// cdrArgs binds a CDR to insertCDRSQL. Money crosses as decimal
+// strings (ADR-0003): the NUMERIC columns must receive yuan, never the
+// scaled int64 (money.Amount.Value() guards the direct form too).
+func cdrArgs(c *callcore.CDR) []any {
+	return []any{
+		c.CallID, c.AccountID, c.Dest, c.RatePrefix,
+		c.StartTime, c.Duration, c.BilledSecs, c.Price.String(), c.Cost.String(), c.Release, c.PDDMs, c.SIPCode, c.Recorded,
+		c.Mos, c.JitterMs, c.PacketLoss, c.AnswerTime,
+		c.Direction, c.GatewayID,
+	}
+}
+
 // InsertCDR persists one billing record into the monthly-partitioned
 // cdr table. Idempotent under redelivery (uq_cdr_call, migration 008):
 // returns inserted=false when the row already exists — the caller then
 // skips dependent writes (ledger) so at-least-once delivery produces
 // exactly-once effects.
 func (p *PG) InsertCDR(ctx context.Context, c *callcore.CDR) (bool, error) {
-	tag, err := p.pool.Exec(ctx, `
-        INSERT INTO cdr (call_id, tenant_id, account_id, dest, dest_prefix,
-                         start_time, answer_time, end_time, duration, billed_secs,
-                         price, cost, release, pdd_ms, sip_code, recorded,
-                         mos, jitter_ms, packet_loss)
-        VALUES ($1, '00000000-0000-0000-0000-000000000001', $2::uuid, $3, $4,
-                $5::timestamptz,
-                CASE WHEN $17::timestamptz <= '1970-01-01' THEN NULL ELSE $17::timestamptz END,
-                $5::timestamptz + ($6::int * interval '1 second'),
-                $6::int, $7::int, $8::numeric, $9::numeric, $10, $11::int, $12::int, $13::bool,
-                $14::real, $15::real, $16::real)
-        ON CONFLICT DO NOTHING`,
-		c.CallID, c.AccountID, c.Dest, c.RatePrefix,
-		c.StartTime, c.Duration, c.BilledSecs, c.Price, c.Cost, c.Release, c.PDDMs, c.SIPCode, c.Recorded,
-		c.Mos, c.JitterMs, c.PacketLoss, c.AnswerTime)
+	tag, err := p.pool.Exec(ctx, insertCDRSQL, cdrArgs(c)...)
 	if err != nil {
 		return false, fmt.Errorf("insert cdr: %w", err)
 	}
@@ -213,12 +259,89 @@ func (p *PG) InsertCDR(ctx context.Context, c *callcore.CDR) (bool, error) {
 	return tag.RowsAffected() > 0, nil
 }
 
+// InsertCDRWithSettle persists one billing record together with its
+// settlement ledger row — atomically and idempotently. With
+// deductCredit set (no Redis: the in-memory balance is the authority
+// and accounts.credit mirrors it) the call's cost also comes off
+// accounts.credit in the same transaction. A redelivery finds the CDR
+// row, writes nothing and reports inserted=false: at-least-once
+// delivery, exactly-once money. bal is the post-settlement balance
+// snapshot for the ledger row.
+func (p *PG) InsertCDRWithSettle(ctx context.Context, c *callcore.CDR, bal money.Amount, deductCredit bool) (bool, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("settle begin: %w", err)
+	}
+	defer tx.Rollback(ctx) // safe no-op after commit
+
+	tag, err := tx.Exec(ctx, insertCDRSQL, cdrArgs(c)...)
+	if err != nil {
+		return false, fmt.Errorf("insert cdr: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("settle commit (redelivery): %w", err)
+		}
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx, `
+        INSERT INTO balance_ledger (account_id, delta, balance, reason, call_id)
+        VALUES ($1::uuid, $2::numeric, $3::numeric, $4, $5)`,
+		c.AccountID, (-c.Cost).String(), bal.String(), "call-settle", c.CallID); err != nil {
+		return false, fmt.Errorf("insert ledger: %w", err)
+	}
+	if deductCredit {
+		// A prepaid account's credit never goes below zero here: the
+		// schema's CHECK forbids it and a violated CHECK would roll the
+		// whole settlement (CDR included) back. The remainder of a cost
+		// paid out of a credit line is forgiven in the mirror.
+		if _, err := tx.Exec(ctx, `
+            UPDATE accounts
+               SET credit = credit - CASE WHEN postpaid THEN $1::numeric
+                                          ELSE LEAST($1::numeric, GREATEST(credit, 0)) END
+             WHERE id = $2::uuid`, c.Cost.String(), c.AccountID); err != nil {
+			return false, fmt.Errorf("deduct credit: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("settle commit: %w", err)
+	}
+	cdrWritten.Inc(1)
+	ledgerWritten.Inc(1)
+	return true, nil
+}
+
+// EnsureCDRPartitions makes sure a monthly partition exists for this
+// month and the next `ahead` months. The schema ships partitions for a
+// fixed window only; the first month without one fails every CDR
+// insert (the durable consumer gives up after its redeliveries). Runs
+// at boot and on the hourly report pass, so no cron can forget it.
+// Idempotent; needs CREATE on the schema (the app role owns it).
+func (p *PG) EnsureCDRPartitions(ctx context.Context, ahead int) error {
+	if ahead < 0 {
+		ahead = 0
+	}
+	now := time.Now()
+	first := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i <= ahead; i++ {
+		from := first.AddDate(0, i, 0)
+		to := from.AddDate(0, 1, 0)
+		name := fmt.Sprintf("cdr_%04d_%02d", from.Year(), int(from.Month()))
+		if _, err := p.pool.Exec(ctx, fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s PARTITION OF cdr FOR VALUES FROM ('%s') TO ('%s')`,
+			name, from.Format("2006-01-02"), to.Format("2006-01-02"))); err != nil {
+			return fmt.Errorf("ensure partition %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // AppendLedger writes a balance movement row (append-only).
 func (p *PG) AppendLedger(ctx context.Context, accountID string, delta, balance money.Amount, reason, callID string) error {
 	_, err := p.pool.Exec(ctx, `
         INSERT INTO balance_ledger (account_id, delta, balance, reason, call_id)
-        VALUES ($1::uuid, $2::numeric, $3::numeric, $4, $5)`,
-		accountID, delta, balance, reason, callID)
+	VALUES ($1::uuid, $2::numeric, $3::numeric, $4, $5)`,
+		accountID, delta.String(), balance.String(), reason, callID)
 	if err == nil {
 		ledgerWritten.Inc(1)
 	}
@@ -339,7 +462,7 @@ func (p *PG) UpsertRate(ctx context.Context, groupID, prefix string, price money
 	if _, err := tx.Exec(ctx, `
         INSERT INTO rates (group_id, prefix, price, init_dur, step_dur, min_dur, effective_at)
         VALUES ($1::uuid, $2, $3, $4, $5, $6, now())`,
-		groupID, prefix, price, initDur, stepDur, minDur); err != nil {
+		groupID, prefix, price.String(), initDur, stepDur, minDur); err != nil {
 		return fmt.Errorf("upsert rate insert: %w", err)
 	}
 	return tx.Commit(ctx)
@@ -718,7 +841,6 @@ type RecordingRow struct {
 	SizeBytes int64
 	Status    string
 }
-
 
 // --- webhook subscription storage (api.WebhookStore face) ---
 

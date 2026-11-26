@@ -80,4 +80,3 @@ func LCRPriority(ordered []Gateway, id string) int {
 	}
 	return len(ordered) // unrouted tail
 }
-

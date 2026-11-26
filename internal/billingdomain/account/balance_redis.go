@@ -19,12 +19,18 @@ import (
 func balKey(id string) string { return rds.Prefix + "bal:" + id }
 
 // reserveScript: KEYS[1] = leaf balance key, ARGV[1] = est,
-// ARGV[2] = maxDebt. Returns 1 on success, 0 on insufficient balance.
+// ARGV[2] = maxDebt (credit line: an allowed NEGATIVE balance).
+// Returns 1 on success, 0 on insufficient balance, -1 when the
+// authority holds no balance for the account (never seeded, or data
+// lost) — a platform fault that must not read as "broke".
 var reserveScript = rds.NewScript(`
 local est = tonumber(ARGV[1])
 local maxdebt = tonumber(ARGV[2])
-local bal = tonumber(redis.call('GET', KEYS[1]) or '0')
-if bal - maxdebt < est then
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return -1
+end
+local bal = tonumber(redis.call('GET', KEYS[1]))
+if bal + maxdebt < est then
   return 0
 end
 redis.call('INCRBY', KEYS[1], -est)
@@ -32,9 +38,17 @@ return 1
 `)
 
 // refundScript: KEYS[1] = leaf key, ARGV[1] = signed delta (positive =
-// refund remainder, negative = extra charge).
+// refund remainder, negative = extra charge). Returns 1, or -1 when
+// the key does not exist: a refund must never materialise a balance.
+// Creating the key here would pin a wrong value that the SETNX re-seed
+// then refuses to overwrite (audit: a 9.94 balance became 0.06 after
+// the authority lost its data). The caller logs and the boot seed
+// restores the last PG snapshot instead.
 var refundScript = rds.NewScript(`
 local delta = tonumber(ARGV[1])
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return -1
+end
 redis.call('INCRBY', KEYS[1], delta)
 return 1
 `)
@@ -92,12 +106,16 @@ func (b *BalanceR) Reserve(ctx context.Context, id string, est money.Amount) (st
 	defer cancel()
 	res, err := reserveScript.Run(ctx, b.rdb, keys, int64(est), int64(debt))
 	if err != nil {
-		return "", fmt.Errorf("balance authority unavailable: %w", err)
+		return "", fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
-	if v, _ := res.(int64); v != 1 {
+	switch v, _ := res.(int64); v {
+	case 1:
+		return id + ":call:" + fmt.Sprintf("%d", now()), nil
+	case -1:
+		return "", fmt.Errorf("%w: %s", ErrNotSeeded, id)
+	default:
 		return "", fmt.Errorf("account %q insufficient balance (redis authority)", id)
 	}
-	return id + ":call:" + fmt.Sprintf("%d", now()), nil
 }
 
 // Commit reconciles est against actual on the leaf (delta
@@ -113,8 +131,14 @@ func (b *BalanceR) Commit(ctx context.Context, token, id string, est, actual mon
 	}
 	ctx, cancel := context.WithTimeout(ctx, rds.CallTimeout)
 	defer cancel()
-	_, err = refundScript.Run(ctx, b.rdb, keys, int64(est.Sub(actual)))
-	return err
+	res, err := refundScript.Run(ctx, b.rdb, keys, int64(est.Sub(actual)))
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
+	if v, _ := res.(int64); v == -1 {
+		return fmt.Errorf("%w: %s", ErrNotSeeded, id)
+	}
+	return nil
 }
 
 // Release cancels a reservation fully (call never connected).

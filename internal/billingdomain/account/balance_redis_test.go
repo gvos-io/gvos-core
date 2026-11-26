@@ -64,20 +64,25 @@ func TestRedisCommitRefund(t *testing.T) {
 	}
 }
 
-func TestRedisMaxDebtFloor(t *testing.T) {
+func TestRedisMaxDebtIsCreditLine(t *testing.T) {
 	s, b := newRedisStore(t)
 	ctx := context.Background()
-	// end1: 1 yuan left, MaxDebt 0.5 -> can reserve 1.4 (floor -0.5... wait:
-	// floor = credit-maxdebt = 0.5). Reserve 0.5 ok, 0.6 fails.
+	// MaxDebt is an ALLOWED NEGATIVE balance: 1 yuan left plus a 0.5
+	// line buys up to 1.5. The check once subtracted the line instead
+	// of adding it (floor = credit - maxdebt = 0.5), so a credit line
+	// only made calls harder to place.
 	s.Put(&Account{ID: "end2", ParentID: "agent1", Credit: money.MustFromYuan(1), MaxDebt: money.MustFromYuan(0.5), RateGroup: "g"})
 	if err := b.SetAbsolute(ctx, "end2", money.MustFromYuan(1)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Reserve(ctx, "end2", money.MustFromYuan(0.5)); err != nil {
-		t.Fatalf("reserve at floor edge: %v", err)
+	if _, err := b.Reserve(ctx, "end2", money.MustFromYuan(1.5)); err != nil {
+		t.Fatalf("reserve up to credit + line: %v", err)
 	}
-	if _, err := b.Reserve(ctx, "end2", money.MustFromYuan(0.6)); err == nil {
-		t.Error("reserve beyond maxDebt floor must fail")
+	if bal, _ := b.Get(ctx, "end2"); bal != money.MustFromYuan(-0.5) {
+		t.Errorf("end2 = %s, want -0.5000 (credit line spent)", bal)
+	}
+	if _, err := b.Reserve(ctx, "end2", money.MustFromYuan(0.01)); err == nil {
+		t.Error("reserve beyond the credit line must fail")
 	}
 }
 

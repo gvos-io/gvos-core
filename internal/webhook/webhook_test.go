@@ -61,6 +61,11 @@ func TestDeliverRetriesThenSucceeds(t *testing.T) {
 	defer srv.Close()
 
 	d := NewDeliverer()
+	// The endpoint is a loopback test server, which the deliverer's
+	// dial-time SSRF guard refuses by design. This test is about the
+	// retry schedule (transport-independent), so it swaps in a plain
+	// transport; the guard has its own tests in deliver_guard_test.go.
+	d.Client.Transport = nil
 	sub := Subscription{ID: "s1", URL: srv.URL, Secret: "sec9", Events: []string{"gvos.cdr.completed"}, Active: true}
 	attempts := d.Deliver(context.Background(), sub, "gvos.cdr.completed", 7, map[string]string{"call_id": "c-1"})
 	if attempts != 3 {

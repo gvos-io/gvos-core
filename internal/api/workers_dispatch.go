@@ -21,14 +21,15 @@ import (
 
 	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
 	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
-	"github.com/gvos-io/gvos-core/internal/shared/rds"
 	"github.com/gvos-io/gvos-core/internal/billingdomain/pkgplan"
 	"github.com/gvos-io/gvos-core/internal/callcore"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/did"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/gateway"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/ipallow"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/riskctrl"
 	"github.com/gvos-io/gvos-core/internal/shared/events"
+	"github.com/gvos-io/gvos-core/internal/shared/rds"
 )
 
 // startAsyncWorkers launches the durable write/exec workers. Each
@@ -42,15 +43,21 @@ func StartAsyncWorkers(s *Server) {
 	if s.pg == nil {
 		log.Printf("async persistence workers skipped (memory mode: CDR/audit are bus-events only)")
 	} else {
+		// Worker counts are env-tunable (GVOS_WORKERS env): the 20k-
+		// concurrent ladder pinned PG as the first saturated component
+		// (139% CPU at 2 CDRW workers; docs/bench/capacity-ladder-
+		// 2026-11-26.md §4). Defaults stay conservative.
+		cdrwWorkers := envInt("GVOS_CDRW_WORKERS", 2)
 		// CDR persistence: at-least-once writes with exactly-once effects
 		// (uq_cdr_call collapses redeliveries).
 		if c, err := s.events.NewDurableConsumer("CDRW", events.SubjectCDRCompleted,
-			func(data []byte) error { return s.cdrPersistHandler(data) }, 2); err != nil {
+			func(data []byte) error { return s.cdrPersistHandler(data) }, cdrwWorkers); err != nil {
 			log.Printf("CDR writer disabled (sync fallback stays): %v", err)
 		} else {
 			s.asyncCdr = true
 			s.workers = append(s.workers, c)
 			s.workerNames = append(s.workerNames, "cdrw")
+			log.Printf("CDRW consumer started workers=%d (GVOS_CDRW_WORKERS)", cdrwWorkers)
 		}
 
 		// Audit trail: the admin.changed feed IS the audit record.
@@ -142,6 +149,42 @@ func (s *Server) teardownDispatchHandler(data []byte) error {
 	return nil
 }
 
+// persistSettlement writes the CDR with its settlement ledger row, and
+// keeps accounts.credit in step with the authority that actually moved
+// the money. Without Redis the in-memory balance is the authority, so
+// the cost comes off accounts.credit in the same transaction: that
+// column used to be touched by top-ups only, and a restart (or the
+// next top-up) handed back everything the account had spent. With
+// Redis the balance is Redis's, mirrored to PG by the hourly snapshot.
+func (s *Server) persistSettlement(ctx context.Context, cdr *callcore.CDR) error {
+	// The ledger row's balance snapshot reads the AUTHORITY (Redis when
+	// wired; the memory map lags under a multi-replica topology).
+	var bal money.Amount
+	if s.bal != nil {
+		bal, _ = s.bal.Get(context.Background(), cdr.AccountID)
+	} else if b, err := account.Balance(s.store, cdr.AccountID); err == nil {
+		bal = b
+	}
+	inserted, err := s.pg.InsertCDRWithSettle(ctx, cdr, bal, s.bal == nil)
+	if err != nil {
+		return err
+	}
+	if inserted {
+		return nil
+	}
+	// CDR already present (redelivery). A row written before the
+	// transactional settle may have landed without its ledger row —
+	// still ensure the settle row exists rather than skip it forever.
+	has, err := s.pg.HasLedgerForCall(ctx, cdr.CallID)
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	return s.pg.AppendLedger(ctx, cdr.AccountID, -cdr.Cost, bal, "call-settle", cdr.CallID)
+}
+
 // cdrPersistHandler is the CDRW worker body: parse the CDR event and
 // persist it plus the settlement ledger row. Idempotent via
 // uq_cdr_call — a redelivery finds inserted=false and skips the
@@ -155,34 +198,7 @@ func (s *Server) cdrPersistHandler(data []byte) error {
 	}
 	ctx, cancel := contextWithTimeoutDuration(context.Background(), 10*time.Second)
 	defer cancel()
-	inserted, err := s.pg.InsertCDR(ctx, &cdr)
-	if err != nil {
-		return err
-	}
-	// Ledger balance snapshot reads the AUTHORITY (Redis when wired;
-	// the memory map lags under a multi-replica topology).
-	var bal money.Amount
-	if s.bal != nil {
-		bal, _ = s.bal.Get(ctx, cdr.AccountID)
-	} else if b, err := account.Balance(s.store, cdr.AccountID); err == nil {
-		bal = b
-	}
-	if !inserted {
-		// CDR already present (redelivery). A prior attempt may have
-		// inserted the CDR then failed on AppendLedger — still ensure
-		// the settle row exists rather than permanently skipping it.
-		has, err := s.pg.HasLedgerForCall(ctx, cdr.CallID)
-		if err != nil {
-			return err
-		}
-		if has {
-			return nil
-		}
-	}
-	if err := s.pg.AppendLedger(ctx, cdr.AccountID, -cdr.Cost, bal, "call-settle", cdr.CallID); err != nil {
-		return err
-	}
-	return nil
+	return s.persistSettlement(ctx, &cdr)
 }
 
 // auditWriterHandler is the AUDIT worker body: the admin.changed feed
@@ -364,9 +380,10 @@ func cdrRawHandler(s *Server) func(data []byte) error {
 // shape, same as the teardown fallback).
 func StartCdrRawConsumer(s *Server) {
 	handler := cdrRawHandler(s)
-	// Four competing workers: a single CDRR goroutine capped end-call
-	// throughput under BYE storms (settlement is Redis+package+emit).
-	if c, err := s.events.NewDurableConsumer("CDRR", events.SubjectCDRRaw, handler, 4); err != nil {
+	// Competing workers (GVOS_CDRR_WORKERS, default 4): a single CDRR
+	// goroutine capped end-call throughput under BYE storms (settle-
+	// ment is Redis+package+emit).
+	if c, err := s.events.NewDurableConsumer("CDRR", events.SubjectCDRRaw, handler, envInt("GVOS_CDRR_WORKERS", 4)); err != nil {
 		if err2 := s.events.Subscribe(events.SubjectCDRRaw, func(data []byte) {
 			_ = handler(data)
 		}); err2 != nil {
@@ -409,6 +426,8 @@ func StartCfgRebroadcaster(s *Server) {
 		// ip_allowlist: pre-joined CIDR lists (ipAllowPayload) —
 		// the edge cannot rebuild them from the rules array.
 		s.emit(events.SubjectCfgReload, ipAllowPayload(s.ipallow.Rules()))
+		// Inbound DID registry: full-array replay, idempotent apply.
+		s.emit(events.SubjectCfgReload, didPayload(s.dids.List()))
 		// Blocklist: full replay from the live compiled set (the
 		// per-op broadcasts carry single entries only). add-ops are
 		// idempotent on every consumer.
@@ -547,6 +566,18 @@ func StartCfgReloadSubscriber(s *Server) {
 		case "rate":
 			s.rebuildRates()
 			log.Printf("CFG-RELOAD rate snapshot rebuilt via bus")
+		case "did":
+			// Full-array snapshot: peers and the edge share the same
+			// idempotent apply (reload is a replace, not a merge).
+			var snap struct {
+				Dids []did.DID `json:"dids"`
+			}
+			if err := json.Unmarshal(data, &snap); err != nil {
+				log.Printf("CFG-RELOAD did bad payload: %v", err)
+				return
+			}
+			s.dids.Reload(snap.Dids)
+			log.Printf("CFG-RELOAD did registry reloaded via bus (%d)", len(snap.Dids))
 		case "gateway":
 			if err := s.gatewayApply(payloadOf(data)); err != nil {
 				log.Printf("CFG-RELOAD gateway apply failed: %v", err)
@@ -582,16 +613,22 @@ func StartCfgReloadSubscriber(s *Server) {
 		case "account":
 			// Peer replicas learn the new account immediately (HA1 stays
 			// in PG: the payload carries billing fields only) so caller
-			// resolution does not fall back to the demo account.
+			// resolution does not fall back to the demo account. Every
+			// billing-relevant field rides along — replicas missing
+			// concurrent/CPS/max_debt used to admit against defaults
+			// until the next full reload.
 			var op struct {
 				Account struct {
-					ID        string  `json:"id"`
-					Username  string  `json:"username"`
-					Name      string  `json:"name"`
-					ParentID  string  `json:"parent_id"`
-					RateGroup string  `json:"rate_group"`
-					Postpaid  bool    `json:"postpaid"`
-					Credit    money.Amount `json:"credit"`
+					ID            string       `json:"id"`
+					Username      string       `json:"username"`
+					Name          string       `json:"name"`
+					ParentID      string       `json:"parent_id"`
+					RateGroup     string       `json:"rate_group"`
+					Postpaid      bool         `json:"postpaid"`
+					Credit        money.Amount `json:"credit"`
+					MaxDebt       money.Amount `json:"max_debt"`
+					MaxConcurrent int          `json:"max_concurrent"`
+					MaxCPS        int          `json:"max_cps"`
 				} `json:"account"`
 			}
 			if err := json.Unmarshal(data, &op); err != nil || op.Account.ID == "" {
@@ -602,6 +639,7 @@ func StartCfgReloadSubscriber(s *Server) {
 				ID: op.Account.ID, Username: op.Account.Username, Name: op.Account.Name,
 				ParentID: op.Account.ParentID, RateGroup: op.Account.RateGroup,
 				Postpaid: op.Account.Postpaid, Credit: op.Account.Credit,
+				MaxDebt: op.Account.MaxDebt, Concurrent: op.Account.MaxConcurrent, CPS: op.Account.MaxCPS,
 			}
 			if err := s.store.Put(a); err != nil {
 				log.Printf("CFG-RELOAD account apply failed (%s): %v", op.Account.ID, err)
@@ -707,14 +745,13 @@ func StartCfgReloadSubscriber(s *Server) {
 // poll it with a plain http_connect. Version is a content hash: the
 // poller skips the full body unless the version changed.
 func (s *Server) handleIPAllowSnapshot(w http.ResponseWriter, r *http.Request) {
-	want := os.Getenv("GVOS_INTERNAL_TOKEN")
-	if want == "" {
+	if os.Getenv("GVOS_INTERNAL_TOKEN") == "" {
 		// No token configured: internal endpoint disabled rather than
 		// open — the SIP edge falls back to its last-known ruleset.
 		httpError(w, 503, "internal snapshot disabled (GVOS_INTERNAL_TOKEN unset)")
 		return
 	}
-	if r.Header.Get("X-GVOS-Internal") != want && r.URL.Query().Get("token") != want {
+	if !internalTokenOK(r) {
 		httpError(w, 401, "bad internal token")
 		return
 	}
@@ -753,12 +790,11 @@ func (s *Server) handleIPAllowSnapshot(w http.ResponseWriter, r *http.Request) {
 // short timer so a restart does not wait for the next NATS
 // rebroadcast (bench N-3 empty-gw 503 window).
 func (s *Server) handleGatewaySnapshot(w http.ResponseWriter, r *http.Request) {
-	want := os.Getenv("GVOS_INTERNAL_TOKEN")
-	if want == "" {
+	if os.Getenv("GVOS_INTERNAL_TOKEN") == "" {
 		httpError(w, 503, "internal snapshot disabled (GVOS_INTERNAL_TOKEN unset)")
 		return
 	}
-	if r.Header.Get("X-GVOS-Internal") != want && r.URL.Query().Get("token") != want {
+	if !internalTokenOK(r) {
 		httpError(w, 401, "bad internal token")
 		return
 	}
@@ -784,12 +820,11 @@ func (s *Server) handleGatewaySnapshot(w http.ResponseWriter, r *http.Request) {
 // mirror first, the Redis persistence bridges a restarted control
 // plane. Guarded like the snapshot endpoint (internal token).
 func (s *Server) handleRegLookup(w http.ResponseWriter, r *http.Request) {
-	want := os.Getenv("GVOS_INTERNAL_TOKEN")
-	if want == "" {
+	if os.Getenv("GVOS_INTERNAL_TOKEN") == "" {
 		httpError(w, 503, "internal endpoints disabled (GVOS_INTERNAL_TOKEN unset)")
 		return
 	}
-	if r.Header.Get("X-GVOS-Internal") != want && r.URL.Query().Get("token") != want {
+	if !internalTokenOK(r) {
 		httpError(w, 401, "bad internal token")
 		return
 	}

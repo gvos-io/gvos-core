@@ -12,11 +12,11 @@ import (
 )
 
 type idemRecord struct {
-	status    int
-	body      []byte
-	at        time.Time
-	inFlight  bool
-	done      chan struct{} // closed when the first request finishes
+	status   int
+	body     []byte
+	at       time.Time
+	inFlight bool
+	done     chan struct{} // closed when the first request finishes
 }
 
 type idemStore struct {

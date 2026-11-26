@@ -10,6 +10,7 @@
 package money
 
 import (
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -133,6 +134,13 @@ func nearlyEqual(a, b float64) bool {
 // MarshalJSON renders the canonical decimal string ("0.0550") — the
 // API wire form (api-conventions: money fields are decimal strings).
 func (a Amount) MarshalJSON() ([]byte, error) { return []byte(`"` + a.String() + `"`), nil }
+
+// Value is the SQL encoding boundary (database/sql and pgx consult it
+// before any other encoding plan): an Amount always crosses into a
+// query as its canonical decimal string, never as the raw scaled
+// integer. Without it pgx encodes the underlying int64 as-is and a
+// NUMERIC column receives the value x10^4.
+func (a Amount) Value() (driver.Value, error) { return a.String(), nil }
 
 // UnmarshalJSON accepts both a decimal string and a bare number.
 func (a *Amount) UnmarshalJSON(b []byte) error {

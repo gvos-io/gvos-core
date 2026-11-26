@@ -5,6 +5,20 @@
 
 ---
 
+## 0. 生产前必须完成的加固
+
+- **更换全部演示凭据**：admin token（`dev-admin-token`）、PG 密码（`gvos_dev`）、
+  NATS 口令（`gvos` / `gvos-demo-nats`，`GVOS_NATS_USER/PASSWORD`；k8s 走 `nats-auth`
+  Secret）。NATS 总线承载呼叫控制（bill-lock RPC、结束事件、配置广播），
+  2026-11 起启用用户名/口令认证，无凭据连接被拒
+- **金额口径（历史数据）**：2026-11 修复前写入的 CDR/账本金额放大了一万倍
+  （定点整数被直接写入 NUMERIC）。修复只影响新写入；旧库对账前先核对量级
+  （cost 500 ≈ 0.05 元），异常库按 ÷10^4 修正或重建
+- **CDR 分区**：启动与每小时报表任务会自动确保当月与未来 3 个月的月分区，
+  无需手工 cron（`migrations/006` 保留为参考）
+- **Redis 持久化**：compose 形态已开 AOF everysec；自管 Redis 请保持 AOF 开启
+  （余额权威无持久化 = 重启后按小时快照回滚）
+
 ## 1. 日常运维
 
 ### 1.1 健康检查（每日）
@@ -12,7 +26,7 @@
 ```bash
 # 组件健康
 docker compose -f deploy/docker-compose.yml -p gvos ps
-curl -s http://127.0.0.1:8080/healthz        # 应返回 ok
+curl -s http://127.0.0.1:28080/healthz        # 应返回 ok
 
 # 计账一致性（核心 invariant，任何时刻 CDR 与账本必须对平）
 docker exec gvos-postgres-1 psql -U gvos -t -c "
@@ -23,7 +37,7 @@ WHERE reason='call-settle';"
 # 两行金额必须相等；不等 → 立即停写并联系研发
 
 # 僵尸通话（live_calls 持续 >0 超过 11 分钟为异常）
-curl -s http://127.0.0.1:8080/v1/stats
+curl -s http://127.0.0.1:28080/v1/stats
 ```
 
 ### 1.2 关键日志

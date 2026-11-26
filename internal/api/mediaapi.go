@@ -17,7 +17,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -25,34 +24,24 @@ import (
 	"github.com/gvos-io/gvos-core/internal/shared/acl"
 )
 
-// mediaAuthorized gates the AI media plane: internal token (preferred)
-// or admin Bearer. When GVOS_INTERNAL_TOKEN is unset (local tests /
-// memory demo) the endpoint stays open — same stance as a missing
-// signaling token would take in a sealed deploy.
+// mediaAuthorized gates the AI media plane: the internal token, or an
+// admin/operator API key. Fail-closed — with neither presented the
+// stream answers 401 — and no constant is honoured: the stream carries
+// live call audio, and the legacy admin constant used to open it to
+// anyone who knows the published string, API keys or not.
 func (s *Server) mediaAuthorized(w http.ResponseWriter, r *http.Request) bool {
-	want := os.Getenv("GVOS_INTERNAL_TOKEN")
-	if want != "" {
-		if r.Header.Get("X-GVOS-Internal") == want || r.URL.Query().Get("token") == want {
-			return true
-		}
+	if internalTokenOK(r) {
+		return true
 	}
 	h := r.Header.Get("Authorization")
 	const bearer = "Bearer "
-	if strings.HasPrefix(h, bearer) {
-		presented := strings.TrimPrefix(h, bearer)
-		if presented == adminToken {
+	if strings.HasPrefix(h, bearer) && s.acl != nil {
+		if k, ok := s.acl.Lookup(strings.TrimPrefix(h, bearer)); ok &&
+			(k.Role == acl.RoleAdmin || k.Role == acl.RoleOperator) {
 			return true
 		}
-		if s.acl != nil {
-			if k, ok := s.acl.Lookup(presented); ok && (k.Role == acl.RoleAdmin || k.Role == acl.RoleOperator) {
-				return true
-			}
-		}
 	}
-	if want == "" {
-		return true // demo / test: no token configured
-	}
-	httpErrorC(w, 401, "UNAUTHORIZED", "media stream requires internal or admin auth")
+	httpErrorC(w, 401, "UNAUTHORIZED", "media stream requires an internal token or an admin API key")
 	return false
 }
 

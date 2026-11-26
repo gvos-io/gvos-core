@@ -103,7 +103,6 @@ func (s *Server) handleRegList(w http.ResponseWriter, r *http.Request) {
 // stream (drives ASR bridges without a real caller). Audio is base64
 // to stay JSON-safe.
 
-
 // handleGatewayDelete serves DELETE /v1/admin/gateways/{id}.
 func (s *Server) handleGatewayDelete(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {

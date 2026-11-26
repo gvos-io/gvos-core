@@ -162,7 +162,7 @@ func buildOpenAPI() map[string]any {
 			"schemas": map[string]any{
 				"ErrorEnvelope": errEnvelopeSchema(),
 				"CallStart": map[string]any{
-					"type": "object",
+					"type":     "object",
 					"required": []string{"call_id", "from_user", "to_user"},
 					"properties": map[string]any{
 						"call_id":   map[string]any{"type": "string"},
@@ -171,7 +171,7 @@ func buildOpenAPI() map[string]any {
 					},
 				},
 				"AXBBind": map[string]any{
-					"type": "object",
+					"type":     "object",
 					"required": []string{"a_number", "b_number"},
 					"properties": map[string]any{
 						"a_number": map[string]any{"type": "string"},

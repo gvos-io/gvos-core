@@ -12,7 +12,12 @@ data:
     set -e
     NODE="${GVOS_NODE_HOST:-kamailio-$(hostname)}"
     NODE_SAFE=$(printf '%s' "$NODE" | tr -c 'a-zA-Z0-9.-' '-')
-    sed -e "s/@NODE@/$NODE_SAFE/g" -e "s/@NATS_URL@/$GVOS_NATS_URL/" /etc/kamailio/kamailio.cfg > /tmp/kamailio-run.cfg
+    # The nats module's nats_url takes ONE server string: strip the
+    # scheme and take the FIRST host of a comma list (the compose
+    # entrypoint does the same; a raw "nats://host" used to end up in
+    # libnats as an unresolvable host here).
+    NATS_HOST=$(printf '%s' "${GVOS_NATS_URL}" | cut -d, -f1 | sed -E 's|^[a-zA-Z0-9+.-]+://||; s|^[^@]*@||')
+    sed -e "s/@NODE@/$NODE_SAFE/g" -e "s|@NATS_URL@|$NATS_HOST|" /etc/kamailio/kamailio.cfg > /tmp/kamailio-run.cfg
     exec kamailio -f /tmp/kamailio-run.cfg -DD -E
 ---
 apiVersion: apps/v1
@@ -30,10 +35,23 @@ spec:
         imagePullPolicy: IfNotPresent
         env:
         - {name: GVOS_NODE_HOST, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
-        - {name: GVOS_NATS_URL, value: "nats://nats-client.gvos.svc.cluster.local:4222"}
+        - name: GVOS_NATS_URL
+          value: "nats://$(NATS_USER):$(NATS_PASSWORD)@nats-client.gvos.svc.cluster.local:4222"
+        - name: NATS_USER
+          valueFrom: {secretKeyRef: {name: nats-auth, key: user, optional: true}}
+        - name: NATS_PASSWORD
+          valueFrom: {secretKeyRef: {name: nats-auth, key: password, optional: true}}
         - {name: WITH_NATS, value: "1"}
         - {name: WITH_NATS_CDR, value: "1"}
         - {name: WITH_NATS_RPC, value: "1"}
+        # HTTP poller targets (ipallow/gateway/did snapshots): without
+        # GVOS_CORE_HOST the entrypoint renders "http://:8080/..." and
+        # the pollers fail-loop rc=3 every 30s (observed on the live
+        # dev stack 2026-11-25). NATS broadcast masks it, but the
+        # reconciliation path must also work.
+        - {name: GVOS_CORE_HOST, value: "gv-core"}
+        - name: GVOS_INTERNAL_TOKEN
+          valueFrom: {secretKeyRef: {name: gvos-secrets, key: internal-token, optional: true}}
         ports:
         - {containerPort: 5060, protocol: UDP}
         - {containerPort: 5060, protocol: TCP}

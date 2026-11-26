@@ -11,14 +11,48 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      # The PG-gated store/api tests run here too: the 2026-11 audit
+      # found a x10^4 money bug that this suite catches and that the
+      # hermetic run never did (the tests were env-gated and CI never
+      # set the gate).
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gvos
+          POSTGRES_PASSWORD: gvos_dev
+          POSTGRES_DB: gvos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gvos"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      GVOs_TEST_DSN: postgres://gvos:gvos_dev@127.0.0.1:5432/gvos?sslmode=disable
+      GVOS_TEST_DSN: postgres://gvos:gvos_dev@127.0.0.1:5432/gvos?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      - name: Apply migrations
+        run: |
+          for f in migrations/*.sql; do
+            docker exec ${{ job.services.postgres.id }} psql -U gvos -d gvos -v ON_ERROR_STOP=1 -q < "$f"
+          done
+      - name: Format check
+        run: |
+          unformatted=$(gofmt -l cmd internal pkg sdk)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-formatted:"; echo "$unformatted"; exit 1
+          fi
       - name: Vet
         run: go vet ./...
-      - name: Test (hermetic suite; PG/NATS integration is env-gated)
-        run: go test ./... -count=1 -v
+      - name: Test (hermetic + PG-gated integration)
+        run: go test ./... -count=1
       - name: Build
         run: go build ./...
+      - name: Race (billing-critical packages)
+        run: go test -race -count=1 ./internal/callcore/ ./internal/billingdomain/... ./internal/shared/...

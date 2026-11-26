@@ -18,7 +18,7 @@ services:
       POSTGRES_PASSWORD: gvos_dev
       POSTGRES_DB: gvos
     volumes:
-      - ../migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - ../migrations:/docker-entrypoint-initdb.d:ro
       - pgdata:/var/lib/postgresql/data
     ports:
       - "${GVOS_PG_PORT:-15432}:5432"
@@ -37,11 +37,18 @@ services:
   # (GVOS_JS_REPLICAS on gv-core). Aliases: each node also answers to
   # the service name "nats" (network alias below) so the edge dials
   # "nats://" and DNS round-robins the pool.
+  #
+  # Authentication: GVOS_NATS_USER/PASSWORD (the demo defaults below
+  # are for the local demo only — set real values in production, see
+  # the operations manual). Every client URL carries the same
+  # user:password; clients without it are refused. The GVOS stream is
+  # JetStream: only the gv-core account may create streams.
   nats-1:
     image: nats:2-alpine
     command: ["-js", "-m", "8222", "--cluster_name", "gvos", "-n", "nats-1",
               "--cluster", "nats://0.0.0.0:6222",
-              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222"]
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222",
+              "--user", "${GVOS_NATS_USER:-gvos}", "--pass", "${GVOS_NATS_PASSWORD:-gvos-demo-nats}"]
     volumes:
       - nats1-data:/data
     ports:
@@ -55,7 +62,8 @@ services:
     image: nats:2-alpine
     command: ["-js", "-m", "8222", "--cluster_name", "gvos", "-n", "nats-2",
               "--cluster", "nats://0.0.0.0:6222",
-              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222"]
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222",
+              "--user", "${GVOS_NATS_USER:-gvos}", "--pass", "${GVOS_NATS_PASSWORD:-gvos-demo-nats}"]
     volumes:
       - nats2-data:/data
     networks:
@@ -66,7 +74,8 @@ services:
     image: nats:2-alpine
     command: ["-js", "-m", "8222", "--cluster_name", "gvos", "-n", "nats-3",
               "--cluster", "nats://0.0.0.0:6222",
-              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222"]
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222",
+              "--user", "${GVOS_NATS_USER:-gvos}", "--pass", "${GVOS_NATS_PASSWORD:-gvos-demo-nats}"]
     volumes:
       - nats3-data:/data
     networks:
@@ -74,11 +83,15 @@ services:
         aliases: [nats]
 
   redis:
-    # Runtime-state authority (balances/admission/risk windows).
-    # Ephemeral on purpose in the demo: persistence is PG's job;
-    # a redis restart just re-seeds from the hour rollback.
+    # Runtime-state authority (balances/admission/risk windows). The
+    # balance authority must survive a restart: AOF on, everysec (one
+    # second of movements at risk — the hourly PG snapshot plus the
+    # CDR replay covers that window). The demo used to run with both
+    # RDB and AOF disabled, so a container restart restored balances
+    # from a stale snapshot and a settlement refund could pin a wrong
+    # value that the re-seed refused to overwrite.
     image: redis:7-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -104,7 +117,7 @@ services:
       GVOS_DB_DSN: "postgres://gvos:gvos_dev@postgres:5432/gvos?sslmode=disable"
       # Multi-server URL: the Go client fails over between cluster
       # members transparently.
-      GVOS_NATS_URL: "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222"
+      GVOS_NATS_URL: "nats://${GVOS_NATS_USER:-gvos}:${GVOS_NATS_PASSWORD:-gvos-demo-nats}@nats-1:4222,nats://${GVOS_NATS_USER:-gvos}:${GVOS_NATS_PASSWORD:-gvos-demo-nats}@nats-2:4222,nats://${GVOS_NATS_USER:-gvos}:${GVOS_NATS_PASSWORD:-gvos-demo-nats}@nats-3:4222"
       # JetStream stream replicas (R3 on the cluster; 1 for a
       # single-node broker). The publisher converges an existing
       # stream to this value at boot (UpdateStream).
@@ -154,7 +167,12 @@ services:
       # on every reconnect attempt, so a dead member cycles out, and
       # the cluster-INFO handshake adds the full mesh as discovered
       # servers once connected.
-      GVOS_NATS_URL: "nats://nats:4222,nats://nats-2:4222,nats://nats-3:4222"
+      GVOS_NATS_URL: "nats://${GVOS_NATS_USER:-gvos}:${GVOS_NATS_PASSWORD:-gvos-demo-nats}@nats:4222"
+      # Credentials for the nats module (the entrypoint renders
+      # nats_user/nats_password modparams from these; without them the
+      # edge connects unauthenticated and the broker closes it).
+      GVOS_NATS_USER: "${GVOS_NATS_USER:-gvos}"
+      GVOS_NATS_PASSWORD: "${GVOS_NATS_PASSWORD:-gvos-demo-nats}"
       # NATS publish routes on: registration events + CDR over bus.
       WITH_NATS: "1"
       WITH_NATS_CDR: "1"
@@ -210,8 +228,22 @@ services:
     image: gvos-recording:26.3.1.4-gvos.1
     profiles: ["recording"]
     depends_on: [rtpengine]
+    # Align paths with rtpengine --recording-dir=/recording. Must run
+    # --foreground or the process forks and the container exits 0.
+    # Spool is RW: daemon renames/clears finished metadata.
+    entrypoint: ["rtpengine-recording"]
+    command:
+      - "--foreground"
+      - "--log-stderr"
+      - "--spool-dir=/recording"
+      - "--output-dir=/output"
+      - "--output-storage=file"
+      - "--output-format=mp3"
+      - "--mp3-bitrate=64000"
+      - "--output-single"
+      - "--output-pattern=%c-%t"
     volumes:
-      - recdata:/recording:ro
+      - recdata:/recording
       - recout:/output
 
   demo-gw:

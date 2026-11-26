@@ -17,12 +17,12 @@ import (
 
 // VOSAccount is one row of the VOS account export.
 type VOSAccount struct {
-	Username string  // 账户/用户名
-	Name     string  // 名称/备注
-	Parent   string  // 上级账户（空=顶层）
-	RateGroup string // 费率组名
-	Credit   float64 // 余额/预存款
-	Postpaid bool    // 后付费标记（信用额度>0 视为后付）
+	Username  string  // 账户/用户名
+	Name      string  // 名称/备注
+	Parent    string  // 上级账户（空=顶层）
+	RateGroup string  // 费率组名
+	Credit    float64 // 余额/预存款
+	Postpaid  bool    // 后付费标记（信用额度>0 视为后付）
 }
 
 // VOSRate is one row of the VOS rate export.

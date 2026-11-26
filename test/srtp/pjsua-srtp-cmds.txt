@@ -1,0 +1,7 @@
+sleep 3000
+m
+sip:8613800130000@kamailio
+sleep 10000
+dq
+ha
+q

@@ -52,20 +52,20 @@ type Envelope struct {
 // the fields a billing/CRM integration needs, none of the internals.
 // Never rename these JSON keys; additions only (v1 rules).
 type CDRCompletedData struct {
-	CallID     string  `json:"call_id"`
-	AccountID  string  `json:"account_id"`
-	Dest       string  `json:"dest"`
-	StartTime  string  `json:"start_time"`  // RFC3339 UTC
-	AnswerTime string  `json:"answer_time"` // RFC3339 UTC, "" when never answered
-	EndTime    string  `json:"end_time"`
-	Duration   int     `json:"duration"`  // connected seconds
-	BilledSecs int     `json:"billed_secs"`
-	Cost       string  `json:"cost"`       // decimal string, account currency
-	Currency   string  `json:"currency"`
-	Release    string  `json:"release"`    // normal | balance-exhausted | zombie-timeout | unratable
-	SIPCode    int     `json:"sip_code"`
-	PDDMs      int     `json:"pdd_ms"`
-	Recorded   bool    `json:"recorded"`
+	CallID     string `json:"call_id"`
+	AccountID  string `json:"account_id"`
+	Dest       string `json:"dest"`
+	StartTime  string `json:"start_time"`  // RFC3339 UTC
+	AnswerTime string `json:"answer_time"` // RFC3339 UTC, "" when never answered
+	EndTime    string `json:"end_time"`
+	Duration   int    `json:"duration"` // connected seconds
+	BilledSecs int    `json:"billed_secs"`
+	Cost       string `json:"cost"` // decimal string, account currency
+	Currency   string `json:"currency"`
+	Release    string `json:"release"` // normal | balance-exhausted | zombie-timeout | unratable
+	SIPCode    int    `json:"sip_code"`
+	PDDMs      int    `json:"pdd_ms"`
+	Recorded   bool   `json:"recorded"`
 }
 
 // CallTeardownData is the projection of a forced teardown (balance

@@ -25,8 +25,35 @@ NODE_SAFE=$(printf '%s' "$NODE" | tr -c 'a-zA-Z0-9.-' '-')
 # DNS round-robins the alias across members. GVOS_NATS_URL is still
 # the source of truth: its FIRST host is used for the edge dial.
 NATS_URL="${GVOS_NATS_URL:-nats://nats:4222}"
-NATS_FIRST=$(printf '%s' "$NATS_URL" | cut -d, -f1 | sed 's|^nats://||')
+# Credentials ride INSIDE the URL userinfo (libnats parses
+# user:pass@host off natsOptions_SetServers — the module has no
+# separate user/password modparams in this build: nats_user was a
+# phantom that aborted startup). Strip them only for the URL-less
+# placeholder replacement below when absent.
+NATS_USER="${GVOS_NATS_USER:-}"
+NATS_PASS="${GVOS_NATS_PASSWORD:-}"
+NATS_FIRST=$(printf '%s' "$NATS_URL" | cut -d, -f1 | sed -E 's|^[a-zA-Z0-9+.-]+://||')
+if [ -n "$NATS_USER" ] && [ -n "$NATS_PASS" ]; then
+    # Re-inject userinfo when the compose URL carried it stripped or
+    # when only the env vars are set.
+    case "$NATS_FIRST" in
+        *@*) ;;                       # userinfo already present
+        *) NATS_FIRST="$NATS_USER:$NATS_PASS@$NATS_FIRST" ;;
+    esac
+fi
 
-sed -e "s/@NODE@/$NODE_SAFE/g" -e "s/@NATS_URL@/$NATS_FIRST/g" "$CFG_SRC" > "$CFG_RUN"
+# Media isolation (bench): compose passes GVOS_MEDIA_OFF as
+# "${GVOS_BENCH_MEDIA_OFF:-}" — an EMPTY string when the host var is
+# unset. #!trydefenv in the cfg defines the macro on VAR EXISTENCE,
+# not truthiness, so the empty value silently defined GVOS_MEDIA_OFF
+# and disabled the rtpengine media path everywhere the variable was
+# passed at all (measured: zero offer/answer commands reaching
+# rtpengine on a stack where every call succeeded — media was never
+# anchored). Unset it here unless it carries a non-empty value.
+if [ -z "${GVOS_MEDIA_OFF:-}" ]; then
+    unset GVOS_MEDIA_OFF
+fi
+
+sed -e "s/@NODE@/$NODE_SAFE/g" -e "s|@NATS_URL@|$NATS_FIRST|g" "$CFG_SRC" > "$CFG_RUN"
 
 exec kamailio -DD -E -f "$CFG_RUN" "$@"

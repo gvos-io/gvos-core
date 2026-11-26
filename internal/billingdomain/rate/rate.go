@@ -4,8 +4,8 @@
 package rate
 
 import (
-	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"fmt"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"sort"
 )
 
@@ -72,7 +72,11 @@ func NewTable(rates []Rate) *Table {
 // Lookup returns the rate entry in effect for the number at the given
 // time-of-week slot (day int, minutes-since-midnight), or nil when no
 // prefix matches. Time-windowed variants win over the base rate; the
-// base variant is the one with an empty Effective list.
+// base variant is the one with an empty Effective list. When a prefix
+// defines ONLY windowed variants, the cheapest of them applies outside
+// the windows too: its callers are still this platform's callers. It
+// used to fall back to the windowed price blindly — which equals the
+// night rate, whichever window happened to be defined first.
 //
 // Match strategy: derive the prefixes of the number from full length
 // down to 1 and probe the map — O(len(number)) hash lookups instead of
@@ -99,8 +103,15 @@ func (t *Table) Lookup(number string, day int, minutes int) *Entry {
 				return toEntry(v)
 			}
 		}
-		// No base variant defined: last resort.
-		return toEntry(variants[len(variants)-1])
+		// Window-only prefixes have no base rate: out of every window,
+		// the cheapest variant applies.
+		cheapest := variants[0]
+		for _, v := range variants[1:] {
+			if v.Price < cheapest.Price {
+				cheapest = v
+			}
+		}
+		return toEntry(cheapest)
 	}
 	return nil
 }
@@ -155,4 +166,3 @@ func toMinutes(hhmm string) int {
 	}
 	return h*60 + m
 }
-

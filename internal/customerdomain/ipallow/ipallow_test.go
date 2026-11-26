@@ -36,10 +36,10 @@ func TestAllowAndDeny(t *testing.T) {
 		rule string
 	}{
 		{"192.168.1.10", true, "office"},
-		{"192.168.1.66", false, "badhost"},   // deny wins over containing allow
-		{"192.168.2.10", false, ""},          // outside every rule
-		{"2001:db8::1", true, "v6lab"},       // IPv6 allow
-		{"2001:db9::1", false, ""},           // adjacent v6 block
+		{"192.168.1.66", false, "badhost"},      // deny wins over containing allow
+		{"192.168.2.10", false, ""},             // outside every rule
+		{"2001:db8::1", true, "v6lab"},          // IPv6 allow
+		{"2001:db9::1", false, ""},              // adjacent v6 block
 		{"::ffff:192.168.1.10", true, "office"}, // v4-mapped sources follow the v4 rule
 	}
 	for _, c := range cases {

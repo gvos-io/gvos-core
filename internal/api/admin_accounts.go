@@ -3,11 +3,11 @@ package api
 
 import (
 	"context"
-	"strings"
-	"log"
-	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"encoding/json"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
@@ -67,10 +67,11 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.store.Put(&account.Account{
+	acc := &account.Account{
 		ID: id, ParentID: req.ParentID, Name: req.Name, Username: req.Username,
 		RateGroup: req.RateGroup, Postpaid: req.Postpaid, Credit: creditAmt,
-	}); err != nil {
+	}
+	if err := s.store.Put(acc); err != nil {
 		httpError(w, 500, err.Error())
 		return
 	}
@@ -91,13 +92,16 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, "create", "account", id, nil,
 		map[string]any{"username": req.Username, "credit": req.Credit})
 	// Peer replicas apply the account directly (HA1 never leaves PG:
-	// the bus payload carries billing-relevant fields only).
+	// the bus payload carries billing-relevant fields only — all of
+	// them: replicas missing concurrent/CPS/max_debt used to admit
+	// against defaults until the next full reload).
 	s.emit(events.SubjectCfgReload, map[string]any{
 		"entity": "account", "op": "create",
 		"account": map[string]any{
 			"id": id, "username": req.Username, "name": req.Name,
 			"parent_id": req.ParentID, "rate_group": req.RateGroup,
 			"postpaid": req.Postpaid, "credit": req.Credit,
+			"max_debt": acc.MaxDebt, "max_concurrent": acc.Concurrent, "max_cps": acc.CPS,
 		},
 	})
 	writeJSON(w, 201, map[string]any{
@@ -160,19 +164,22 @@ func (s *Server) handleTopUp(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		balance = before.Add(deltaAmt)
+		// No Redis: the in-memory balance is the authority. Move it by
+		// the delta — not to PG's number (that read-modify-write raced a
+		// concurrent call settle) — and mirror the same delta in PG.
+		// Every call settle now deducts from accounts.credit too, so
+		// the mirror and the authority stay in step across restarts.
+		balance, err = s.store.AddCredit(reqAccountID, deltaAmt)
+		if err != nil {
+			httpError(w, 404, err.Error())
+			return
+		}
 		if s.pg != nil {
-			balance, err = s.pg.TopUp(r.Context(), reqAccountID, deltaAmt, req.Reason, whoAmI(r).Prefix)
-			if err != nil {
+			if _, err := s.pg.TopUp(r.Context(), reqAccountID, deltaAmt, req.Reason, whoAmI(r).Prefix); err != nil {
 				httpError(w, 500, err.Error())
 				return
 			}
 		}
-	}
-	// Update the live in-memory balance: read-modify-write via Put.
-	if a, err := s.store.Get(reqAccountID); err == nil {
-		a.Credit = balance
-		_ = s.store.Put(a)
 	}
 	s.audit(r, "topup", "account", reqAccountID,
 		map[string]any{"balance": before}, map[string]any{"balance": balance, "delta": req.Delta})

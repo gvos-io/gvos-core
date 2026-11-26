@@ -24,6 +24,10 @@ TIMEOUT="${GVOS_RTPENGINE_TIMEOUT:-60}"
 DELETE_DELAY="${GVOS_RTPENGINE_DELETE_DELAY:-5}"
 
 # Optional extra flags (space-separated), e.g. "--homer 10.0.0.1:9060"
+# Userspace-only image: "proc" needs xt_RTPENGINE ("kernel table not open").
+# "pcap" writes DUX + metadata the recording-daemon consumes (R0 POC).
+# BYE path calls rtpengine_delete so metadata content-length is terminated.
+# Do not put # comments between backslash continuations — they eat the line.
 # shellcheck disable=SC2086
 exec rtpengine --interface "$IP" --listen-ng 2223 \
     --listen-cli 127.0.0.1:2224 \
