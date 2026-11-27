@@ -203,7 +203,34 @@ func (s *Server) handleAccountList(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"accounts": accs, "count": len(accs)})
+	q := r.URL.Query()
+	parentFilter := q.Get("parent_id")
+	rootOnly := q.Get("roots") == "1" || q.Get("roots") == "true"
+	needle := strings.ToLower(strings.TrimSpace(q.Get("q")))
+	if parentFilter != "" || rootOnly || needle != "" {
+		filtered := accs[:0:0]
+		for _, a := range accs {
+			if a == nil {
+				continue
+			}
+			if parentFilter != "" && a.ParentID != parentFilter {
+				continue
+			}
+			if rootOnly && a.ParentID != "" {
+				continue
+			}
+			if needle != "" {
+				hay := strings.ToLower(a.ID + " " + a.Name + " " + a.Username)
+				if !strings.Contains(hay, needle) {
+					continue
+				}
+			}
+			filtered = append(filtered, a)
+		}
+		accs = filtered
+	}
+	// Dual keys: historical "accounts" + console-friendly "items".
+	writeJSON(w, 200, map[string]any{"accounts": accs, "items": accs, "count": len(accs)})
 }
 
 // POST /v1/admin/rates {"prefix","price","init_dur","step_dur","min_dur"}

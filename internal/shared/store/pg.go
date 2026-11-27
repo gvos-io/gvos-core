@@ -898,3 +898,95 @@ func (p *PG) DeleteWebhook(ctx context.Context, id string) (int, error) {
 	}
 	return int(tag.RowsAffected()), nil
 }
+
+// WebhookDeliveryRow is one delivery-log entry for admin troubleshooting.
+type WebhookDeliveryRow struct {
+	ID        int64
+	SubID     string
+	URL       string
+	Subject   string
+	Payload   string
+	Status    string
+	Attempts  int
+	LastError string
+	TenantID  string
+	CreatedAt time.Time
+}
+
+// InsertWebhookDelivery inserts one delivery trail row.
+func (p *PG) InsertWebhookDelivery(ctx context.Context, subID, url, subject, payload, status, lastError, tenantID string, attempts int) error {
+	_, err := p.pool.Exec(ctx, `
+		INSERT INTO webhook_deliveries (sub_id, url, subject, payload, status, attempts, last_error, tenant_id)
+		VALUES (NULLIF($1,'')::uuid, $2, $3, $4, $5, $6, NULLIF($7,''), $8)`,
+		subID, url, subject, payload, status, attempts, lastError, tenantID)
+	if err != nil {
+		return fmt.Errorf("log webhook delivery: %w", err)
+	}
+	return nil
+}
+
+// ListWebhookDeliveries returns recent deliveries for one subscription
+// (or all when subID is empty).
+func (p *PG) ListWebhookDeliveries(ctx context.Context, subID string, limit int) ([]WebhookDeliveryRow, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if subID == "" {
+		rows, err = p.pool.Query(ctx, `
+			SELECT id, COALESCE(sub_id::text,''), url, subject, payload, status, attempts,
+			       COALESCE(last_error,''), COALESCE(tenant_id,''), created_at
+			FROM webhook_deliveries
+			ORDER BY id DESC LIMIT $1`, limit)
+	} else {
+		rows, err = p.pool.Query(ctx, `
+			SELECT id, COALESCE(sub_id::text,''), url, subject, payload, status, attempts,
+			       COALESCE(last_error,''), COALESCE(tenant_id,''), created_at
+			FROM webhook_deliveries
+			WHERE sub_id = $1::uuid
+			ORDER BY id DESC LIMIT $2`, subID, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []WebhookDeliveryRow
+	for rows.Next() {
+		var r WebhookDeliveryRow
+		if err := rows.Scan(&r.ID, &r.SubID, &r.URL, &r.Subject, &r.Payload, &r.Status, &r.Attempts, &r.LastError, &r.TenantID, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetWebhookDelivery loads one delivery by id.
+func (p *PG) GetWebhookDelivery(ctx context.Context, id int64) (*WebhookDeliveryRow, error) {
+	var r WebhookDeliveryRow
+	err := p.pool.QueryRow(ctx, `
+		SELECT id, COALESCE(sub_id::text,''), url, subject, payload, status, attempts,
+		       COALESCE(last_error,''), COALESCE(tenant_id,''), created_at
+		FROM webhook_deliveries WHERE id = $1`, id).
+		Scan(&r.ID, &r.SubID, &r.URL, &r.Subject, &r.Payload, &r.Status, &r.Attempts, &r.LastError, &r.TenantID, &r.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// GetWebhookByID returns one subscription (incl. secret) by id.
+func (p *PG) GetWebhookByID(ctx context.Context, id string) (*WebhookRow, error) {
+	var r WebhookRow
+	err := p.pool.QueryRow(ctx, `
+		SELECT id::text, url, secret, events, active, tenant_id
+		FROM webhook_subscriptions WHERE id = $1::uuid`, id).
+		Scan(&r.ID, &r.URL, &r.Secret, &r.Events, &r.Active, &r.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}

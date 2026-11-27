@@ -292,6 +292,23 @@ func (d *Deliverer) Deliver(ctx context.Context, sub Subscription, subject strin
 	return len(Backoff) // dead-lettered
 }
 
+// DeliveryRecord is one persisted delivery attempt (success or dead).
+type DeliveryRecord struct {
+	SubID     string
+	URL       string
+	Subject   string
+	Payload   string
+	Status    string // delivered | dead
+	Attempts  int
+	LastError string
+	TenantID  string
+}
+
+// DeliveryLogger persists delivery outcomes for ops troubleshooting.
+type DeliveryLogger interface {
+	LogDelivery(ctx context.Context, rec DeliveryRecord) error
+}
+
 // Dispatcher holds the active subscription set and fans out events.
 type Dispatcher struct {
 	mu     sync.RWMutex
@@ -300,6 +317,12 @@ type Dispatcher struct {
 	d      *Deliverer
 	ctx    context.Context
 	events chan eventJob
+	logger DeliveryLogger
+}
+
+// SetDeliveryLogger attaches optional PG (or other) delivery logging.
+func (dsp *Dispatcher) SetDeliveryLogger(l DeliveryLogger) {
+	dsp.logger = l
 }
 
 // NewDispatcher wires the fan-out loop (buffered jobs; delivery runs
@@ -408,9 +431,27 @@ func envelopeTenant(env envelopeJob, sub Subscription) string {
 // PG delivery-log write is the api wiring's PG seam).
 func (dsp *Dispatcher) deliverLogged(sub Subscription, subject string, seq int64, payload any) {
 	attempts := dsp.d.Deliver(dsp.ctx, sub, subject, seq, payload)
-	if attempts >= len(Backoff) {
+	dead := attempts >= len(Backoff)
+	if dead {
 		log.Printf("webhook %s DEAD-LETTERED after %d attempts (%s)", sub.URL, attempts, subject)
 	}
+	if dsp.logger == nil {
+		return
+	}
+	raw, _ := json.Marshal(payload)
+	status := "delivered"
+	errMsg := ""
+	if dead {
+		status = "dead"
+		errMsg = "dead-lettered after retries"
+	} else if attempts == 0 {
+		status = "dead"
+		errMsg = "deliver aborted"
+	}
+	_ = dsp.logger.LogDelivery(dsp.ctx, DeliveryRecord{
+		SubID: sub.ID, URL: sub.URL, Subject: subject, Payload: string(raw),
+		Status: status, Attempts: attempts, LastError: errMsg, TenantID: sub.Tenant,
+	})
 }
 
 // SubscriptionCount reports the active set size (health/stats).

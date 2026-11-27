@@ -692,6 +692,11 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("POST /v1/admin/webhooks", s.handleWebhookCreate)
 	mux.HandleFunc("GET /v1/admin/webhooks", s.handleWebhookList)
 	mux.HandleFunc("DELETE /v1/admin/webhooks/{id}", s.handleWebhookDelete)
+	mux.HandleFunc("GET /v1/admin/webhooks/{id}/deliveries", s.handleWebhookDeliveries)
+	mux.HandleFunc("POST /v1/admin/webhooks/deliveries/{id}/replay", s.handleWebhookDeliveryReplay)
+
+	// Forced teardown (ops plane).
+	mux.HandleFunc("POST /v1/admin/calls/{call_id}/teardown", s.handleCallTeardown)
 
 	// Tenant self-service plane (Phase C): read-only, scoped to the
 	// API key's tenant. Roles tenant|agent only.
@@ -1035,6 +1040,7 @@ func StartWebhookFanout(s *Server) bool {
 	}
 	s.whStore = s.pg
 	dsp := webhook.NewDispatcher(context.Background(), webhook.NewDeliverer())
+	dsp.SetDeliveryLogger(pgDeliveryLogger{pg: s.pg})
 	s.whDispatch = dsp
 	s.refreshWebhookDispatcher()
 	return len(dsp.SubscriptionCount()) > 0

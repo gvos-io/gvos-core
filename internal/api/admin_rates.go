@@ -92,7 +92,7 @@ func (s *Server) handleRateList(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.cfgMu.RUnlock()
-	writeJSON(w, 200, map[string]any{"rates": rows, "count": len(rows)})
+	writeJSON(w, 200, map[string]any{"rates": rows, "items": rows, "count": len(rows)})
 }
 
 // audit records one admin mutation. The admin.changed event IS the

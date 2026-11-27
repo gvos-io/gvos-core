@@ -83,7 +83,8 @@ func (s *Server) handleGatewayList(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	writeJSON(w, 200, map[string]any{"gateways": s.gws.Gateways(), "count": s.gws.Count()})
+	gws := s.gws.Gateways()
+	writeJSON(w, 200, map[string]any{"gateways": gws, "items": gws, "count": s.gws.Count()})
 }
 
 // GET /v1/admin/registrations — the network-wide SIP registration
