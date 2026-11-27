@@ -1,7 +1,17 @@
-// Embedded single-file admin console. Zero build step, zero frontend
-// dependencies - fetch() + vanilla JS only, so the binary stays
-// self-contained (spike tradeoff: production moves to a proper SPA).
+// DEPRECATED embedded single-file admin console (spike).
+//
+// Product human UI belongs in gvos-console (ADR-0006). This page remains
+// only for break-glass local debugging when console is unavailable.
+// Do not extend it with new product features.
 package api
+
+// adminHTMLDeprecatedBanner is prepended by handleUI.
+const adminHTMLDeprecatedBanner = `<div style="background:#7f1d1d;color:#fecaca;padding:10px 24px;font:13px/1.5 sans-serif">
+<strong>DEPRECATED</strong> — 此页为 gvos-core 内嵌 spike，生产请使用
+<a href="https://github.com/gvos-io/gvos-console" style="color:#fff">gvos-console</a>
+（运营台 / 租户门户）。新功能请走 Admin/Tenant API + console，勿在此页扩展。
+</div>
+`
 
 const adminHTML = `<!DOCTYPE html>
 <html lang="zh">

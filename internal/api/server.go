@@ -734,7 +734,7 @@ func MuxFor(s *Server) http.Handler {
 	// Media stream (WebSocket).
 	mux.HandleFunc("/v1/stream/", s.handleMediaStream)
 
-	// Static admin console (token entered in the UI).
+	// DEPRECATED spike UI — production ops/portal lives in gvos-console.
 	mux.HandleFunc("/ui", s.handleUI)
 	mux.HandleFunc("/ui/", s.handleUI)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -800,10 +800,15 @@ func (s *Server) handleCDRList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"cdrs": out, "count": len(out), "next_cursor": next})
 }
 
-// handleUI serves the embedded single-file admin console.
+// handleUI serves the DEPRECATED embedded spike admin console.
+// Product UI is gvos-console (ADR-0006). Kept for break-glass local
+// debugging; response carries Deprecation + a banner in the HTML.
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(adminHTML))
+	w.Header().Set("Deprecation", "true")
+	w.Header().Set("Link", `</ui>; rel="successor-version"; title="use gvos-console"`)
+	w.Header().Set("Warning", `299 - "DEPRECATED: use gvos-console for ops/portal UI"`)
+	_, _ = w.Write([]byte(adminHTMLDeprecatedBanner + adminHTML))
 }
 
 // routeAccounts dispatches by verb (Go 1.21: no method patterns).
