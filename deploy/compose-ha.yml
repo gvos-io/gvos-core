@@ -1,25 +1,30 @@
 # HA deployment: PG primary + hot-standby replication, dual Kamailio
 # signaling nodes (stateless, fronted by any LB), gv-core pair with
-# shared PG state. Use: docker compose -f deploy/compose-ha.yml -p
-# gvosha up -d
+# shared PG state. Use:
+#   cp deploy/.env.example deploy/.env
+#   docker compose -f deploy/compose-ha.yml -p gvosha up -d
 #
 # The failover drill (test/ha/drill.sh) kills the standby/promotes
 # replication and measures recovery - the RTO/RPO evidence the PRD
 # requires per delivery.
+#
+# Credentials come from deploy/.env (see .env.example). For HA the
+# DB DSN should target pg-primary/pg-standby; override GVOS_DB_DSN in
+# .env if needed.
 
 services:
   pg-primary:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: gvos
-      POSTGRES_PASSWORD: gvos_dev
-      POSTGRES_DB: gvos
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     command: ["postgres", "-c", "wal_level=replica", "-c", "max_wal_senders=5", "-c", "hot_standby=on"]
     volumes:
       - ../migrations:/docker-entrypoint-initdb.d:ro
       - pgprim:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gvos"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -34,7 +39,7 @@ services:
     # the entrypoint skips straight to standby mode.
     entrypoint: ["sh", "-c", "
       if [ ! -f /var/lib/postgresql/data/PG_VERSION ]; then
-        PGPASSWORD=gvos_dev pg_basebackup -h pg-primary -U replicator -D /tmp/basebackup -R -Fp -Xs &&
+        PGPASSWORD=\"$$POSTGRES_PASSWORD\" pg_basebackup -h pg-primary -U replicator -D /tmp/basebackup -R -Fp -Xs &&
         cp -a /tmp/basebackup/. /var/lib/postgresql/data/ &&
         rm -rf /tmp/basebackup;
       fi;
@@ -44,10 +49,10 @@ services:
       - ../deploy/pg-standby-watchdog.sh:/pg-watchdog.sh:ro
       - pgstdby:/var/lib/postgresql/data
     environment:
-      POSTGRES_USER: gvos
-      POSTGRES_PASSWORD: gvos_dev
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gvos"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -55,12 +60,11 @@ services:
   # Event bus: single node for now. The production HA path is a NATS
   # cluster (3 nodes, same JetStream stream) — gv-core tolerates the
   # broker being down either way (publishes log-and-continue), so no
-  # health gate. Authentication on (GVOS_NATS_USER/PASSWORD; the demo
-  # default is for the local demo only).
+  # health gate. Auth credentials from deploy/.env.
   nats:
     image: nats:2-alpine
     command: ["-js", "-m", "8222",
-              "--user", "${GVOS_NATS_USER:-gvos}", "--pass", "${GVOS_NATS_PASSWORD:-gvos-demo-nats}"]
+              "--user", "${GVOS_NATS_USER}", "--pass", "${GVOS_NATS_PASSWORD}"]
 
   # Runtime-state authority (balances/admission/risk windows). AOF
   # everysec: the balance authority must survive a restart.
@@ -85,14 +89,15 @@ services:
       nats:
         condition: service_started
     environment:
-            # Multi-host DSN + read-write targeting: pgx walks the host list
-      # and connects only to the node accepting writes — after the
-      # watchdog promotes the standby, gv-core reconnects to it with
-      # no config change (application-tier auto failover).
-      GVOS_DB_DSN: "postgres://gvos:gvos_dev@pg-primary:5432,pg-standby:5432/gvos?sslmode=disable&target_session_attrs=read-write"
-      GVOS_NATS_URL: "nats://${GVOS_NATS_USER:-gvos}:${GVOS_NATS_PASSWORD:-gvos-demo-nats}@nats:4222"
+      # Multi-host DSN + read-write targeting: override GVOS_DB_DSN in
+      # .env for HA (pg-primary + pg-standby + target_session_attrs).
+      # pgx walks the host list and connects only to the node accepting
+      # writes — after the watchdog promotes the standby, gv-core
+      # reconnects with no config change (application-tier failover).
+      GVOS_DB_DSN: "${GVOS_DB_DSN}"
+      GVOS_NATS_URL: "nats://${GVOS_NATS_USER}:${GVOS_NATS_PASSWORD}@nats:4222"
       GVOS_REDIS_URL: "redis://redis:6379"
-      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
+      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN}"
       GVOS_LISTEN: ":8080"
 
   # Signaling pair: two stateless Kamailio nodes. Real deployments
@@ -109,11 +114,14 @@ services:
       - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
     environment:
       GVOS_CORE_HOST: gv-core
-      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
+      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN}"
       # Unique per node: builds the per-node NATS queue group
       # (broadcast: each node gets its own copy of every message).
       GVOS_NODE_HOST: kamailio-1
-      GVOS_NATS_URL: "nats://${GVOS_NATS_USER:-gvos}:${GVOS_NATS_PASSWORD:-gvos-demo-nats}@nats:4222"
+      GVOS_NATS_URL: "nats://${GVOS_NATS_USER}:${GVOS_NATS_PASSWORD}@nats:4222"
+      GVOS_NATS_USER: "${GVOS_NATS_USER}"
+      GVOS_NATS_PASSWORD: "${GVOS_NATS_PASSWORD}"
+      GVOS_DB_DSN: "${GVOS_DB_DSN}"
       WITH_NATS: "1"
       WITH_NATS_CDR: "1"
     ports:
@@ -126,9 +134,12 @@ services:
       - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
     environment:
       GVOS_CORE_HOST: gv-core
-      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
+      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN}"
       GVOS_NODE_HOST: kamailio-2
-      GVOS_NATS_URL: "nats://${GVOS_NATS_USER:-gvos}:${GVOS_NATS_PASSWORD:-gvos-demo-nats}@nats:4222"
+      GVOS_NATS_URL: "nats://${GVOS_NATS_USER}:${GVOS_NATS_PASSWORD}@nats:4222"
+      GVOS_NATS_USER: "${GVOS_NATS_USER}"
+      GVOS_NATS_PASSWORD: "${GVOS_NATS_PASSWORD}"
+      GVOS_DB_DSN: "${GVOS_DB_DSN}"
       WITH_NATS: "1"
       WITH_NATS_CDR: "1"
     ports:

@@ -38,9 +38,8 @@ func main() {
 		dsnVal = os.Getenv("GVOS_DB_DSN")
 	}
 	if dsnVal == "" {
-		// k8s form: secretKeyRef optional leaves the var unset when
-		// gvos-secrets/db-dsn is absent — the manifest's explicit
-		// dev fallback takes over (deploy/k8s/03-gv-core.yaml).
+		// Optional local override when GVOS_DB_DSN is unset (compose
+		// passes GVOS_DB_DSN from deploy/.env; k8s requires the Secret).
 		dsnVal = os.Getenv("GVOS_DB_DSN_FALLBACK")
 	}
 	redisVal := *redisURL

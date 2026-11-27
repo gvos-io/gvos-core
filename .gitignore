@@ -4,8 +4,9 @@ bin/
 *.out
 *.test
 
-# Local env / secrets
+# Local env / secrets (compose loads deploy/.env; never commit it)
 .env
+deploy/.env
 *.local
 
 # Go

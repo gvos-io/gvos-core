@@ -35,7 +35,8 @@ spec:
         image: grafana/grafana:latest
         imagePullPolicy: IfNotPresent
         env:
-        - {name: GF_SECURITY_ADMIN_PASSWORD, value: "gvos-admin"}
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom: {secretKeyRef: {name: gvos-secrets, key: grafana-admin-password}}
         ports: [{containerPort: 3000}]
 ---
 apiVersion: v1

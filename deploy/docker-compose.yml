@@ -4,19 +4,23 @@
 # bus: gvos.> subjects, JetStream enabled).
 #
 # Usage:
+#   cp deploy/.env.example deploy/.env   # once; gitignored
 #   docker compose -f deploy/docker-compose.yml up -d --build
 #
 # Then run the SIPp scenario against kamailio:5060:
 #   docker run --rm --network gvos_default ghcr.io/sipp/sipp:latest \
 #     -sf /scenarios/basic_call.xml -s 1000 kamailio   (see test/sipp/)
+#
+# Credentials live in deploy/.env (see .env.example). Do not hardcode
+# passwords in this file — GitGuardian / secret scanners flag them.
 
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: gvos
-      POSTGRES_PASSWORD: gvos_dev
-      POSTGRES_DB: gvos
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - ../migrations:/docker-entrypoint-initdb.d:ro
       - pgdata:/var/lib/postgresql/data
@@ -38,17 +42,16 @@ services:
   # the service name "nats" (network alias below) so the edge dials
   # "nats://" and DNS round-robins the pool.
   #
-  # Authentication: GVOS_NATS_USER/PASSWORD (the demo defaults below
-  # are for the local demo only — set real values in production, see
-  # the operations manual). Every client URL carries the same
-  # user:password; clients without it are refused. The GVOS stream is
-  # JetStream: only the gv-core account may create streams.
+  # Authentication: GVOS_NATS_USER/PASSWORD from deploy/.env. Every
+  # client URL carries the same user:password; clients without it are
+  # refused. The GVOS stream is JetStream: only the gv-core account
+  # may create streams.
   nats-1:
     image: nats:2-alpine
     command: ["-js", "-m", "8222", "--cluster_name", "gvos", "-n", "nats-1",
               "--cluster", "nats://0.0.0.0:6222",
               "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222",
-              "--user", "${GVOS_NATS_USER:-gvos}", "--pass", "${GVOS_NATS_PASSWORD:-gvos-demo-nats}"]
+              "--user", "${GVOS_NATS_USER}", "--pass", "${GVOS_NATS_PASSWORD}"]
     volumes:
       - nats1-data:/data
     ports:
@@ -63,7 +66,7 @@ services:
     command: ["-js", "-m", "8222", "--cluster_name", "gvos", "-n", "nats-2",
               "--cluster", "nats://0.0.0.0:6222",
               "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222",
-              "--user", "${GVOS_NATS_USER:-gvos}", "--pass", "${GVOS_NATS_PASSWORD:-gvos-demo-nats}"]
+              "--user", "${GVOS_NATS_USER}", "--pass", "${GVOS_NATS_PASSWORD}"]
     volumes:
       - nats2-data:/data
     networks:
@@ -75,7 +78,7 @@ services:
     command: ["-js", "-m", "8222", "--cluster_name", "gvos", "-n", "nats-3",
               "--cluster", "nats://0.0.0.0:6222",
               "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222",
-              "--user", "${GVOS_NATS_USER:-gvos}", "--pass", "${GVOS_NATS_PASSWORD:-gvos-demo-nats}"]
+              "--user", "${GVOS_NATS_USER}", "--pass", "${GVOS_NATS_PASSWORD}"]
     volumes:
       - nats3-data:/data
     networks:
@@ -114,16 +117,16 @@ services:
       nats-3:
         condition: service_started
     environment:
-      GVOS_DB_DSN: "postgres://gvos:gvos_dev@postgres:5432/gvos?sslmode=disable"
+      GVOS_DB_DSN: "${GVOS_DB_DSN}"
       # Multi-server URL: the Go client fails over between cluster
-      # members transparently.
-      GVOS_NATS_URL: "nats://${GVOS_NATS_USER:-gvos}:${GVOS_NATS_PASSWORD:-gvos-demo-nats}@nats-1:4222,nats://${GVOS_NATS_USER:-gvos}:${GVOS_NATS_PASSWORD:-gvos-demo-nats}@nats-2:4222,nats://${GVOS_NATS_USER:-gvos}:${GVOS_NATS_PASSWORD:-gvos-demo-nats}@nats-3:4222"
+      # members transparently. Credentials come from deploy/.env.
+      GVOS_NATS_URL: "nats://${GVOS_NATS_USER}:${GVOS_NATS_PASSWORD}@nats-1:4222,nats://${GVOS_NATS_USER}:${GVOS_NATS_PASSWORD}@nats-2:4222,nats://${GVOS_NATS_USER}:${GVOS_NATS_PASSWORD}@nats-3:4222"
       # JetStream stream replicas (R3 on the cluster; 1 for a
       # single-node broker). The publisher converges an existing
       # stream to this value at boot (UpdateStream).
       GVOS_JS_REPLICAS: "3"
       GVOS_REDIS_URL: "redis://redis:6379"
-      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
+      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN}"
       GVOS_LISTEN: ":8080"
     volumes:
       - ./tls:/etc/gvos/tls:ro
@@ -156,7 +159,7 @@ services:
       - ./tls:/etc/kamailio/tls:ro
     environment:
       GVOS_CORE_HOST: gv-core
-      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN:-dev-internal-token}"
+      GVOS_INTERNAL_TOKEN: "${GVOS_INTERNAL_TOKEN}"
       # Per-node identity: builds the unique NATS queue group name
       # (broadcast semantics across the signaling pool).
       GVOS_NODE_HOST: kamailio-1
@@ -167,12 +170,13 @@ services:
       # on every reconnect attempt, so a dead member cycles out, and
       # the cluster-INFO handshake adds the full mesh as discovered
       # servers once connected.
-      GVOS_NATS_URL: "nats://${GVOS_NATS_USER:-gvos}:${GVOS_NATS_PASSWORD:-gvos-demo-nats}@nats:4222"
-      # Credentials for the nats module (the entrypoint renders
-      # nats_user/nats_password modparams from these; without them the
-      # edge connects unauthenticated and the broker closes it).
-      GVOS_NATS_USER: "${GVOS_NATS_USER:-gvos}"
-      GVOS_NATS_PASSWORD: "${GVOS_NATS_PASSWORD:-gvos-demo-nats}"
+      GVOS_NATS_URL: "nats://${GVOS_NATS_USER}:${GVOS_NATS_PASSWORD}@nats:4222"
+      # Credentials for the nats module (userinfo injected by the
+      # entrypoint from these env vars).
+      GVOS_NATS_USER: "${GVOS_NATS_USER}"
+      GVOS_NATS_PASSWORD: "${GVOS_NATS_PASSWORD}"
+      # PG DSN for sqlops/auth_db (entrypoint substitutes @DB_URL@).
+      GVOS_DB_DSN: "${GVOS_DB_DSN}"
       # NATS publish routes on: registration events + CDR over bus.
       WITH_NATS: "1"
       WITH_NATS_CDR: "1"
@@ -214,8 +218,8 @@ services:
     image: minio/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
-      MINIO_ROOT_USER: gvos
-      MINIO_ROOT_PASSWORD: gvos-minio-secret
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
       - "${GVOS_MINIO_PORT:-29000}:9000"
       - "${GVOS_MINIO_CONSOLE_PORT:-29001}:9001"

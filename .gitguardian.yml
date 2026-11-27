@@ -1,0 +1,9 @@
+# Intentional local-demo credentials live in deploy/.env.example and are
+# copied to a gitignored deploy/.env by scripts/demo-up.sh. They must never
+# be used in production (see docs/operations-manual.md §0).
+version: 2
+paths-ignore:
+  - 'deploy/.env.example'
+  - 'docs/**'
+  - 'CHANGELOG.md'
+  - 'README.md'

@@ -13,6 +13,14 @@ command -v docker >/dev/null 2>&1 || fail "docker not found - install Docker Des
 docker compose version >/dev/null 2>&1 || fail "docker compose plugin missing"
 docker info >/dev/null 2>&1 || fail "docker daemon not running - start Docker Desktop / dockerd"
 
+# Credentials: compose no longer embeds passwords. Seed a local .env
+# from the example once (gitignored) so one-command demo still works.
+if [ ! -f .env ]; then
+  [ -f .env.example ] || fail "deploy/.env.example missing"
+  cp .env.example .env
+  echo "-- wrote deploy/.env from .env.example (local demo credentials)"
+fi
+
 # 2. Stack up (build if needed).
 echo "-- building & starting the stack (first run takes a few minutes)..."
 docker compose -p gvos up -d --build 2>&1 | grep -vE "^ +(Network|Container|Volume|Image)" | tail -3

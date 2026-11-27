@@ -1,11 +1,16 @@
 # Patroni 三节点 PostgreSQL HA（生产推荐档，替代 compose-ha 轻量 watchdog）。
 # 用法（独立网络，DSN 指向 haproxy:5000）:
+#   cp deploy/.env.example deploy/.env   # provide POSTGRES_PASSWORD etc.
 #   docker compose -f deploy/patroni/docker-compose.yml -p gvos-pg up -d
 # gv-core:
-#   GVOS_DB_DSN=postgres://gvos:gvos_dev@pg-proxy:5000/gvos?sslmode=disable
+#   GVOS_DB_DSN=postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@pg-proxy:5000/$POSTGRES_DB?sslmode=disable
 #
 # 依赖镜像：bitnami/etcd + zalando/spilo（Patroni+Postgres）+ haproxy。
 # 这是「可启动的参考拓扑」；生产请换强密码、持久卷与 TLS。
+# Credentials come from deploy/.env (compose auto-loads sibling .env via
+# --env-file or the project .env next to this file — pass
+#   --env-file ../.env
+# when running from this directory).
 
 services:
   etcd:
@@ -21,8 +26,8 @@ services:
     hostname: pg-node1
     environment:
       SCOPE: gvos
-      PGPASSWORD_SUPERUSER: gvos_dev
-      PGPASSWORD_STANDBY: gvos_repl
+      PGPASSWORD_SUPERUSER: ${POSTGRES_PASSWORD}
+      PGPASSWORD_STANDBY: ${POSTGRES_PASSWORD}
       ETCD_HOSTS: etcd:2379
       SPILO_CONFIGURATION: |
         bootstrap:
@@ -36,7 +41,7 @@ services:
             - locale: en_US.UTF-8
           users:
             gvos:
-              password: gvos_dev
+              password: "${POSTGRES_PASSWORD}"
               options:
                 - createrole
           databases:
@@ -54,8 +59,8 @@ services:
     hostname: pg-node2
     environment:
       SCOPE: gvos
-      PGPASSWORD_SUPERUSER: gvos_dev
-      PGPASSWORD_STANDBY: gvos_repl
+      PGPASSWORD_SUPERUSER: ${POSTGRES_PASSWORD}
+      PGPASSWORD_STANDBY: ${POSTGRES_PASSWORD}
       ETCD_HOSTS: etcd:2379
     volumes:
       - pg2-data:/home/postgres/pgdata
@@ -66,8 +71,8 @@ services:
     hostname: pg-node3
     environment:
       SCOPE: gvos
-      PGPASSWORD_SUPERUSER: gvos_dev
-      PGPASSWORD_STANDBY: gvos_repl
+      PGPASSWORD_SUPERUSER: ${POSTGRES_PASSWORD}
+      PGPASSWORD_STANDBY: ${POSTGRES_PASSWORD}
       ETCD_HOSTS: etcd:2379
     volumes:
       - pg3-data:/home/postgres/pgdata

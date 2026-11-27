@@ -18,14 +18,11 @@ spec:
         image: gvos-gv-core:latest
         imagePullPolicy: IfNotPresent
         env:
-        # DSN from the secret when present (gvos-secrets/db-dsn);
-        # the literal fallback below is the dev credential — with the
-        # secret in place it never runs (operations-manual §0 swap).
-        # Pair with 01-pg.yaml's own secret before any prod-like use.
+        # DSN must come from gvos-secrets/db-dsn (no inline password —
+        # secret scanners flag literals in manifests). Create the
+        # Secret before applying (operations-manual §0).
         - name: GVOS_DB_DSN
-          valueFrom: {secretKeyRef: {name: gvos-secrets, key: db-dsn, optional: true}}
-        - name: GVOS_DB_DSN_FALLBACK
-          value: "postgres://gvos:gvos_dev@postgres:5432/gvos?sslmode=disable"
+          valueFrom: {secretKeyRef: {name: gvos-secrets, key: db-dsn}}
         - name: GVOS_NATS_URL
           value: "nats://$(NATS_USER):$(NATS_PASSWORD)@nats-0.nats.gvos.svc.cluster.local:4222,nats://$(NATS_USER):$(NATS_PASSWORD)@nats-1.nats.gvos.svc.cluster.local:4222,nats://$(NATS_USER):$(NATS_PASSWORD)@nats-2.nats.gvos.svc.cluster.local:4222"
         - {name: GVOS_JS_REPLICAS, value: "3"}

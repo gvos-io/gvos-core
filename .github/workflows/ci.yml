@@ -20,7 +20,8 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: gvos
-          POSTGRES_PASSWORD: gvos_dev
+          # CI-only ephemeral password (service container, not a real secret).
+          POSTGRES_PASSWORD: ci
           POSTGRES_DB: gvos
         ports:
           - 5432:5432
@@ -30,8 +31,8 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     env:
-      GVOs_TEST_DSN: postgres://gvos:gvos_dev@127.0.0.1:5432/gvos?sslmode=disable
-      GVOS_TEST_DSN: postgres://gvos:gvos_dev@127.0.0.1:5432/gvos?sslmode=disable
+      GVOs_TEST_DSN: postgres://gvos:ci@127.0.0.1:5432/gvos?sslmode=disable
+      GVOS_TEST_DSN: postgres://gvos:ci@127.0.0.1:5432/gvos?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

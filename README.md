@@ -109,7 +109,7 @@ go test ./...
 - 多副本运行时状态（余额/并发/CPS/风控滑窗/套餐用量/注册镜像）已收口 Redis（`GVOS_REDIS_URL`；未配置 = 单副本内存语义）；计费门 fail-closed，风控/套餐可用 `GVOS_RISK_MODE` / `GVOS_PKG_MODE` 切换。无 Redis 的 PG 模式：通话结算会同步扣减 `accounts.credit`（2026-11 修复），但充值/结算并发量大时仍建议配 Redis
 - **gv-core 多副本已解禁（粘性 + 远程结算）**：热路径呼叫态仍在本机 map（Interim/拆线），生产须 **Call-ID LB 粘性**；粘性失效时 Redis `callmeta`/`callsettled` 兜底单次结算（架构压测 4000 通双结算 0）。结算锁按「Call-ID + 起呼时刻」区分通话实例（Call-ID 复用设备不再丢结算）
 - 历史数据注意：**2026-11 修复前的 CDR/账本金额在 PG 里放大了一万倍**（`money.Amount` 以定点整数直写 NUMERIC）。修复后新写入正常；旧库需按 ÷10^4 修正或重建（对账口径见运维手册 §1.1）
-- 管理令牌默认 `dev-admin-token`、DB 密码 `gvos_dev`、NATS 演示口令 `gvos-demo-nats`——均为演示默认值，**生产部署必须更换**（见 [operations manual](docs/operations-manual.md)）；NATS 已启用用户名/口令认证（`GVOS_NATS_USER/PASSWORD`，k8s 走 `nats-auth` Secret）
+- 演示凭据在 `deploy/.env.example`（`cp` 到 gitignored 的 `deploy/.env`）；compose/k8s 清单不再内嵌口令。**生产必须更换**（见 [operations manual](docs/operations-manual.md)）；k8s 用 `gvos-secrets` / `nats-auth`（见 `deploy/k8s/secrets.example.yaml`）
 - 生产节点需设 `net.core.rmem_default=4MB`（UDP 缓冲，实测 416KB 在 200CPS 丢 401）
 - K8s 形态清单：RTPengine/Kamailio hostNetwork、节点 sysctl initContainer、安全组收敛 28080/Grafana
 - TLS 证书未随仓库分发，部署时自签：`openssl req -x509 -newkey rsa:2048 -nodes -keyout kamailio-key.pem -out kamailio-cert.pem -days 365 -subj "/CN=gvos.local"`

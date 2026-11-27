@@ -14,9 +14,12 @@ spec:
       - name: postgres
         image: postgres:16-alpine
         env:
-        - {name: POSTGRES_USER, value: gvos}
-        - {name: POSTGRES_PASSWORD, value: gvos_dev}
-        - {name: POSTGRES_DB, value: gvos}
+        - name: POSTGRES_USER
+          valueFrom: {secretKeyRef: {name: gvos-secrets, key: db-user}}
+        - name: POSTGRES_PASSWORD
+          valueFrom: {secretKeyRef: {name: gvos-secrets, key: db-password}}
+        - name: POSTGRES_DB
+          valueFrom: {secretKeyRef: {name: gvos-secrets, key: db-name}}
         ports: [{containerPort: 5432}]
         volumeMounts:
         - {name: pgdata, mountPath: /var/lib/postgresql/data}

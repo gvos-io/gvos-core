@@ -54,6 +54,18 @@ if [ -z "${GVOS_MEDIA_OFF:-}" ]; then
     unset GVOS_MEDIA_OFF
 fi
 
-sed -e "s/@NODE@/$NODE_SAFE/g" -e "s|@NATS_URL@|$NATS_FIRST|g" "$CFG_SRC" > "$CFG_RUN"
+# PG DSN for sqlops/auth_db (@DB_URL@). Strip query string — the
+# postgres module does not accept ?sslmode=... the way lib/pq does.
+DB_URL="${GVOS_DB_DSN:-}"
+DB_URL=$(printf '%s' "$DB_URL" | cut -d'?' -f1)
+if [ -z "$DB_URL" ]; then
+    echo "kamailio-entrypoint: GVOS_DB_DSN is required" >&2
+    exit 1
+fi
+
+sed -e "s/@NODE@/$NODE_SAFE/g" \
+    -e "s|@NATS_URL@|$NATS_FIRST|g" \
+    -e "s|@DB_URL@|$DB_URL|g" \
+    "$CFG_SRC" > "$CFG_RUN"
 
 exec kamailio -DD -E -f "$CFG_RUN" "$@"

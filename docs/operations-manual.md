@@ -7,10 +7,11 @@
 
 ## 0. 生产前必须完成的加固
 
-- **更换全部演示凭据**：admin token（`dev-admin-token`）、PG 密码（`gvos_dev`）、
-  NATS 口令（`gvos` / `gvos-demo-nats`，`GVOS_NATS_USER/PASSWORD`；k8s 走 `nats-auth`
-  Secret）。NATS 总线承载呼叫控制（bill-lock RPC、结束事件、配置广播），
-  2026-11 起启用用户名/口令认证，无凭据连接被拒
+- **更换全部演示凭据**：本地 compose 从 `deploy/.env.example` 复制为
+  `deploy/.env`（已 gitignore）后改掉 admin token / PG / NATS / MinIO /
+  Grafana 口令；k8s 按 `deploy/k8s/secrets.example.yaml` 创建
+  `gvos-secrets` 与 `nats-auth`，**清单内不再写明文口令**。NATS 总线承载
+  呼叫控制（bill-lock RPC、结束事件、配置广播），无凭据连接被拒
 - **金额口径（历史数据）**：2026-11 修复前写入的 CDR/账本金额放大了一万倍
   （定点整数被直接写入 NUMERIC）。修复只影响新写入；旧库对账前先核对量级
   （cost 500 ≈ 0.05 元），异常库按 ÷10^4 修正或重建
