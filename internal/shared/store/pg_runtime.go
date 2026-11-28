@@ -580,7 +580,7 @@ func decodeIDCursor(cur string) (int64, error) {
 // PATCH /v1/admin/accounts/{id}. Credit is deliberately absent —
 // balance moves only through topup/settlement so the ledger stays
 // the single money story.
-func (p *PG) UpdateAccountPatch(ctx context.Context, id string, name, rateGroup *string, postpaid *bool, maxDebt *money.Amount, maxConcurrent, maxCPS *int, lowBalance *money.Amount) error {
+func (p *PG) UpdateAccountPatch(ctx context.Context, id string, name, rateGroup *string, postpaid *bool, maxDebt *money.Amount, maxConcurrent, maxCPS *int, lowBalance *money.Amount, enabled *bool) error {
 	sets, args := []string{}, []any{}
 	bind := func(v any) string {
 		args = append(args, v)
@@ -606,6 +606,9 @@ func (p *PG) UpdateAccountPatch(ctx context.Context, id string, name, rateGroup 
 	}
 	if lowBalance != nil {
 		sets = append(sets, "low_balance_threshold = "+bind(lowBalance.String()))
+	}
+	if enabled != nil {
+		sets = append(sets, "enabled = "+bind(*enabled))
 	}
 	if len(sets) == 0 {
 		return nil

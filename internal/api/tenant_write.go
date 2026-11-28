@@ -205,7 +205,7 @@ func (s *Server) handleTenantAccountCreate(w http.ResponseWriter, r *http.Reques
 	}
 	child := &account.Account{
 		ID: childID, ParentID: id.TenantID, Name: req.Name, Username: req.Username,
-		RateGroup: rateGroup, Credit: 0,
+		RateGroup: rateGroup, Credit: 0, Enabled: true,
 	}
 	if err := s.store.Put(child); err != nil {
 		httpError(w, 500, err.Error())

@@ -119,8 +119,8 @@ func TestTenantScopeIsTheWholeSubtree(t *testing.T) {
 // with few calls among many used to get the same page back forever.
 func TestTenantCDRPaginationTerminates(t *testing.T) {
 	s := NewServer()
-	s.store.Put(&account.Account{ID: "T", Postpaid: true})
-	s.store.Put(&account.Account{ID: "U", ParentID: "T", Credit: money.MustFromYuan(1)})
+	s.store.Put(&account.Account{ID: "T", Postpaid: true, Enabled: true})
+	s.store.Put(&account.Account{ID: "U", ParentID: "T", Credit: money.MustFromYuan(1), Enabled: true})
 	key := issueKey(s, acl.RoleTenant, "T")
 	s.storeCdr(&callcore.CDR{CallID: "mine-a", AccountID: "U"})
 	s.storeCdr(&callcore.CDR{CallID: "o1", AccountID: "1000"})
@@ -204,7 +204,7 @@ func TestTenantWebhookListHidesOperatorSubscriptions(t *testing.T) {
 // names the tenant; the named tenant becomes the key's scope.
 func TestAdminKeyActsForTenantOnlyWhenNamed(t *testing.T) {
 	s := NewServer()
-	s.store.Put(&account.Account{ID: "T", Postpaid: true})
+	s.store.Put(&account.Account{ID: "T", Postpaid: true, Enabled: true})
 	admin := issueKey(s, acl.RoleAdmin, "")
 
 	if code, _ := tenantGet(t, s, admin, "/v1/tenant/me", nil); code != 403 {
@@ -218,7 +218,7 @@ func TestAdminKeyActsForTenantOnlyWhenNamed(t *testing.T) {
 		t.Errorf("acting scope = %v, want account T", me["account"])
 	}
 	// A tenant key cannot widen its own scope with the header.
-	s.store.Put(&account.Account{ID: "other", Postpaid: true})
+	s.store.Put(&account.Account{ID: "other", Postpaid: true, Enabled: true})
 	tenant := issueKey(s, acl.RoleTenant, "other")
 	code, me = tenantGet(t, s, tenant, "/v1/tenant/me", map[string]string{TenantActHeader: "T"})
 	if code != 200 {

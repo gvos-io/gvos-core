@@ -83,7 +83,7 @@ func (p *PG) LoadAccounts(ctx context.Context, dst *account.Store) (int, error) 
 	rows, err := p.pool.Query(ctx, `
         SELECT id::text, coalesce(parent_id::text, ''), name, username,
                rate_group, postpaid, credit, max_debt, max_concurrent, max_cps,
-               low_balance_threshold
+               low_balance_threshold, enabled
         FROM accounts
         WHERE deleted_at IS NULL
         ORDER BY created_at`)
@@ -99,8 +99,9 @@ func (p *PG) LoadAccounts(ctx context.Context, dst *account.Store) (int, error) 
 			postpaid                          bool
 			credit, maxDebt, lowBal           string // NUMERIC scans as string; money.FromDecimal converts
 			maxConc, maxCPS                   int
+			enabled                           bool
 		)
-		if err := rows.Scan(&id, &parent, &name, &username, &group, &postpaid, &credit, &maxDebt, &maxConc, &maxCPS, &lowBal); err != nil {
+		if err := rows.Scan(&id, &parent, &name, &username, &group, &postpaid, &credit, &maxDebt, &maxConc, &maxCPS, &lowBal, &enabled); err != nil {
 			return n, fmt.Errorf("scan account: %w", err)
 		}
 		creditAmt, err := money.FromDecimal(credit)
@@ -118,7 +119,7 @@ func (p *PG) LoadAccounts(ctx context.Context, dst *account.Store) (int, error) 
 		if err := dst.Put(&account.Account{
 			ID: id, ParentID: parent, Name: name, Username: username,
 			RateGroup: group, Postpaid: postpaid, Credit: creditAmt, MaxDebt: debtAmt,
-			Concurrent: maxConc, CPS: maxCPS, LowBalance: lowBalAmt,
+			Concurrent: maxConc, CPS: maxCPS, LowBalance: lowBalAmt, Enabled: enabled,
 		}); err != nil {
 			return n, err
 		}

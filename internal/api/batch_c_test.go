@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 )
 
 func TestAccountGetSingle(t *testing.T) {
@@ -168,5 +171,38 @@ func TestListEnvelopeItemsAliases(t *testing.T) {
 		if _, ok := body["count"]; !ok {
 			t.Fatalf("GET %s: count missing", path)
 		}
+	}
+}
+
+func TestAccountDisableAdmission(t *testing.T) {
+	s := NewServer()
+	h := MuxFor(s)
+
+	// Disable via PATCH (memory: default Enabled=true on creation).
+	rec := doAdmin(t, h, "PATCH", "/v1/admin/accounts/1000", map[string]any{"enabled": false})
+	if rec.Code != 200 {
+		t.Fatalf("patch disable = %d body=%s", rec.Code, rec.Body.String())
+	}
+	// Admission: 403 DISABLED, balance untouched.
+	code, body := s.callStart(callStartReq{CallID: "dis-1", From: "1000", To: "8613800138000"})
+	if code != 403 {
+		t.Fatalf("callStart on disabled = %d, want 403", code)
+	}
+	if m, ok := body.(map[string]errorEnvelope); !ok || m["error"].Code != "DISABLED" {
+		t.Fatalf("disabled body = %v", body)
+	}
+	// Re-enable: instant.
+	if rec := doAdmin(t, h, "PATCH", "/v1/admin/accounts/1000", map[string]any{"enabled": true}); rec.Code != 200 {
+		t.Fatalf("re-enable = %d", rec.Code)
+	}
+	if code, _ := s.callStart(callStartReq{CallID: "dis-2", From: "1000", To: "8613800138000"}); code != 200 {
+		t.Fatalf("callStart after re-enable = %d, want 200", code)
+	}
+	if code, _ := s.callEnd(nil, callEndReq{CallID: "dis-2", DurSecs: 1}); code != 200 {
+		t.Fatalf("end = %d", code)
+	}
+	// Balance survived the disabled window.
+	if bal, err := account.Balance(s.store, "1000"); err != nil || bal == money.MustFromYuan(10) {
+		t.Fatalf("balance drifted during disable: %s", bal.String())
 	}
 }

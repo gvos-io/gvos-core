@@ -87,6 +87,12 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 			}
 		}
 	}
+	// Disabled accounts: admission refuses while the row, balance and
+	// ledger stay intact (re-enable is instant). Placed after the
+	// account resolution, before any billing state is touched.
+	if acc, aerr := s.store.Get(accID); aerr == nil && !acc.Enabled {
+		return 403, map[string]errorEnvelope{"error": {Code: "DISABLED", Message: "account " + accID + " is disabled"}}
+	}
 	if req.Direction == "inbound" {
 		// Callee-billed: the DID owner's account is the lock target.
 		// An owner that no longer exists is a 404, never a silent

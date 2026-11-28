@@ -84,7 +84,7 @@ func TestInsufficientBalance403(t *testing.T) {
 	defer srv.Close()
 
 	// Drain the caller: overwrite with a near-empty balance.
-	s.store.Put(&account.Account{ID: "1000", ParentID: "agent1", Credit: money.MustFromYuan(0.001), RateGroup: "demo"})
+	s.store.Put(&account.Account{ID: "1000", ParentID: "agent1", Credit: money.MustFromYuan(0.001), RateGroup: "demo", Enabled: true})
 
 	b, _ := json.Marshal(map[string]string{
 		"call_id": "call-x", "from_user": "1000", "to_user": "8613800138000",

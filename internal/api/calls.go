@@ -133,6 +133,10 @@ func (s *Server) handleCallCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !acc.Enabled {
+		httpErrorC(w, 403, "DISABLED", "account "+acc.ID+" is disabled")
+		return
+	}
 	maxDur := req.MaxDurationS
 	if maxDur == 0 {
 		maxDur = 1800

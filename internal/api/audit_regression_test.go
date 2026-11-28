@@ -200,7 +200,7 @@ func TestCallStartAdmissionFaultIs503(t *testing.T) {
 // A genuinely broke caller still gets the 403.
 func TestCallStartBrokeCallerIs403(t *testing.T) {
 	s := NewServer()
-	s.store.Put(&account.Account{ID: "broke", ParentID: "agent1", RateGroup: "demo"})
+	s.store.Put(&account.Account{ID: "broke", ParentID: "agent1", RateGroup: "demo", Enabled: true})
 	code, body := s.callStart(callStartReq{CallID: "b-1", From: "broke", To: "8613800138000"})
 	if code != 403 {
 		t.Fatalf("code = %d, want 403", code)

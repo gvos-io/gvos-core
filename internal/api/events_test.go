@@ -133,7 +133,7 @@ func TestEventBusTeardown(t *testing.T) {
 
 	// Caller with barely-affordable balance: lock (0.05) succeeds,
 	// interim at 60s (0.05) fails after we drain the account.
-	s.store.Put(&account.Account{ID: "1001", ParentID: "agent1", Credit: money.MustFromYuan(10.06), RateGroup: "demo"})
+	s.store.Put(&account.Account{ID: "1001", ParentID: "agent1", Credit: money.MustFromYuan(10.06), RateGroup: "demo", Enabled: true})
 
 	b, _ := json.Marshal(map[string]string{
 		"call_id": "ev-td", "from_user": "1001", "to_user": "8613800138000",

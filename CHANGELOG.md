@@ -4,6 +4,9 @@ All notable changes to gvos-core follow this file. Format: Keep a Changelog; ver
 
 ## [Unreleased]
 
+### Added — account disable (M6 remainder, 2026-11-28)
+- `PATCH /v1/admin/accounts/{id} {enabled: false}`: admission (call start + origination) rejects disabled accounts with **403 DISABLED** — the row, balance and ledger stay untouched, re-enable is instant. Migration 017 adds the `enabled` column (default true, partial index on disabled). The bus snapshot carries the flag so replicas enforce it too. Memory-mode constructors (admin create, tenant provisioning, demo seed, test fixtures) default true.
+
 ### Added — depth closeout: capability endpoints, recording retention, tunables (2026-11-28)
 - **Capability endpoints** (gap B-series, machinery that existed with no reader): `GET /v1/admin/accounts/{id}/tree` (charging chain via Store.Chain), `GET .../live` (live calls vs the account's caps), `GET /v1/admin/media/stats` (global stream count or per-call RTT/budget health), `POST /v1/admin/routes/preview` (LCR dry-run with cost-per-min and breaker states — routes nothing), risk counters join `GET /v1/admin/risk-rules`.
 - **Recording delete + retention**: `DELETE /v1/recording/{call_id}/{track}` (row + storage object via the new recpipe.Deleter face) and the opt-in hourly retention purge (`GVOS_RECORDING_TTL_DAYS`, storage objects first, then rows).

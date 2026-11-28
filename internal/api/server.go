@@ -242,9 +242,9 @@ func NewServer() *Server {
 
 	// Demo seed: one tenant chain and a small rate table. The tenant
 	// root is postpaid (it invoices); agents and users are prepaid.
-	s.store.Put(&account.Account{ID: "tenant", Name: "Demo Tenant", RateGroup: "demo", Postpaid: true})
-	s.store.Put(&account.Account{ID: "agent1", ParentID: "tenant", Credit: money.MustFromYuan(1000), RateGroup: "demo"})
-	s.store.Put(&account.Account{ID: "1000", ParentID: "agent1", Name: "Demo SIP user", Credit: money.MustFromYuan(10), RateGroup: "demo"})
+	s.store.Put(&account.Account{ID: "tenant", Name: "Demo Tenant", RateGroup: "demo", Postpaid: true, Enabled: true})
+	s.store.Put(&account.Account{ID: "agent1", ParentID: "tenant", Credit: money.MustFromYuan(1000), RateGroup: "demo", Enabled: true})
+	s.store.Put(&account.Account{ID: "1000", ParentID: "agent1", Name: "Demo SIP user", Credit: money.MustFromYuan(10), RateGroup: "demo", Enabled: true})
 
 	// Demo gateway set: mirrors migrations/004 seed so the signaling
 	// edge has a routable target out of the box (NATS broadcast from
@@ -985,9 +985,6 @@ func (s *Server) handleCDRList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"cdrs": out, "items": out, "count": len(out), "next_cursor": next})
 }
 
-
-
-
 // requirePOST rejects non-POST calls (helper for the spike routes).
 func requirePOST(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodPost {
@@ -1116,7 +1113,6 @@ func (s *Server) routeRatesLegacy(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 405, "POST or GET")
 	}
 }
-
 
 // lcrGateways returns the broadcast gateway array with the LCR order
 // encoded into Priority (competitive-analysis §3.1: cheapest first per

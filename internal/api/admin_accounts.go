@@ -80,7 +80,7 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	acc := &account.Account{
 		ID: id, ParentID: req.ParentID, Name: req.Name, Username: req.Username,
-		RateGroup: req.RateGroup, Postpaid: req.Postpaid, Credit: creditAmt,
+		RateGroup: req.RateGroup, Postpaid: req.Postpaid, Credit: creditAmt, Enabled: true,
 	}
 	if err := s.store.Put(acc); err != nil {
 		httpError(w, 500, err.Error())
@@ -345,6 +345,7 @@ func (s *Server) handleAccountPatch(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrent *int     `json:"max_concurrent"`
 		MaxCPS        *int     `json:"max_cps"`
 		LowBalance    *float64 `json:"low_balance"`
+		Enabled       *bool    `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpErrorC(w, 400, "BAD_REQUEST", "body required")
@@ -397,6 +398,11 @@ func (s *Server) handleAccountPatch(w http.ResponseWriter, r *http.Request) {
 		}
 		acc.CPS = *req.MaxCPS
 	}
+	var enabled *bool
+	if req.Enabled != nil {
+		enabled = req.Enabled
+		acc.Enabled = *req.Enabled
+	}
 	var lowBal *money.Amount
 	if req.LowBalance != nil {
 		if *req.LowBalance < 0 {
@@ -415,7 +421,7 @@ func (s *Server) handleAccountPatch(w http.ResponseWriter, r *http.Request) {
 	// Durable first, then the in-memory mirror (same discipline as
 	// gateway PUT).
 	if s.pg != nil {
-		if err := s.pg.UpdateAccountPatch(r.Context(), id, req.Name, req.RateGroup, req.Postpaid, maxDebt, req.MaxConcurrent, req.MaxCPS, lowBal); err != nil {
+		if err := s.pg.UpdateAccountPatch(r.Context(), id, req.Name, req.RateGroup, req.Postpaid, maxDebt, req.MaxConcurrent, req.MaxCPS, lowBal, enabled); err != nil {
 			log.Printf("PATCH account %s failed: %v", id, err)
 			httpError(w, 500, err.Error())
 			return
@@ -435,7 +441,7 @@ func (s *Server) handleAccountPatch(w http.ResponseWriter, r *http.Request) {
 			"parent_id": acc.ParentID, "rate_group": acc.RateGroup,
 			"postpaid": acc.Postpaid, "credit": acc.Credit.String(),
 			"max_debt": acc.MaxDebt.String(), "max_concurrent": acc.Concurrent, "max_cps": acc.CPS,
-			"low_balance": acc.LowBalance.String(),
+			"low_balance": acc.LowBalance.String(), "enabled": acc.Enabled,
 		},
 	})
 	writeJSON(w, 200, map[string]any{"account": acc})

@@ -7,7 +7,7 @@
 
 **交付状态（2026-11-28，当日）**：§6 P0 全部五项（M1-M5）、§7 P0 事故级全部九项已交付；**P1 追加交付 M6（账户 PATCH/DELETE，disable 除外——schema/准入路径无 enabled 标志，需先设计）、M7（audit/ledger 读 API）、M8（webhook PATCH + tenant DELETE + 事件 4/4 补齐）、M9（套餐 unassign + 费率 DELETE）及 P1 改造小项（gateways PUT 串行化、registrations/DID 分页、deliveries 游标、tenant 爬树缓存、tenant stats 走 rollup + 锁外计算、usage 身份解析、幂等面扩容、包络统一、网关 401/405 双写）**。全部经 PG 门控 + 内存双模式验证，明细见 CHANGELOG [Unreleased]。
 **M12 裁决修正**：调研发现「网关自动熔断」只存在于一次性引导的 legacy gateways 表加载路径（`locked_until` 过滤），settings 主路径的在线目录**没有任何熔断机制**——解锁 API 无的放矢。正确动作是先设计在线熔断（故障计数 + 冷却 + 观测面），再谈解锁。已从 P1 摘除，待立项。
-剩余：M10 已按「tenant 可充值+建下级（划拨语义）、agent 只读」授权模型交付（2026-11-28）；M11 已立项并出设计稿 docs/click-to-call-design.md（待评审排期 F1/F2/F3）；P2 全部、账户 disable、在线网关熔断设计待排期。
+剩余：M10 已按「tenant 可充值+建下级（划拨语义）、agent 只读」授权模型交付（2026-11-28）；M11 已立项并出设计稿 docs/click-to-call-design.md（待评审排期 F1/F2/F3）；P2 全部、在线网关熔断设计待排期。
 
 ---
 

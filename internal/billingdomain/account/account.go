@@ -38,6 +38,10 @@ type Account struct {
 	// LowBalance: when set (non-zero) the account.low_balance webhook
 	// fires as the balance first drops to/below it. 0 = off.
 	LowBalance money.Amount `json:"low_balance"`
+	// Enabled: admission (call start + origination) rejects disabled
+	// accounts with 403 DISABLED; the row/balance/ledger stay intact
+	// (re-enable is instant). Defaults true.
+	Enabled bool `json:"enabled"`
 }
 
 // ParseID guards the PG-mode topup path: only strict non-UUID shapes

@@ -659,6 +659,7 @@ func StartCfgReloadSubscriber(s *Server) {
 					MaxConcurrent int          `json:"max_concurrent"`
 					MaxCPS        int          `json:"max_cps"`
 					LowBalance    money.Amount `json:"low_balance"`
+					Enabled       bool         `json:"enabled"`
 				} `json:"account"`
 			}
 			if err := json.Unmarshal(data, &op); err != nil || op.Account.ID == "" {
@@ -684,7 +685,7 @@ func StartCfgReloadSubscriber(s *Server) {
 				ParentID: op.Account.ParentID, RateGroup: op.Account.RateGroup,
 				Postpaid: op.Account.Postpaid, Credit: op.Account.Credit,
 				MaxDebt: op.Account.MaxDebt, Concurrent: op.Account.MaxConcurrent, CPS: op.Account.MaxCPS,
-				LowBalance: op.Account.LowBalance,
+				LowBalance: op.Account.LowBalance, Enabled: op.Account.Enabled,
 			}
 			if err := s.store.Put(a); err != nil {
 				log.Printf("CFG-RELOAD account apply failed (%s): %v", op.Account.ID, err)
