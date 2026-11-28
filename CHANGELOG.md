@@ -4,6 +4,10 @@ All notable changes to gvos-core follow this file. Format: Keep a Changelog; ver
 
 ## [Unreleased]
 
+### Added — contract alignment pack (gap analysis remaining-list item 1, 2026-11-28)
+- OpenAPI spec caught up with the shipped surface: 51 paths now document every public route — single-account GET/PATCH/DELETE, ledger, audit, rate DELETE, webhook PATCH, tenant account provisioning/topup, tenant webhook DELETE, blocklist white-form DELETE — plus query-parameter schemas for the paginated/filtered faces (CDR filters account_id/dest/call_id/from/to, audit entity/tenant_id, paging pairs) and the closed webhook event enum in the description.
+- Spec↔route consistency regression test: every endpoint the registry promises is probed against the live mux; a router-level 404 (plaintext) fails the test while handler-level 404s (JSON envelope) pass — this is the net that catches spec-promised/never-implemented interfaces (the recording-GET-405 class and a silently missed route registration).
+
 ### Added — M10 tenant write plane (authorization ruling: tenant funds+provisions, agent read-only, 2026-11-28)
 - **Tenant-plane transfer semantics**: `POST /v1/tenant/accounts/{id}/topup` moves credit from the tenant root DOWN to a child (positive delta only — clawback is an admin action; both sides journaled as transfer-out/transfer-in in one PG transaction with the affordability check under row lock). A reseller cannot conjure credit; the ledger conservation invariant holds.
 - **Tenant child provisioning**: `POST /v1/tenant/accounts` — username/name/rate_group (defaults to the tenant's own book)/initial_credit (allocated via the same transfer primitive, never from nothing); one-time SIP password response mirrors the admin create; agent role is read-only (403); subtree escape attempts answer a bare 404.

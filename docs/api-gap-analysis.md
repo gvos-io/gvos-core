@@ -194,7 +194,22 @@
 
 ---
 
-## 9. 变更记录
+## 9. 剩余清单复核（2026-11-28，P0+P1 交付后）
+
+### 接口缺失
+| 域 | 项 |
+|---|---|
+| 战略 | M11 F1/F2/F3 实施（设计已批，docs/click-to-call-design.md）；账户 disable（需 schema+准入加 enabled 标志）；在线网关熔断+解锁（先立项熔断设计） |
+| 资源缺口 | 费率组管理（全部锁死 demo 组）；租户 CRUD；路由规则 API（routes/route_legs 零引用，用或删）+ dispatcher 处置；settings 通用 KV |
+| 能力缺口 | 路由预览 / 费率试算 / 账户树 / 实时并发 / 风控计数器 / 媒体流统计；VOS CSV 导入 API；录音删除+retention；webhook 重试策略可配+deliveries 清理；黑名单源增删；报表时间范围查询；OIDC/SSO（P3） |
+
+### 功能/工程缺失
+- **契约漂移（已核实，包 1 处理中）**：openapi.go 缺本轮新增 10+ 路由（accounts/{id} GET/PATCH/DELETE、ledger、audit、rates/{prefix} DELETE、tenant accounts/topup、tenant webhooks DELETE、事件枚举 5 个），且 spec 全文无 query 参数/分页 envelope schema → 根治 = Phase E 的 spec 代码生成 + CI 契约校验
+- **协议成熟度**：tenant CDR-WS 无 pong/心跳/Last-Event-ID 续传/丢帧提示；媒体 WS 无 per-call 归属校验
+- **健壮性**：webhook_deliveries 无保留策略（只进不出）；admin accounts 列表无分页；内存账户 ID 同秒可撞；recording 播放不校验 locator 前缀
+- **竞品验证线**：媒体面生产化（B 线）；20 万注册 / 2 万并发容量验证
+
+## 10. 变更记录
 
 | 日期 | 变更 |
 |------|------|
