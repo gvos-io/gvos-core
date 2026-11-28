@@ -1135,3 +1135,52 @@ func (p *PG) DeleteTenant(ctx context.Context, id string) (int, error) {
 	}
 	return int(tag.RowsAffected()), nil
 }
+
+// ReplayGatewayBreaker aggregates the CDR window for the breaker's
+// boot replay (one settled outcome per carrier leg).
+func (p *PG) ReplayGatewayBreaker(ctx context.Context, windowName string) ([]struct {
+	GatewayID string
+	SipCode   int
+	Answered  bool
+	Release   string
+}, error) {
+	seconds := 120
+	var cfgSec int
+	err := p.pool.QueryRow(ctx, `
+        SELECT coalesce((value->>'window_seconds')::int, 0)
+        FROM settings WHERE key = 'gateway_breaker'`).Scan(&cfgSec)
+	if err == nil && cfgSec > 0 {
+		seconds = cfgSec
+	}
+	rows, err := p.pool.Query(ctx, `
+        SELECT coalesce(gateway_id::text, ''),
+               coalesce(sip_code, 0),
+               (answer_time IS NOT NULL),
+               coalesce(release, '')
+        FROM cdr
+        WHERE start_time > now() - make_interval(secs => $1)
+          AND gateway_id IS NOT NULL`, seconds)
+	if err != nil {
+		return nil, fmt.Errorf("breaker replay: %w", err)
+	}
+	defer rows.Close()
+	var out []struct {
+		GatewayID string
+		SipCode   int
+		Answered  bool
+		Release   string
+	}
+	for rows.Next() {
+		var o struct {
+			GatewayID string
+			SipCode   int
+			Answered  bool
+			Release   string
+		}
+		if err := rows.Scan(&o.GatewayID, &o.SipCode, &o.Answered, &o.Release); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}

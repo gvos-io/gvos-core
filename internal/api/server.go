@@ -70,6 +70,7 @@ type Server struct {
 	gwMu           sync.Mutex                // serializes gateway full-set read-modify-write
 	tenantSetCache map[string]tenantSetEntry // tenant→account-set cache (5s TTL)
 	rateTables     map[string]*rate.Table    // per-group pricing (demo fallback; accounts price against their own rate_group)
+	gwBreaker      *gateway.Breaker          // online-gateway circuit breaker (CB-1)
 	origMu         sync.RWMutex              // origination resource state (below)
 	origCalls      map[string]*store.CallRow // memory-mode origination rows
 	origIndex      map[string]bool           // live originated call ids (event hooks)
@@ -232,7 +233,9 @@ func (s *Server) rebuildRates() {
 // NewServer builds the in-memory demo server (dev/test mode).
 func NewServer() *Server {
 	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), axb: axb.NewStore(), dids: did.NewStore(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now(),
-		origCalls: map[string]*store.CallRow{}, origIndex: map[string]bool{}, origDedup: map[string]time.Time{}}
+		origCalls: map[string]*store.CallRow{}, origIndex: map[string]bool{}, origDedup: map[string]time.Time{},
+	}
+	s.gwBreaker = gateway.NewBreaker(gateway.DefaultBreakerConfig(), s.onBreakerTransition)
 	s.userIndex = map[string]string{}
 
 	// Demo seed: one tenant chain and a small rate table. The tenant
@@ -262,7 +265,9 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), axb: axb.NewStore(), dids: did.NewStore(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now(),
-		origCalls: map[string]*store.CallRow{}, origIndex: map[string]bool{}, origDedup: map[string]time.Time{}}
+		origCalls: map[string]*store.CallRow{}, origIndex: map[string]bool{}, origDedup: map[string]time.Time{},
+	}
+	s.gwBreaker = gateway.NewBreaker(gateway.DefaultBreakerConfig(), s.onBreakerTransition)
 	// CDR partitions: the schema ships a fixed window only, and the
 	// first month without one fails every CDR insert. Make sure this
 	// month and the next few exist before any CDR needs one (the
@@ -379,6 +384,16 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	} else if len(restored) > 0 {
 		s.axb.Restore(restored)
 		log.Printf("restored %d AXB bindings", len(restored))
+	}
+	// Circuit breaker replay: rebuild the failure window from the CDR
+	// history so a restart does not hand a dead gateway a clean slate.
+	if obs, err := pg.ReplayGatewayBreaker(ctx, "gateway_breaker"); err == nil {
+		s.gwBreaker.Replay(obs)
+		if len(obs) > 0 {
+			log.Printf("breaker replayed %d settled calls", len(obs))
+		}
+	} else {
+		log.Printf("breaker replay failed: %v", err)
 	}
 	// Live origination calls: the signaling event hooks key off this
 	// in-process index, so a restart must re-track pending/dialing
@@ -775,6 +790,8 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("GET /v1/admin/gateways", s.handleGatewayList)
 	mux.HandleFunc("PUT /v1/admin/gateways", s.handleGatewaySet)
 	mux.HandleFunc("DELETE /v1/admin/gateways/{id}", s.handleGatewayDelete)
+	mux.HandleFunc("GET /v1/admin/gateways/{id}/breaker", s.handleGatewayBreaker)
+	mux.HandleFunc("POST /v1/admin/gateways/{id}/unlock", s.handleGatewayUnlock)
 	mux.HandleFunc("GET /v1/admin/registrations", s.handleRegList)
 	mux.HandleFunc("GET /v1/admin/cdrs", s.handleCDRList)
 	mux.HandleFunc("POST /v1/admin/recording", s.handleRecordToggle)
@@ -1123,8 +1140,34 @@ func (s *Server) routeRiskLegacy(w http.ResponseWriter, r *http.Request) {
 // encoded into Priority (competitive-analysis §3.1: cheapest first per
 // destination prefix; the edge's lowest-priority-wins selection then
 // reproduces the order with zero edge changes).
+// onBreakerTransition fires on phase changes: the route set rebroadcasts
+// (tripped gateways leave it, half-open trails as the probe slot) and
+// the gvos.gw.breaker observation event rides along.
+func (s *Server) onBreakerTransition(gatewayID string, from, to gateway.BreakerState) {
+	s.emit(events.SubjectCfgReload, map[string]any{
+		"entity": "gateway", "gateways": s.lcrGateways(),
+	})
+	s.emit(events.SubjectGatewayBreaker, map[string]any{
+		"gateway_id": gatewayID, "from": string(from), "to": string(to),
+		"breaker": s.gwBreaker.View(gatewayID),
+	})
+}
+
 func (s *Server) lcrGateways() []gateway.Gateway {
 	gws := s.gws.Gateways()
+	// Circuit breaker: tripped gateways leave the route set entirely;
+	// when EVERY gateway is tripped the full set comes back (a working
+	// route with an alarm beats no route at all).
+	directory := len(gws)
+	if s.gwBreaker != nil && !s.gwBreaker.AllTripped(directory) {
+		kept := gws[:0]
+		for _, g := range gws {
+			if !s.gwBreaker.TrippedOut(g.ID) {
+				kept = append(kept, g)
+			}
+		}
+		gws = kept
+	}
 	r := &lcrRater{s: s, cache: map[string]*rate.Table{}}
 	// Average rank across served prefixes — taking the MIN index
 	// collapsed distinct cost orders (a gateway #0 on 8613 and #5 on

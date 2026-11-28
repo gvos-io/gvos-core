@@ -158,7 +158,6 @@ func (s *Server) handleRateList(w http.ResponseWriter, r *http.Request) {
 // event always flows — demo mode (no PG) streams too, so downstream
 // consumers see one uniform feed.
 
-
 // DELETE /v1/admin/rates/{prefix}: retire the rate (PG rows keep
 // history via ended_at; the memory list drops it). Broadcast entity=rate
 // — peers rebuild from PG (authoritative) or their own list (memory

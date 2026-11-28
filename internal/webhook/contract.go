@@ -158,12 +158,12 @@ type PackageExhaustedData struct {
 
 // CallStateData: one origination-call lifecycle transition.
 type CallStateData struct {
-	CallID   string `json:"call_id"`
-	State    string `json:"state"`
-	Reason   string `json:"reason,omitempty"` // release reason on ended/failed/cancelled
-	Caller   string `json:"caller"`
-	Callee   string `json:"callee,omitempty"`
-	ToAgent  string `json:"to_agent,omitempty"`
+	CallID  string `json:"call_id"`
+	State   string `json:"state"`
+	Reason  string `json:"reason,omitempty"` // release reason on ended/failed/cancelled
+	Caller  string `json:"caller"`
+	Callee  string `json:"callee,omitempty"`
+	ToAgent string `json:"to_agent,omitempty"`
 }
 
 // ContractSubjects is the closed set of subscribable events in

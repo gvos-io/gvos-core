@@ -50,6 +50,7 @@ const (
 	SubjectCDRCompleted       = "gvos.cdr.completed"       // payload: callcore.CDR
 	SubjectCDRRaw             = "gvos.cdr.raw"             // payload: callEndReq (Kamailio-measured; CDRR consumer finalizes billing)
 	SubjectCallTeardown       = "gvos.call.teardown"       // payload: {call_id, reason}
+	SubjectGatewayBreaker     = "gvos.gw.breaker"          // payload: {gateway_id, from, to, breaker} — observation face (CB-3)
 	SubjectCallOriginate      = "gvos.call.originate"      // payload: {op:dial|cancel, call_id, caller, callee, to_agent, account_id, max_duration_s} — consumed by the outboard UAC dialer (M11 F1)
 	SubjectRiskAlert          = "gvos.risk.alert"          // payload: {account, username, rule_id, reason, to}
 	SubjectRegEvent           = "gvos.reg.event"           // payload: {user, expires, src_ip, op} (Kamailio usrloc hooks)

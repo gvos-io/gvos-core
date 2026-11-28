@@ -191,3 +191,44 @@ func (s *Server) handleGatewayDelete(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routeGatewaysLegacy(w http.ResponseWriter, r *http.Request) {
 	s.routeGateways(w, r)
 }
+
+// GET /v1/admin/gateways/{id}/breaker — the breaker observation face
+// (state, counters, cooldown deadline; healthy defaults when unseen).
+func (s *Server) handleGatewayBreaker(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	found := false
+	for _, g := range s.gws.Gateways() {
+		if g.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		httpErrorC(w, 404, "NOT_FOUND", "no gateway "+id)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"gateway_id": id, "breaker": s.gwBreaker.View(id)})
+}
+
+// POST /v1/admin/gateways/{id}/unlock — manual breaker reset (the
+// original M12 ask; meaningful only now that the breaker exists).
+func (s *Server) handleGatewayUnlock(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) || !requirePOST(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	from, to, changed := s.gwBreaker.Unlock(id)
+	if !changed {
+		httpErrorC(w, 404, "NOT_FOUND", "gateway not tripped (nothing to unlock)")
+		return
+	}
+	s.audit(r, "unlock", "gateway", id, map[string]any{"state": string(from)}, map[string]any{"state": string(to)})
+	// The route set changed: broadcast (half-open probes resume).
+	s.emit(events.SubjectCfgReload, map[string]any{
+		"entity": "gateway", "gateways": s.lcrGateways(),
+	})
+	writeJSON(w, 200, map[string]any{"gateway_id": id, "state": string(to)})
+}

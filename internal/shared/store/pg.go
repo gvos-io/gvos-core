@@ -9,9 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
@@ -94,7 +94,7 @@ func (p *PG) LoadAccounts(ctx context.Context, dst *account.Store) (int, error) 
 
 	n := 0
 	for rows.Next() {
-			var (
+		var (
 			id, parent, name, username, group string
 			postpaid                          bool
 			credit, maxDebt, lowBal           string // NUMERIC scans as string; money.FromDecimal converts

@@ -18,7 +18,7 @@ func TestTenantAdminMemoryGuards(t *testing.T) {
 	}
 	rec := doAdmin(t, h, "GET", "/v1/admin/tenants", nil)
 	var list struct {
-		Count int `json:"count"`
+		Count int    `json:"count"`
 		Mode  string `json:"mode"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &list)

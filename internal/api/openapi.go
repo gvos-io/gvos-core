@@ -58,6 +58,8 @@ var openAPIEndpoints = []oasEndpoint{
 	{"GET", "/v1/admin/gateways", "List gateways", "routing", false, nil},
 	{"PUT", "/v1/admin/gateways", "Replace the gateway set (LCR-ordered)", "routing", true, nil},
 	{"DELETE", "/v1/admin/gateways/{id}", "Remove a gateway", "routing", false, nil},
+	{"GET", "/v1/admin/gateways/{id}/breaker", "Circuit-breaker state for one gateway", "routing", false, nil},
+	{"POST", "/v1/admin/gateways/{id}/unlock", "Manual breaker reset (audit; route set rebroadcasts)", "routing", true, nil},
 	{"GET", "/v1/admin/registrations", "SIP registration mirror (newest activity first)", "signaling", false, pPaging()},
 	{"GET", "/v1/admin/cdrs", "Query CDRs (PG history authority in PG mode; memory ring otherwise)", "cdr", false, pCDRFilters()},
 	{"GET", "/v1/admin/recording", "Recording toggle state", "recording", false, nil},
