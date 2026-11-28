@@ -201,7 +201,7 @@
 |---|---|
 | 战略 | M11 **F1 core 侧已交付**（/v1/calls + originate 指令 + 状态机 + call.state；UAC 拨号器二进制待实施）；F2/F3 未开工；账户 disable（需 schema+准入加 enabled 标志）；~~在线网关熔断+解锁~~ ✅ CB-1/2/3 已交付（2026-11-28：结算钩子计数 + 状态机 + 选路剔除 + 观测/unlock API + gvos.gw.breaker 事件） |
 | 资源缺口 | ~~费率组管理~~ ✅ 已交付（多组计费运行时 + CRUD + quote，2026-11-28）；~~租户 CRUD~~ ✅（2026-11-28，迁移 016 唯一索引）；路由规则 API（**裁决：延后激活**——LCR on gateways 覆盖当前选路，路由引擎触及边缘，见 §9）；~~settings 通用 KV~~ ✅（只读巡检面，写入走各专属 API） |
-| 能力缺口 | 路由预览 / ~~费率试算~~ ✅ / 账户树 / 实时并发 / 风控计数器 / 媒体流统计；VOS CSV 导入 API；录音删除+retention；webhook 重试策略可配+~~deliveries 清理~~ ✅（包 2）；黑名单源增删；~~报表时间范围查询~~ ✅；OIDC/SSO（P3） |
+| 能力缺口 | ~~路由预览~~ ✅ / ~~费率试算~~ ✅ / ~~账户树~~ ✅ / ~~实时并发~~ ✅ / ~~风控计数器~~ ✅ / ~~媒体流统计~~ ✅（A1 能力小件全套：tree/live/media-stats/routes-preview + risk counters 并入 risk-rules）；VOS CSV 导入 API；~~录音删除+retention~~ ✅（A2，2026-11-28：DELETE track API + Deleter 面 + GVOS_RECORDING_TTL_DAYS 小时清理）；~~webhook 重试策略可配~~ ✅（A3：GET/PUT retry-policy，settings 持久化，live 生效）+~~deliveries 清理~~ ✅（包 2）；~~黑名单源增删~~ ✅（A4：PUT/DELETE sources，spec 持久化，boot 覆盖 env，热重启 feed loop）；~~报表时间范围查询~~ ✅；OIDC/SSO（P3） |
 
 ### 功能/工程缺失
 - ~~契约漂移~~ ✅ 包 1 已交付（2026-11-28，f78eb5d）：spec 51 路径 + 参数 schema + 事件枚举 + spec→路由一致性回归测试

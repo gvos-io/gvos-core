@@ -187,11 +187,6 @@ func (s *Server) handleGatewayDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"removed": id})
 }
 
-// routeGatewaysLegacy: old verb route during the deprecation window.
-func (s *Server) routeGatewaysLegacy(w http.ResponseWriter, r *http.Request) {
-	s.routeGateways(w, r)
-}
-
 // GET /v1/admin/gateways/{id}/breaker — the breaker observation face
 // (state, counters, cooldown deadline; healthy defaults when unseen).
 func (s *Server) handleGatewayBreaker(w http.ResponseWriter, r *http.Request) {
@@ -231,4 +226,37 @@ func (s *Server) handleGatewayUnlock(w http.ResponseWriter, r *http.Request) {
 		"entity": "gateway", "gateways": s.lcrGateways(),
 	})
 	writeJSON(w, 200, map[string]any{"gateway_id": id, "state": string(to)})
+}
+
+// GET/PUT /v1/admin/gateways-breaker/config: the breaker state
+// machine's tuning knobs (settings key gateway_breaker — the boot
+// replay already reads the window from it; SetConfig applies live).
+func (s *Server) handleBreakerConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		writeJSON(w, 200, map[string]any{"config": s.gwBreaker.Config()})
+		return
+	}
+	if !requirePUT(w, r) {
+		return
+	}
+	var req gateway.BreakerConfig
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpErrorC(w, 400, "BAD_REQUEST", "body required")
+		return
+	}
+	if err := s.gwBreaker.SetConfig(req); err != nil {
+		httpErrorC(w, 400, "BAD_REQUEST", err.Error())
+		return
+	}
+	if s.pg != nil {
+		if err := s.pg.PutSetting(r.Context(), "gateway_breaker", req); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+	}
+	s.audit(r, "update", "gateway_breaker", "", nil, req)
+	writeJSON(w, 200, map[string]any{"config": s.gwBreaker.Config()})
 }

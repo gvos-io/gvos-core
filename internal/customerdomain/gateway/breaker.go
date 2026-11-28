@@ -113,6 +113,29 @@ func NewBreaker(cfg BreakerConfig, onTransition func(gatewayID string, from, to 
 	}
 }
 
+// Config returns the live tuning knobs.
+func (b *Breaker) Config() BreakerConfig {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cfg
+}
+
+// SetConfig validates and applies new knobs (positive integers, sane
+// rate). The boot replay reads the same shape from settings.
+func (b *Breaker) SetConfig(cfg BreakerConfig) error {
+	if cfg.ConsecutiveFailures <= 0 || cfg.WindowSeconds <= 0 || cfg.WindowMinCalls <= 0 ||
+		cfg.CooldownS <= 0 || cfg.CooldownMaxS < cfg.CooldownS {
+		return fmt.Errorf("invalid config: all counts/windows/cooldowns must be positive and cooldown_max >= cooldown")
+	}
+	if cfg.FailureRate <= 0 || cfg.FailureRate > 1 {
+		return fmt.Errorf("failure_rate must be in (0,1]")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.cfg = cfg
+	return nil
+}
+
 // BreakerView is the observation projection (admin face).
 type BreakerView struct {
 	State        BreakerState `json:"state"`

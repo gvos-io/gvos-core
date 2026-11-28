@@ -30,6 +30,12 @@ type Storage interface {
 	Kind() string
 }
 
+// Deleter is optional: backends that can remove stored objects
+// (LocalFS implements it; the S3 face follows the same shape).
+type Deleter interface {
+	Delete(ctx context.Context, objectKey string) error
+}
+
 // Presigner is optional: S3-compatible backends return a time-boxed
 // GET URL so the browser plays audio without proxying through gv-core.
 type Presigner interface {

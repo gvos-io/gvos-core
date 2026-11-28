@@ -144,9 +144,3 @@ func BootstrapKey(s *Server) {
 	}
 	s.acl.Add(key)
 }
-
-// routeKeysLegacy stub for /v1/admin/keys verb routes (not previously
-// existing — only resource routes).
-func (s *Server) routeKeysLegacy(w http.ResponseWriter, r *http.Request) {
-	s.handleKeyList(w, r)
-}

@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -47,9 +48,50 @@ func Verify(secret string, header string, body []byte, maxSkew time.Duration) bo
 	return hmac.Equal(mac.Sum(nil), want)
 }
 
-// Backoff schedule (retry 0..4), then dead-letter.
+// Backoff schedule (retry 0..4), then dead-letter. Reads go through
+// currentBackoff — the schedule is admin-tunable at runtime
+// (PUT /v1/admin/webhooks/retry-policy).
+var backoffMu sync.RWMutex
 var Backoff = []time.Duration{
 	1 * time.Minute, 5 * time.Minute, 30 * time.Minute, 2 * time.Hour, 6 * time.Hour,
+}
+
+// currentBackoff snapshots the live retry schedule.
+func currentBackoff() []time.Duration {
+	backoffMu.RLock()
+	defer backoffMu.RUnlock()
+	return append([]time.Duration(nil), Backoff...)
+}
+
+// CurrentBackoffMinutes snapshots the live schedule in whole minutes
+// (the admin face speaks minutes).
+func CurrentBackoffMinutes() []int {
+	sched := currentBackoff()
+	out := make([]int, 0, len(sched))
+	for _, d := range sched {
+		out = append(out, int(d/time.Minute))
+	}
+	return out
+}
+
+// SetBackoff installs a new retry schedule (1..10 ascending steps).
+// MaxDeliver-style callers pick the change up on the next delivery.
+func SetBackoff(schedule []time.Duration) error {
+	if len(schedule) == 0 || len(schedule) > 10 {
+		return fmt.Errorf("schedule must hold 1..10 steps")
+	}
+	for i, d := range schedule {
+		if d <= 0 {
+			return fmt.Errorf("step %d must be positive", i+1)
+		}
+		if i > 0 && d < schedule[i-1] {
+			return fmt.Errorf("schedule must be ascending")
+		}
+	}
+	backoffMu.Lock()
+	defer backoffMu.RUnlock()
+	Backoff = append([]time.Duration(nil), schedule...)
+	return nil
 }
 
 // NextRetry returns the delay after `attempts` failed attempts

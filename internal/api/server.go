@@ -68,6 +68,8 @@ type Server struct {
 	whStore        WebhookStore              // subscription storage (nil = memory-local)
 	whMemSubs      []webhook.Subscription    // memory-mode subscriptions (whStore==nil); cfgMu-guarded
 	gwMu           sync.Mutex                // serializes gateway full-set read-modify-write
+	feedsSpec      string                    // blocklist feed spec (admin face or boot env)
+	feedStop       func()                    // live feed-loop stop (nil = off)
 	tenantSetCache map[string]tenantSetEntry // tenant→account-set cache (5s TTL)
 	rateTables     map[string]*rate.Table    // per-group pricing (demo fallback; accounts price against their own rate_group)
 	gwBreaker      *gateway.Breaker          // online-gateway circuit breaker (CB-1)
@@ -430,6 +432,7 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	// Hourly dead-row sweep: idempotency keys past the replay TTL and
 	// AXB bindings dead for over a day.
 	go pg.StartRuntimePurge(context.Background())
+	s.startRecordingRetention()
 	s.calls = s.newCallManager()
 	return s, nil
 }
@@ -777,6 +780,10 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("DELETE /v1/admin/accounts/{id}", s.handleAccountDelete)
 	mux.HandleFunc("GET /v1/admin/accounts/{id}", s.handleAccountGet)
 	mux.HandleFunc("GET /v1/admin/accounts/{id}/ledger", s.handleAccountLedger)
+	mux.HandleFunc("GET /v1/admin/accounts/{id}/tree", s.handleAccountTree)
+	mux.HandleFunc("GET /v1/admin/accounts/{id}/live", s.handleAccountLive)
+	mux.HandleFunc("GET /v1/admin/media/stats", s.handleMediaStats)
+	mux.HandleFunc("POST /v1/admin/routes/preview", s.handleRoutePreview)
 	mux.HandleFunc("POST /v1/admin/accounts/{id}/topup", s.withIdempotency(s.handleTopUp))
 	mux.HandleFunc("GET /v1/admin/rates", s.handleRateList)
 	mux.HandleFunc("PUT /v1/admin/rates", s.handleRateUpsert)
@@ -792,6 +799,8 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("DELETE /v1/admin/gateways/{id}", s.handleGatewayDelete)
 	mux.HandleFunc("GET /v1/admin/gateways/{id}/breaker", s.handleGatewayBreaker)
 	mux.HandleFunc("POST /v1/admin/gateways/{id}/unlock", s.handleGatewayUnlock)
+	mux.HandleFunc("GET /v1/admin/gateways-breaker/config", s.handleBreakerConfig)
+	mux.HandleFunc("PUT /v1/admin/gateways-breaker/config", s.handleBreakerConfig)
 	mux.HandleFunc("GET /v1/admin/registrations", s.handleRegList)
 	mux.HandleFunc("GET /v1/admin/cdrs", s.handleCDRList)
 	mux.HandleFunc("POST /v1/admin/recording", s.handleRecordToggle)
@@ -816,6 +825,8 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("GET /v1/admin/reports/views", s.handleReportViews)
 	// Dynamic blocklist feeds (source statistics).
 	mux.HandleFunc("GET /v1/admin/blocklist-sources", s.handleBlocklistSources)
+	mux.HandleFunc("PUT /v1/admin/blocklist-sources", s.handleBlocklistSourcesPut)
+	mux.HandleFunc("DELETE /v1/admin/blocklist-sources", s.handleBlocklistSourcesDelete)
 
 	// AXB privacy numbers (VOS module equivalent).
 	mux.HandleFunc("POST /v1/admin/axb/bindings", s.handleAXBBind)
@@ -835,6 +846,8 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("DELETE /v1/admin/webhooks/{id}", s.handleWebhookDelete)
 	mux.HandleFunc("GET /v1/admin/webhooks/{id}/deliveries", s.handleWebhookDeliveries)
 	mux.HandleFunc("POST /v1/admin/webhooks/deliveries/{id}/replay", s.handleWebhookDeliveryReplay)
+	mux.HandleFunc("GET /v1/admin/webhooks/retry-policy", s.handleWebhookRetryPolicy)
+	mux.HandleFunc("PUT /v1/admin/webhooks/retry-policy", s.withIdempotency(s.handleWebhookRetryPolicy))
 
 	// Forced teardown (ops plane).
 	mux.HandleFunc("POST /v1/admin/calls/{call_id}/teardown", s.handleCallTeardown)
@@ -857,6 +870,7 @@ func MuxFor(s *Server) http.Handler {
 	// Recording pipeline (R2/R3).
 	mux.HandleFunc("GET /v1/recording/{call_id}", s.handleRecordingList)
 	mux.HandleFunc("GET /v1/recording/{call_id}/{track}", s.handleRecordingPlay)
+	mux.HandleFunc("DELETE /v1/recording/{call_id}/{track}", s.handleRecordingDelete)
 
 	// OpenAPI 3.1 spec (public contract descriptor).
 	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
@@ -971,46 +985,22 @@ func (s *Server) handleCDRList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"cdrs": out, "items": out, "count": len(out), "next_cursor": next})
 }
 
-// routeAccounts dispatches by verb (Go 1.21: no method patterns).
-func (s *Server) routeAccounts(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodPost:
-		s.handleAccountCreate(w, r)
-	case http.MethodGet:
-		s.handleAccountList(w, r)
-	default:
-		httpError(w, 405, "POST or GET")
-	}
-}
 
-// routeRates dispatches by verb.
-func (s *Server) routeRates(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodPost:
-		s.handleRateUpsert(w, r)
-	case http.MethodGet:
-		s.handleRateList(w, r)
-	default:
-		httpError(w, 405, "POST or GET")
-	}
-}
 
-// routeGateways dispatches by verb.
-func (s *Server) routeGateways(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodPost:
-		s.handleGatewaySet(w, r)
-	case http.MethodGet:
-		s.handleGatewayList(w, r)
-	default:
-		httpError(w, 405, "POST or GET")
-	}
-}
 
 // requirePOST rejects non-POST calls (helper for the spike routes).
 func requirePOST(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		httpError(w, http.StatusMethodNotAllowed, "POST required")
+		return false
+	}
+	return true
+}
+
+// requirePUT rejects non-PUT calls.
+func requirePUT(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodPut {
+		httpError(w, http.StatusMethodNotAllowed, "PUT required")
 		return false
 	}
 	return true
@@ -1127,14 +1117,6 @@ func (s *Server) routeRatesLegacy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// routeRiskLegacy: old POST-only route; GET goes to risk-rules.
-func (s *Server) routeRiskLegacy(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		s.handleRiskRules(w, r)
-		return
-	}
-	http.Redirect(w, r, "/v1/admin/risk-rules", http.StatusTemporaryRedirect)
-}
 
 // lcrGateways returns the broadcast gateway array with the LCR order
 // encoded into Priority (competitive-analysis §3.1: cheapest first per
@@ -1253,14 +1235,47 @@ func StartWebhookFanout(s *Server) bool {
 // AttachBlocklistFeeds starts the dynamic feed loop for the
 // blocklist (GVOS_BLOCKLIST_SOURCES form tag@url,...). Empty spec =
 // feeds off. The static API-owned set survives every refresh.
+// feedsSpecSetting is the admin face's persisted feed spec (settings
+// key blocklist_feeds) — it supersedes the boot env at the next boot.
+func (s *Server) feedsSpecSetting(ctx context.Context) (string, bool) {
+	if s.pg == nil {
+		return "", false
+	}
+	var spec string
+	if err := s.pg.GetSetting(ctx, "blocklist_feeds", &spec); err == nil {
+		return spec, true
+	}
+	return "", false
+}
+
 func AttachBlocklistFeeds(s *Server, spec string, ctx context.Context) (stop func()) {
+	s.cfgMu.Lock()
+	s.feedsSpec = spec
+	s.cfgMu.Unlock()
+	return s.restartFeeds(ctx)
+}
+
+// restartFeeds (re)starts the dynamic feed loop for the live spec and
+// records its stop under cfgMu-protected state.
+func (s *Server) restartFeeds(ctx context.Context) (stop func()) {
+	s.cfgMu.Lock()
+	if s.feedStop != nil {
+		s.feedStop()
+	}
+	s.feedsSpec = strings.TrimSpace(s.feedsSpec)
+	spec := s.feedsSpec
+	s.cfgMu.Unlock()
 	feeds := blocklist.ParseFeedSpec(spec)
 	if len(feeds) == 0 {
+		log.Printf("blocklist feeds off (empty spec)")
 		return func() {}
 	}
-	blocklist.RunFeedLoop(ctx, s.blocklist, feeds, s.blocklist.Snapshot(), 5*time.Minute, 15*time.Minute)
+	stop = blocklist.RunFeedLoop(ctx, s.blocklist, feeds, s.blocklist.Snapshot(), 5*time.Minute, 15*time.Minute)
+	s.cfgMu.Lock()
+	s.feedStop = stop
+	s.cfgMu.Unlock()
 	log.Printf("blocklist feeds on: %d sources", len(feeds))
-	return func() {}
+	return stop
 }
 
 // AttachRedis wires the Redis runtime-state authority: the balance

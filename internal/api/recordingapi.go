@@ -4,10 +4,13 @@
 package api
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -126,4 +129,99 @@ func (s *Server) presignRecording(r *http.Request, locator string) string {
 		return ""
 	}
 	return u
+}
+
+// DELETE /v1/recording/{call_id}/{track}: removes the track row AND
+// its storage object (S3 backend: Presigner/Deleter face when
+// implemented; LocalFS: resolved against the archive root).
+func (s *Server) handleRecordingDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if s.pg == nil {
+		httpErrorC(w, 503, "UNAVAILABLE", "recording administration requires PG mode")
+		return
+	}
+	callID, track := r.PathValue("call_id"), r.PathValue("track")
+	objectKey, locator, err := s.pg.GetRecording(r.Context(), callID, track)
+	if err != nil {
+		httpErrorC(w, 404, "NOT_FOUND", "no recording for "+callID+"/"+track)
+		return
+	}
+	// Storage delete is best-effort: a lost file must not pin the row.
+	if s.recStore != nil {
+		if d, ok := s.recStore.(recpipe.Deleter); ok {
+			key := objectKey
+			if strings.HasPrefix(locator, "s3://") {
+				// s3://bucket/key → key
+				if i := strings.Index(locator[5:], "/"); i >= 0 {
+					key = locator[5+i+1:]
+				}
+			}
+			if derr := d.Delete(r.Context(), key); derr != nil {
+				log.Printf("recording storage delete failed (%s/%s): %v", callID, track, derr)
+			}
+		}
+	}
+	if n, err := s.pg.DeleteRecordingRow(r.Context(), callID, track); err != nil {
+		httpError(w, 500, err.Error())
+		return
+	} else if n == 0 {
+		httpErrorC(w, 404, "NOT_FOUND", "no recording for "+callID+"/"+track)
+		return
+	}
+	s.audit(r, "delete", "recording", callID+"/"+track, nil, nil)
+	writeJSON(w, 200, map[string]any{"deleted": callID + "/" + track})
+}
+
+// recordingRetentionDays: opt-in retention (0 = keep forever; the
+// purge pass only runs when set). GVOS_RECORDING_TTL_DAYS.
+func recordingRetentionDays() int {
+	if v := os.Getenv("GVOS_RECORDING_TTL_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+// startRecordingRetention runs the hourly retention purge when a TTL
+// is configured: storage objects first, then the rows.
+func (s *Server) startRecordingRetention() {
+	days := recordingRetentionDays()
+	if days == 0 || s.pg == nil {
+		return
+	}
+	go func() {
+		run := func() {
+			cctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			rows, err := s.pg.ListExpiredRecordings(cctx, days)
+			if err != nil {
+				log.Printf("recording retention list failed: %v", err)
+				return
+			}
+			removed := 0
+			for _, r := range rows {
+				if s.recStore != nil {
+					if d, ok := s.recStore.(recpipe.Deleter); ok {
+						_ = d.Delete(cctx, r.ObjectKey)
+					}
+				}
+				removed++
+			}
+			if n, err := s.pg.PurgeRecordingRows(cctx, days); err != nil {
+				log.Printf("recording retention purge failed: %v", err)
+			} else if n > 0 {
+				log.Printf("recording retention: purged %d rows (%d objects attempted)", n, removed)
+			}
+		}
+		run()
+		tk := time.NewTicker(time.Hour)
+		defer tk.Stop()
+		for range tk.C {
+			run()
+		}
+	}()
+	log.Printf("recording retention on: %d days", days)
 }

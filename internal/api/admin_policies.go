@@ -2,9 +2,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/ipallow"
@@ -89,7 +91,7 @@ func (s *Server) handleRiskRules(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet {
 		rules := s.risk.Rules()
-		writeJSON(w, 200, map[string]any{"rules": rules, "items": rules, "count": len(rules)})
+		writeJSON(w, 200, map[string]any{"rules": rules, "items": rules, "count": len(rules), "counters": map[string]int{"tracked_accounts": s.risk.Counters()}})
 		return
 	}
 	var req struct {
@@ -279,16 +281,6 @@ func (s *Server) handleBlocklistDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"removed": n})
 }
 
-// handleBlocklistLegacy keeps the old route alive during the
-// deprecation window (307 to the resource form).
-func (s *Server) handleBlocklistLegacy(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		s.handleBlocklist(w, r) // body semantics too rich to redirect
-		return
-	}
-	http.Redirect(w, r, "/v1/admin/blocklist-entries", http.StatusTemporaryRedirect)
-}
-
 // handleIPAllowList serves GET /v1/admin/ipallow/rules.
 func (s *Server) handleIPAllowList(w http.ResponseWriter, r *http.Request) {
 	s.handleIPAllow(w, r) // legacy GET branch
@@ -355,4 +347,80 @@ func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, 200, map[string]any{"sources": blocklist.SourceStats(s.blocklist)})
+}
+
+// LoadFeedsSetting exposes the persisted feed spec to the boot path
+// (main reads it before AttachBlocklistFeeds).
+func LoadFeedsSetting(s *Server) (string, bool) {
+	if s.pg == nil {
+		return "", false
+	}
+	return s.feedsSpecSetting(context.Background())
+}
+
+// PUT /v1/admin/blocklist-sources {"spec": "tag@url,..."}: replace the
+// dynamic feed set (validated by ParseFeedSpec; an empty spec turns
+// feeds off) and persist it — the boot path prefers this over the
+// env. DELETE clears the persisted spec (feeds off at the next boot).
+func (s *Server) handleBlocklistSourcesPut(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) || !requirePUT(w, r) {
+		return
+	}
+	var req struct {
+		Spec string `json:"spec"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpErrorC(w, 400, "BAD_REQUEST", "body required")
+		return
+	}
+	feeds := blocklist.ParseFeedSpec(req.Spec)
+	if req.Spec != "" && len(feeds) == 0 {
+		httpErrorC(w, 400, "BAD_REQUEST", "spec parsed to no feeds (form tag@url,...)")
+		return
+	}
+	if s.pg != nil {
+		if req.Spec == "" {
+			if err := s.pg.DeleteSetting(r.Context(), "blocklist_feeds"); err != nil {
+				httpError(w, 500, err.Error())
+				return
+			}
+		} else if err := s.pg.PutSetting(r.Context(), "blocklist_feeds", req.Spec); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+	}
+	feedCtx, feedCancel := context.WithCancel(context.Background())
+	t := time.AfterFunc(time.Hour, feedCancel) // safety: restarts re-arm
+	_ = t
+	stop := s.restartFeeds(feedCtx)
+	s.cfgMu.Lock()
+	s.feedStop = func() {
+		stop()
+		feedCancel()
+	}
+	s.cfgMu.Unlock()
+	s.audit(r, "replace", "blocklist_feeds", "", nil, map[string]any{"spec": req.Spec, "feeds": len(feeds)})
+	writeJSON(w, 200, map[string]any{"feeds": len(feeds), "spec": req.Spec})
+}
+
+// DELETE /v1/admin/blocklist-sources: feeds off + spec cleared.
+func (s *Server) handleBlocklistSourcesDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if s.pg != nil {
+		if err := s.pg.DeleteSetting(r.Context(), "blocklist_feeds"); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+	}
+	s.cfgMu.Lock()
+	if s.feedStop != nil {
+		s.feedStop()
+		s.feedStop = nil
+	}
+	s.feedsSpec = ""
+	s.cfgMu.Unlock()
+	s.audit(r, "delete", "blocklist_feeds", "", nil, nil)
+	writeJSON(w, 200, map[string]any{"feeds_off": true})
 }

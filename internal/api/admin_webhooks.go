@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gvos-io/gvos-core/internal/shared/store"
 	"github.com/gvos-io/gvos-core/internal/webhook"
@@ -267,4 +268,50 @@ func (s *Server) refreshWebhookDispatcher() {
 		subs = append(subs, webhook.Subscription{ID: rw.ID, URL: rw.URL, Secret: rw.Secret, Events: rw.Events, Active: rw.Active, Tenant: rw.TenantID})
 	}
 	s.whDispatch.SetSubscriptions(subs)
+}
+
+// GET/PUT /v1/admin/webhooks/retry-policy: the delivery retry
+// schedule in minutes (1..10 ascending steps, dead-letter after the
+// last). Persisted in the webhook_retry settings key; SetBackoff
+// applies it live.
+func (s *Server) handleWebhookRetryPolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	cur := webhook.CurrentBackoffMinutes()
+	if r.Method == http.MethodGet {
+		writeJSON(w, 200, map[string]any{"schedule_minutes": cur, "dead_letter_after": len(cur)})
+		return
+	}
+	if !requirePUT(w, r) {
+		return
+	}
+	var req struct {
+		Minutes []int `json:"schedule_minutes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Minutes) == 0 {
+		httpErrorC(w, 400, "BAD_REQUEST", "schedule_minutes required")
+		return
+	}
+	sched := make([]time.Duration, 0, len(req.Minutes))
+	for _, m := range req.Minutes {
+		if m <= 0 || m > 1440 {
+			httpErrorC(w, 400, "BAD_REQUEST", "steps must be 1..1440 minutes")
+			return
+		}
+		sched = append(sched, time.Duration(m)*time.Minute)
+	}
+	if err := webhook.SetBackoff(sched); err != nil {
+		httpErrorC(w, 400, "BAD_REQUEST", err.Error())
+		return
+	}
+	if s.pg != nil {
+		mins, _ := json.Marshal(req.Minutes)
+		if err := s.pg.PutSetting(r.Context(), "webhook_retry", json.RawMessage(mins)); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+	}
+	s.audit(r, "update", "webhook_retry", "", nil, req)
+	writeJSON(w, 200, map[string]any{"schedule_minutes": req.Minutes})
 }

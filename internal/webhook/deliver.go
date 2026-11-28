@@ -273,7 +273,8 @@ func (d *Deliverer) Deliver(ctx context.Context, sub Subscription, subject strin
 		log.Printf("webhook %s marshal: %v", sub.URL, err)
 		return 0
 	}
-	for attempt := 1; attempt <= len(Backoff); attempt++ {
+	schedule := currentBackoff()
+	for attempt := 1; attempt <= len(schedule); attempt++ {
 		res := d.deliverOnce(ctx, sub, subject, body)
 		if res.OK {
 			return attempt
@@ -289,7 +290,7 @@ func (d *Deliverer) Deliver(ctx context.Context, sub Subscription, subject strin
 		case <-time.After(delay):
 		}
 	}
-	return len(Backoff) // dead-lettered
+	return len(schedule) // dead-lettered
 }
 
 // DeliveryRecord is one persisted delivery attempt (success or dead).
@@ -431,7 +432,7 @@ func envelopeTenant(env envelopeJob, sub Subscription) string {
 // PG delivery-log write is the api wiring's PG seam).
 func (dsp *Dispatcher) deliverLogged(sub Subscription, subject string, seq int64, payload any) {
 	attempts := dsp.d.Deliver(dsp.ctx, sub, subject, seq, payload)
-	dead := attempts >= len(Backoff)
+	dead := attempts >= len(currentBackoff())
 	if dead {
 		log.Printf("webhook %s DEAD-LETTERED after %d attempts (%s)", sub.URL, attempts, subject)
 	}

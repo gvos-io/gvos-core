@@ -108,9 +108,14 @@ func main() {
 			log.Printf("webhook fanout on (subscriptions from PG)")
 		}
 	}
-	if spec := os.Getenv("GVOS_BLOCKLIST_SOURCES"); spec != "" {
+	{
 		feedCtx, feedCancel := context.WithCancel(context.Background())
 		defer feedCancel()
+		// The admin face's persisted spec supersedes the boot env.
+		spec := os.Getenv("GVOS_BLOCKLIST_SOURCES")
+		if stored, ok := api.LoadFeedsSetting(s); ok {
+			spec = stored
+		}
 		api.AttachBlocklistFeeds(s, spec, feedCtx)
 	}
 	// Recording pipeline (R2/R3): on when GVOS_RECORDING_OUTPUT is set.

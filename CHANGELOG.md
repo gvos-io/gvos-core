@@ -4,6 +4,14 @@ All notable changes to gvos-core follow this file. Format: Keep a Changelog; ver
 
 ## [Unreleased]
 
+### Added — depth closeout: capability endpoints, recording retention, tunables (2026-11-28)
+- **Capability endpoints** (gap B-series, machinery that existed with no reader): `GET /v1/admin/accounts/{id}/tree` (charging chain via Store.Chain), `GET .../live` (live calls vs the account's caps), `GET /v1/admin/media/stats` (global stream count or per-call RTT/budget health), `POST /v1/admin/routes/preview` (LCR dry-run with cost-per-min and breaker states — routes nothing), risk counters join `GET /v1/admin/risk-rules`.
+- **Recording delete + retention**: `DELETE /v1/recording/{call_id}/{track}` (row + storage object via the new recpipe.Deleter face) and the opt-in hourly retention purge (`GVOS_RECORDING_TTL_DAYS`, storage objects first, then rows).
+- **Webhook retry policy is tunable**: `GET/PUT /v1/admin/webhooks/retry-policy` (minute steps, validated ascending; the Backoff schedule swaps live under a mutex — every reader goes through the accessor; persisted in the webhook_retry settings key).
+- **Blocklist feed sources managed**: `PUT/DELETE /v1/admin/blocklist-sources` — spec validated, persisted (boot prefers it over GVOS_BLOCKLIST_SOURCES), the feed loop restarts hot.
+- **Breaker config face**: `GET/PUT /v1/admin/gateways-breaker/config` (validated knobs, settings-persisted, applied live; the boot replay already read this key).
+- Dead code removed: the unregistered Go-1.21 verb dispatchers (routeAccounts/Rates/Gateways/RatesLegacy/RiskLegacy/KeysLegacy, handleBlocklistLegacy) — audit-identified stragglers, unrouted for months.
+
 ### Added — gateway circuit breaker design (M12 ruling artifact, 2026-11-28)
 - `docs/gateway-circuit-breaker-design.md`: the online gateway directory has no failure counting today (locked_until exists only in the dead legacy-bootstrap path). Design: CDR-settlement hook counters (no synchronous writes on the call path), per-gateway state machine with minimum-sample windows and exponential-backoff cooldowns, 404/486 explicitly not counted (callee problems are not gateway problems), route exclusion via the existing cfg.reload broadcast, breaker observation fields + unlock API (the original M12 ask, meaningful only once the breaker exists), boot replay from the CDR window.
 

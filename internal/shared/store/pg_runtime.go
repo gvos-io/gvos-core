@@ -1184,3 +1184,80 @@ func (p *PG) ReplayGatewayBreaker(ctx context.Context, windowName string) ([]str
 	}
 	return out, rows.Err()
 }
+
+// --- Recording administration ---------------------------------------
+
+// GetRecordingByLocator resolves one track row for delete operations.
+func (p *PG) GetRecording(ctx context.Context, callID, track string) (objectKey, locator string, err error) {
+	err = p.pool.QueryRow(ctx, `
+        SELECT object_key, locator FROM recordings
+        WHERE call_id = $1 AND track = $2`, callID, track).
+		Scan(&objectKey, &locator)
+	return
+}
+
+// DeleteRecordingRow removes the track row.
+func (p *PG) DeleteRecordingRow(ctx context.Context, callID, track string) (int, error) {
+	tag, err := p.pool.Exec(ctx, `DELETE FROM recordings WHERE call_id = $1 AND track = $2`, callID, track)
+	if err != nil {
+		return 0, fmt.Errorf("delete recording: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// ListExpiredRecordings returns the storage keys + locators of
+// recording rows older than the retention days (retention purge).
+func (p *PG) ListExpiredRecordings(ctx context.Context, days int) ([]struct {
+	CallID    string
+	Track     string
+	ObjectKey string
+	Locator   string
+}, error) {
+	rows, err := p.pool.Query(ctx, `
+        SELECT call_id, track, object_key, locator
+        FROM recordings
+        WHERE created_at < now() - make_interval(days => $1)`, days)
+	if err != nil {
+		return nil, fmt.Errorf("list expired recordings: %w", err)
+	}
+	defer rows.Close()
+	var out []struct {
+		CallID    string
+		Track     string
+		ObjectKey string
+		Locator   string
+	}
+	for rows.Next() {
+		var r struct {
+			CallID    string
+			Track     string
+			ObjectKey string
+			Locator   string
+		}
+		if err := rows.Scan(&r.CallID, &r.Track, &r.ObjectKey, &r.Locator); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// PurgeRecordingRows deletes rows older than the retention window
+// (after the caller removed their storage objects).
+func (p *PG) PurgeRecordingRows(ctx context.Context, days int) (int64, error) {
+	tag, err := p.pool.Exec(ctx, `
+        DELETE FROM recordings WHERE created_at < now() - make_interval(days => $1)`, days)
+	if err != nil {
+		return 0, fmt.Errorf("purge recording rows: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// DeleteSetting removes a settings key (idempotent).
+func (p *PG) DeleteSetting(ctx context.Context, key string) error {
+	_, err := p.pool.Exec(ctx, `DELETE FROM settings WHERE key = $1`, key)
+	if err != nil {
+		return fmt.Errorf("delete setting %s: %w", key, err)
+	}
+	return nil
+}
