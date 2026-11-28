@@ -36,6 +36,12 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 	if req.RateGroup == "" {
 		req.RateGroup = "demo"
 	}
+	if s.pg != nil {
+		if ok, verr := s.pg.RateGroupExists(r.Context(), req.RateGroup); verr == nil && !ok {
+			httpErrorC(w, 400, "BAD_REQUEST", "unknown rate group "+req.RateGroup)
+			return
+		}
+	}
 	if req.ParentID == "" {
 		if s.pg != nil {
 			req.ParentID = "00000000-0000-0000-0000-0000000000a2" // seeded agent1
@@ -365,6 +371,12 @@ func (s *Server) handleAccountPatch(w http.ResponseWriter, r *http.Request) {
 		if *req.RateGroup == "" {
 			httpErrorC(w, 400, "BAD_REQUEST", "rate_group must be non-empty")
 			return
+		}
+		if s.pg != nil {
+			if ok, verr := s.pg.RateGroupExists(r.Context(), *req.RateGroup); verr == nil && !ok {
+				httpErrorC(w, 400, "BAD_REQUEST", "unknown rate group "+*req.RateGroup)
+				return
+			}
 		}
 		acc.RateGroup = *req.RateGroup
 	}

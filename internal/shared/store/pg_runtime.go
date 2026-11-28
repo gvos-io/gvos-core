@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
+	"github.com/gvos-io/gvos-core/internal/billingdomain/rate"
 	"github.com/gvos-io/gvos-core/internal/callcore"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/axb"
 	"github.com/gvos-io/gvos-core/internal/shared/acl"
@@ -884,4 +885,180 @@ func textOrNull(s string) any {
 		return nil
 	}
 	return s
+}
+
+// --- Rate groups (per-account pricing runtime) ----------------------
+
+// RateGroupRow is one group with its live-rate count.
+type RateGroupRow struct {
+	Name      string `json:"name"`
+	LiveRates int    `json:"live_rates"`
+}
+
+// ListRateGroups reads the groups with live rate counts.
+func (p *PG) ListRateGroups(ctx context.Context) ([]RateGroupRow, error) {
+	rows, err := p.pool.Query(ctx, `
+        SELECT g.name, count(r.id)
+        FROM rate_groups g
+        LEFT JOIN rates r ON r.group_id = g.id AND r.ended_at IS NULL
+        GROUP BY g.name ORDER BY g.name`)
+	if err != nil {
+		return nil, fmt.Errorf("list rate groups: %w", err)
+	}
+	defer rows.Close()
+	var out []RateGroupRow
+	for rows.Next() {
+		var g RateGroupRow
+		if err := rows.Scan(&g.Name, &g.LiveRates); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// CreateRateGroup inserts a group (idempotent on the UNIQUE name).
+func (p *PG) CreateRateGroup(ctx context.Context, name string) error {
+	_, err := p.pool.Exec(ctx, `
+        INSERT INTO rate_groups (tenant_id, name)
+        VALUES ('00000000-0000-0000-0000-000000000001', $1)
+        ON CONFLICT (tenant_id, name) DO NOTHING`, name)
+	if err != nil {
+		return fmt.Errorf("create rate group: %w", err)
+	}
+	return nil
+}
+
+// DeleteRateGroup removes an empty group; rows affected 0 means it is
+// gone already or still carries live rates (caller translates).
+func (p *PG) DeleteRateGroup(ctx context.Context, name string) (int, error) {
+	tag, err := p.pool.Exec(ctx, `
+        DELETE FROM rate_groups g
+        WHERE g.name = $1
+          AND NOT EXISTS (SELECT 1 FROM rates r WHERE r.group_id = g.id AND r.ended_at IS NULL)`, name)
+	if err != nil {
+		return 0, fmt.Errorf("delete rate group: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// RateGroupExists reports whether the group name is defined.
+func (p *PG) RateGroupExists(ctx context.Context, name string) (bool, error) {
+	var ok bool
+	err := p.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM rate_groups WHERE name = $1)`, name).Scan(&ok)
+	return ok, err
+}
+
+// LoadRateGroups reads every group's live rows grouped by name — the
+// per-account pricing runtime builds one rate.Table per group from
+// this (accounts price against their own rate_group, falling back to
+// the default "demo" table).
+func (p *PG) LoadRateGroups(ctx context.Context) (map[string][]rate.Rate, error) {
+	rows, err := p.pool.Query(ctx, `
+        SELECT g.name, r.prefix, r.price, r.init_dur, coalesce(r.init_price, 0),
+               r.step_dur, r.min_dur, coalesce(r.days, '{}'::smallint[]),
+               to_char(r.win_start, 'HH24:MI'), to_char(r.win_end, 'HH24:MI')
+        FROM rates r
+        JOIN rate_groups g ON g.id = r.group_id
+        WHERE r.ended_at IS NULL
+        ORDER BY g.name, r.effective_at`)
+	if err != nil {
+		return nil, fmt.Errorf("load rate groups: %w", err)
+	}
+	defer rows.Close()
+	out := map[string][]rate.Rate{}
+	for rows.Next() {
+		var (
+			group            string
+			prefix           string
+			price, initPrice string
+			initDur, stepDur int
+			minDur           int
+			days             []int16
+			winStart, winEnd *string
+		)
+		if err := rows.Scan(&group, &prefix, &price, &initDur, &initPrice, &stepDur, &minDur, &days, &winStart, &winEnd); err != nil {
+			return nil, err
+		}
+		priceAmt, err := money.FromDecimal(price)
+		if err != nil {
+			return nil, fmt.Errorf("rate %s/%s price %q: %w", group, prefix, price, err)
+		}
+		initAmt, err := money.FromDecimal(initPrice)
+		if err != nil {
+			return nil, fmt.Errorf("rate %s/%s init_price %q: %w", group, prefix, initPrice, err)
+		}
+		r := rate.Rate{
+			Prefix: prefix, Price: priceAmt,
+			InitDur: initDur, InitRate: initAmt,
+			StepDur: stepDur, MinDur: minDur,
+		}
+		if winStart != nil && winEnd != nil && *winStart != "" && *winEnd != "" {
+			iv := rate.Interval{Start: *winStart, End: *winEnd}
+			for _, d := range days {
+				iv.Days = append(iv.Days, int(d))
+			}
+			r.Effective = []rate.Interval{iv}
+		}
+		out[group] = append(out[group], r)
+	}
+	return out, rows.Err()
+}
+
+// EndRateRowsInGroup retires a prefix within one group (the
+// group-scoped form of EndRateRows).
+func (p *PG) EndRateRowsInGroup(ctx context.Context, group, prefix string) (int, error) {
+	tag, err := p.pool.Exec(ctx, `
+        UPDATE rates SET ended_at = now()
+        WHERE prefix = $1 AND ended_at IS NULL
+          AND group_id = (SELECT id FROM rate_groups WHERE name = $2)`, prefix, group)
+	if err != nil {
+		return 0, fmt.Errorf("end rates in group: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// QueryDailyRange reads rollup rows across a day range (inclusive).
+func (p *PG) QueryDailyRange(ctx context.Context, fromDay, toDay, accountID string) ([]DailyReportRow, error) {
+	rows, err := p.pool.Query(ctx, `
+        SELECT day::text, account_id::text, calls, answered, duration, billed_secs, cost
+        FROM usage_daily
+        WHERE day >= $1::date AND day <= $2::date
+          AND ($3 = '' OR account_id::text = $3)
+        ORDER BY day DESC, cost DESC
+        LIMIT 5000`, fromDay, toDay, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("query daily range: %w", err)
+	}
+	defer rows.Close()
+	var out []DailyReportRow
+	for rows.Next() {
+		var r DailyReportRow
+		if err := rows.Scan(&r.Day, &r.AccountID, &r.Calls, &r.Answered, &r.Duration, &r.BilledSecs, &r.Cost); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// TestExecSQL runs raw SQL for throwaway-schema test cleanup (the
+// Test* prefix marks it: never call from product code).
+func (p *PG) TestExecSQL(ctx context.Context, stmt string) error {
+	_, err := p.pool.Exec(ctx, stmt)
+	return err
+}
+
+// ResolveRateGroup maps a group name to its id (UpsertRate keys on
+// the id; the admin faces speak names).
+func (p *PG) ResolveRateGroup(ctx context.Context, name string) (string, bool, error) {
+	var id string
+	err := p.pool.QueryRow(ctx, `SELECT id::text FROM rate_groups WHERE name = $1`, name).Scan(&id)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("resolve rate group: %w", err)
+	}
+	return id, true, nil
 }

@@ -4,6 +4,14 @@ All notable changes to gvos-core follow this file. Format: Keep a Changelog; ver
 
 ## [Unreleased]
 
+### Added — per-account pricing (rate groups end-to-end, 2026-11-28)
+- **rate_group is no longer decorative**: accounts price calls against their own rate group, falling back to the default demo table. Before this, every account priced from the single demo table regardless of the rate_group column — per-account pricing existed in schema only. Admission (signaling + origination faces) picks the account's table; rebuildRates rebuilds all groups.
+- Rate group CRUD: `GET/POST /v1/admin/rate-groups`, `DELETE /{name}` (refused 409 while live rates or account references remain; the demo group is protected as the pricing fallback); memory mode keeps its single implicit demo group (create answers 503 with the reason, like audit/ledger).
+- `PUT /v1/admin/rates` takes an optional `group` (validated — unknown groups 400, the name/id split through ResolveRateGroup); `GET /v1/admin/rates` optionally filters by group and every row now carries its group name; `DELETE .../{prefix}` optionally scopes to a group.
+- Account create/PATCH validate rate_group against the group table (400 on unknown — previously a typo silently priced from demo).
+- **Rate quote**: `POST /v1/admin/rates/quote {dest, seconds, account_id?|group?}` — the list-price estimate with the per-minute/init/step breakdown (package allowance applies only at settlement, stated in the spec).
+- Reports: `GET /v1/admin/reports?from=&to=` range reads across usage_daily (the single-day form stays).
+
 ### Added — M11 F1 origination core (click-to-call / AI outbound, 2026-11-28)
 - **Customer origination face** (`POST/GET/DELETE /v1/calls`, API-key auth — the internal token is deliberately rejected): `POST` admits (blacklist both parties, rate presence, fraud engine, 60s-basis balance precheck, 5s same-pair anti-storm) then persists a pending row (migration 015 `calls`) and publishes `gvos.call.originate` for the outboard UAC dialer, which issues the INVITE with call_id = calls.id; 202 + call_id, lifecycle strictly asynchronous.
 - **State machine driven by the existing signaling flow**: the UAC's INVITE lands as a normal /v1/call/start (advanceOrigination hooks on start/answer/end — originated calls only, terminal-guard idempotent); pending → dialing → answered → ended (release reason preserved); DELETE cancels (answered calls also get the teardown dispatch). The full billing lock/settle still rides the normal path — the calls row never bills.

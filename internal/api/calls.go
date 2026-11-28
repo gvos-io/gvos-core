@@ -170,6 +170,9 @@ func (s *Server) handleCallCreate(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	s.cfgMu.RLock()
 	rates := s.rates
+	if tbl := s.rateTables[acc.RateGroup]; tbl != nil {
+		rates = tbl
+	}
 	s.cfgMu.RUnlock()
 	entry := rates.Lookup(req.Caller, int(now.Weekday()), now.Hour()*60+now.Minute())
 	if entry == nil {

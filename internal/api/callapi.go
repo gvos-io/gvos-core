@@ -143,6 +143,13 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	now := time.Now()
 	s.cfgMu.RLock()
 	rates := s.rates
+	if acc, aerr := s.store.Get(accID); aerr == nil && s.rateTables != nil {
+		// Per-account pricing: the account's own rate group, falling
+		// back to the default table (rate_group used to be decorative).
+		if tbl := s.rateTables[acc.RateGroup]; tbl != nil {
+			rates = tbl
+		}
+	}
 	s.cfgMu.RUnlock()
 	rateDest := actualDest
 	if req.Direction == "inbound" {

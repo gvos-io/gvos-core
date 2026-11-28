@@ -200,8 +200,8 @@
 | 域 | 项 |
 |---|---|
 | 战略 | M11 **F1 core 侧已交付**（/v1/calls + originate 指令 + 状态机 + call.state；UAC 拨号器二进制待实施）；F2/F3 未开工；账户 disable（需 schema+准入加 enabled 标志）；在线网关熔断+解锁（先立项熔断设计） |
-| 资源缺口 | 费率组管理（全部锁死 demo 组）；租户 CRUD；路由规则 API（routes/route_legs 零引用，用或删）+ dispatcher 处置；settings 通用 KV |
-| 能力缺口 | 路由预览 / 费率试算 / 账户树 / 实时并发 / 风控计数器 / 媒体流统计；VOS CSV 导入 API；录音删除+retention；webhook 重试策略可配+deliveries 清理；黑名单源增删；报表时间范围查询；OIDC/SSO（P3） |
+| 资源缺口 | ~~费率组管理~~ ✅ 已交付（多组计费运行时 + CRUD + quote，2026-11-28）；租户 CRUD；路由规则 API（routes/route_legs 零引用，用或删）+ dispatcher 处置；settings 通用 KV |
+| 能力缺口 | 路由预览 / ~~费率试算~~ ✅ / 账户树 / 实时并发 / 风控计数器 / 媒体流统计；VOS CSV 导入 API；录音删除+retention；webhook 重试策略可配+~~deliveries 清理~~ ✅（包 2）；黑名单源增删；~~报表时间范围查询~~ ✅；OIDC/SSO（P3） |
 
 ### 功能/工程缺失
 - ~~契约漂移~~ ✅ 包 1 已交付（2026-11-28，f78eb5d）：spec 51 路径 + 参数 schema + 事件枚举 + spec→路由一致性回归测试

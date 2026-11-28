@@ -69,6 +69,7 @@ type Server struct {
 	whMemSubs      []webhook.Subscription    // memory-mode subscriptions (whStore==nil); cfgMu-guarded
 	gwMu           sync.Mutex                // serializes gateway full-set read-modify-write
 	tenantSetCache map[string]tenantSetEntry // tenant→account-set cache (5s TTL)
+	rateTables     map[string]*rate.Table    // per-group pricing (demo fallback; accounts price against their own rate_group)
 	origMu         sync.RWMutex              // origination resource state (below)
 	origCalls      map[string]*store.CallRow // memory-mode origination rows
 	origIndex      map[string]bool           // live originated call ids (event hooks)
@@ -200,21 +201,31 @@ func (r *lcrRater) BestRate(group, dest string) *money.Amount {
 // rebuildRates recomputes the lookup table. PG mode reloads from the
 // database (authoritative); memory mode rebuilds from rateList.
 func (s *Server) rebuildRates() {
-	var tbl *rate.Table
 	if s.pg != nil {
 		ctx, cancel := contextWithTimeoutDuration(context.Background(), 5*time.Second)
 		defer cancel()
-		if loaded, err := s.pg.LoadRates(ctx, "demo"); err == nil {
-			tbl = loaded
+		if groups, err := s.pg.LoadRateGroups(ctx); err == nil {
+			rows, rerr := s.pg.LoadRateRows(ctx, "demo")
+			if rerr == nil && len(rows) > 0 {
+				groups["demo"] = rows
+			}
+			tables := map[string]*rate.Table{}
+			for g, list := range groups {
+				tables[g] = rate.NewTable(list)
+			}
+			s.cfgMu.Lock()
+			defer s.cfgMu.Unlock()
+			s.rateTables = tables
+			if tbl, ok := tables["demo"]; ok {
+				s.rates = tbl
+			}
+			return
 		}
 	}
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
-	if tbl != nil {
-		s.rates = tbl
-		return
-	}
-	// DB reload failed (or memory mode): rebuild from the in-memory list.
+	// DB reload failed (or memory mode): rebuild the demo table from
+	// the in-memory list.
 	s.rates = rate.NewTable(s.rateList)
 }
 
@@ -274,9 +285,25 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 		pg.Close()
 		return nil, err
 	}
+	// Per-group pricing: accounts price against their own rate_group,
+	// falling back to the demo table (before this, rate_group was
+	// decorative — every account priced from the single demo table).
+	groups, gerr := pg.LoadRateGroups(ctx)
+	if gerr != nil {
+		pg.Close()
+		return nil, gerr
+	}
+	if _, ok := groups["demo"]; !ok {
+		groups["demo"] = rows
+	}
+	tables := map[string]*rate.Table{}
+	for g, list := range groups {
+		tables[g] = rate.NewTable(list)
+	}
 	s.cfgMu.Lock()
 	s.rateList = rows
-	s.rates = rate.NewTable(rows)
+	s.rates = tables["demo"]
+	s.rateTables = tables
 	s.cfgMu.Unlock()
 	if n, err := pg.LoadBlocklist(ctx, s.blocklist); err != nil {
 		log.Printf("blocklist load failed: %v", err)
@@ -739,6 +766,10 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("GET /v1/admin/rates", s.handleRateList)
 	mux.HandleFunc("PUT /v1/admin/rates", s.handleRateUpsert)
 	mux.HandleFunc("DELETE /v1/admin/rates/{prefix}", s.handleRateDelete)
+	mux.HandleFunc("GET /v1/admin/rate-groups", s.handleRateGroupList)
+	mux.HandleFunc("POST /v1/admin/rate-groups", s.handleRateGroupCreate)
+	mux.HandleFunc("DELETE /v1/admin/rate-groups/{name}", s.handleRateGroupDelete)
+	mux.HandleFunc("POST /v1/admin/rates/quote", s.handleRateQuote)
 	mux.HandleFunc("GET /v1/admin/risk-rules", s.handleRiskRules)
 	mux.HandleFunc("PUT /v1/admin/risk-rules", s.handleRiskRules)
 	mux.HandleFunc("GET /v1/admin/gateways", s.handleGatewayList)
