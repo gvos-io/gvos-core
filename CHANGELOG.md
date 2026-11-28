@@ -4,6 +4,10 @@ All notable changes to gvos-core follow this file. Format: Keep a Changelog; ver
 
 ## [Unreleased]
 
+### Added — Go SDK surface + MCP design (Phase E, 2026-11-28)
+- **sdk (Go) grown from the 4-method tenant stub to the real surface**: typed error envelope (`*APIError` with the stable codes + `IsCode`), all verbs via one `do`, tenant write plane (`ProvisionChild` with the one-time SIP credential, `Allocate` transfer), origination (`Originate` with Idempotency-Key, `CallStatus`, `CancelCall`), and a generic `Pager[T]` cursor walker for every list face. E2e-tested against a real in-process server (provision→allocate→originate→status→cancel→error-envelope round trip, incl. the INVALID_STATE 409).
+- `docs/mcp-interface-design.md`: MCP face for AI agents — 8-tool first batch (read-heavy + originate/cancel with forced idempotency keys), independent `gvos-mcp` process (SSE + stdio), auth passes through to the existing ACL (zero new auth model), schemas generated from the openapi registry, money-touching tools deferred behind a confirmation-flow design. Slices MCP-1/2/3.
+
 ### Added — account disable (M6 remainder, 2026-11-28)
 - `PATCH /v1/admin/accounts/{id} {enabled: false}`: admission (call start + origination) rejects disabled accounts with **403 DISABLED** — the row, balance and ledger stay untouched, re-enable is instant. Migration 017 adds the `enabled` column (default true, partial index on disabled). The bus snapshot carries the flag so replicas enforce it too. Memory-mode constructors (admin create, tenant provisioning, demo seed, test fixtures) default true.
 
