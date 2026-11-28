@@ -12,7 +12,7 @@ gvos-core 提供 Admin/Tenant HTTP 与运行时权威数据。人机 Web（运�
 1. **人机产品名与实现仓**：`gvos-console`；本仓管理 HTTP 继续称为 **Admin API**（`/v1/admin/*`），不要与 Console 产品名混用。
 2. **运行时权威留在本仓**（账户/费率/网关/CDR/风控/套餐/DID/Webhook/API Key 等）；console 仅经 HTTP/NATS 消费，禁止以 console 库为账务/路由权威。
 3. **人账号、RBAC、console 操作审计、导出任务元数据** 不进本仓业务库；细节与灰区裁决以 console ADR-0002 为准。
-4. `internal/api/ui.go` 等内嵌页仅作 spike，**不当产品 UI 规范**；新能力先暴露 OpenAPI，再由 console 做代理 UI。
+4. `internal/api/ui.go` 等内嵌页仅作 spike，**不当产品 UI 规范**；新能力先暴露 OpenAPI，再由 console 做代理 UI。（2026-11-28 更新：spike 页已删除，core 不再内嵌任何 HTML 页面，`/ui` 路由移除。）
 
 ## 后果
 

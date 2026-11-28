@@ -62,7 +62,7 @@
 
 ```bash
 # 一键演示：compose 拉起 gv-core + Kamailio + RTPengine + PostgreSQL + NATS，
-# SIPp 打一通真实计费电话。人机 UI 请用 gvos-console（/ui 为 DEPRECATED spike）
+# SIPp 打一通真实计费电话。人机 UI 请用 gvos-console（core 不内嵌 UI）
 bash scripts/demo-up.sh
 
 # 或仅起控制面（无 Docker，纯内存演示模式）

@@ -19,7 +19,7 @@
 ```
 ┌────────────── 管理面(自研,⚠️ 未成契约) ──────────────┐
 │  Admin/Tenant API(gvos-core :8080) · 人机 UI → gvos-console│
-│  /ui 内嵌页 = DEPRECATED spike（ADR-0006）               │
+│  (core 不再内嵌任何页面;/ui spike 已移除,ADR-0006)        │
 │  🎯 OpenAPI 3.1 + Webhook 引擎(api-roadmap Phase E/D)   │
 └──────────────────────┬──────────────────────────┘
 ┌────────────── 控制平面(自研 Go,✅) ───────────────────┐
