@@ -155,3 +155,46 @@ func (s *Store) List() []Binding {
 func (s *Store) Count() int {
 	return len(s.List())
 }
+
+// Restore replaces the in-memory set with a durable snapshot (boot
+// load from PG migration 010 / cfg.reload "axb" apply on peer
+// replicas — replace, not merge, mirroring did.Store.Reload).
+// Bindings whose id is empty (pre-ref rows written before migration
+// 014) are skipped: without an id they would collide in byID and
+// cannot be revoked by id anyway; they expire naturally. The serial
+// moves past restored "axb-N" ids so new allocations cannot collide.
+func (s *Store) Restore(list []Binding) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.byX = make(map[string]*Binding, len(list))
+	s.byID = make(map[string]*Binding, len(list))
+	for i := range list {
+		bd := list[i]
+		if bd.ID == "" {
+			continue
+		}
+		s.byX[bd.XNumber] = &bd
+		s.byID[bd.ID] = &bd
+		var n int
+		if _, err := fmt.Sscanf(bd.ID, "axb-%d", &n); err == nil && n > int(s.serial) {
+			s.serial = int64(n)
+		}
+	}
+}
+
+// Sweep drops inactive/expired bindings from the maps (Resolve only
+// deactivates lazily, so dead entries would otherwise accumulate for
+// the life of the process). Returns the number removed.
+func (s *Store) Sweep() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	for x, bd := range s.byX {
+		if !bd.Active || !time.Now().Before(bd.ExpireAt) {
+			delete(s.byX, x)
+			delete(s.byID, bd.ID)
+			removed++
+		}
+	}
+	return removed
+}

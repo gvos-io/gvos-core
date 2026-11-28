@@ -135,3 +135,20 @@ func (s *Store) List() []Key {
 	}
 	return out
 }
+
+// Reset replaces the registry with a durable snapshot (boot load and
+// the cfg.reload "keys" apply on peer replicas — replace, not merge).
+// Keys already in memory keep their LastUsed observation.
+func (s *Store) Reset(keys []Key) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev := s.keys
+	s.keys = make(map[string]*Key, len(keys))
+	for i := range keys {
+		k := keys[i]
+		if old, ok := prev[k.Hash]; ok && old.LastUsed != nil {
+			k.LastUsed = old.LastUsed
+		}
+		s.keys[k.Hash] = &k
+	}
+}

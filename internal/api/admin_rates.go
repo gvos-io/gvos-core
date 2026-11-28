@@ -103,3 +103,46 @@ func (s *Server) handleRateList(w http.ResponseWriter, r *http.Request) {
 // consumers see one uniform feed.
 
 const demoRateGroup = "00000000-0000-0000-0000-000000000010"
+
+// DELETE /v1/admin/rates/{prefix}: retire the rate (PG rows keep
+// history via ended_at; the memory list drops it). Broadcast entity=rate
+// — peers rebuild from PG (authoritative) or their own list (memory
+// mode, single-process demo).
+func (s *Server) handleRateDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	prefix := r.PathValue("prefix")
+	if s.pg != nil {
+		tag, err := s.pg.EndRateRows(r.Context(), prefix)
+		if err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		if tag == 0 {
+			httpErrorC(w, 404, "NOT_FOUND", "no live rate for prefix "+prefix)
+			return
+		}
+	} else {
+		s.cfgMu.Lock()
+		kept := s.rateList[:0]
+		found := false
+		for _, rr := range s.rateList {
+			if rr.Prefix == prefix {
+				found = true
+				continue
+			}
+			kept = append(kept, rr)
+		}
+		s.rateList = kept
+		s.rates = rate.NewTable(s.rateList)
+		s.cfgMu.Unlock()
+		if !found {
+			httpErrorC(w, 404, "NOT_FOUND", "no live rate for prefix "+prefix)
+			return
+		}
+	}
+	s.audit(r, "delete", "rate", prefix, nil, nil)
+	s.emit(events.SubjectCfgReload, map[string]any{"entity": "rate"})
+	writeJSON(w, 200, map[string]any{"deleted": prefix})
+}

@@ -1,8 +1,12 @@
 // API-key administration (Phase B): create/revoke keys, bootstrap
-// the first admin key from GVOS_ADMIN_TOKEN at startup.
+// the first admin key from GVOS_ADMIN_TOKEN at startup. PG mode
+// writes through (migration 014) — before this, keys lived only in
+// RAM: a restart invalidated every issued key and replicas disagreed
+// about auth. Peers converge via cfg.reload "keys" (re-pull from PG).
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -10,7 +14,14 @@ import (
 	"time"
 
 	"github.com/gvos-io/gvos-core/internal/shared/acl"
+	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
+
+// emitKeysRefresh tells peer replicas to re-pull the api_keys table.
+// No key material rides the bus.
+func (s *Server) emitKeysRefresh() {
+	s.emit(events.SubjectCfgReload, map[string]any{"entity": "keys"})
+}
 
 // handleKeyCreate serves POST /v1/admin/keys {"role","tenant_id"}.
 // The plaintext is returned exactly once and never stored.
@@ -38,10 +49,20 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		tenant = whoAmI(r).TenantID // inherit the creator's tenant
 	}
 	pt, prefix, hash := acl.GenerateKey(role)
-	s.acl.Add(acl.Key{
+	key := acl.Key{
 		ID: prefix, TenantID: tenant, Role: role, Prefix: prefix,
 		Hash: hash, CreatedBy: whoAmI(r).Prefix,
-	})
+	}
+	// Durable first (nothing to undo on failure — the key never
+	// existed for the caller), then the in-memory hot path.
+	if s.pg != nil {
+		if err := s.pg.CreateAPIKey(r.Context(), key); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+	}
+	s.acl.Add(key)
+	s.emitKeysRefresh()
 	s.audit(r, "create", "api_key", prefix, nil, map[string]any{"role": role, "tenant_id": tenant})
 	writeJSON(w, 201, map[string]any{
 		"key":    pt, // one-time display
@@ -63,19 +84,32 @@ func (s *Server) handleKeyList(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, row)
 	}
-	writeJSON(w, 200, map[string]any{"keys": out, "count": len(out)})
+	writeJSON(w, 200, map[string]any{"keys": out, "items": out, "count": len(out)})
 }
 
-// handleKeyRevoke serves DELETE /v1/admin/keys/{prefix}.
+// handleKeyRevoke serves DELETE /v1/admin/keys/{prefix}. PG first: a
+// revoke that only flipped memory would resurrect on restart — worse
+// than a 500.
 func (s *Server) handleKeyRevoke(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
 	prefix := r.PathValue("prefix")
-	if n := s.acl.Revoke(prefix); n == 0 {
-		httpErrorC(w, 404, "NOT_FOUND", "no live key with prefix "+prefix)
-		return
+	if s.pg != nil {
+		if n, err := s.pg.RevokeAPIKeyByPrefix(r.Context(), prefix); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		} else if n == 0 {
+			httpErrorC(w, 404, "NOT_FOUND", "no live key with prefix "+prefix)
+			return
+		}
 	}
+	if n := s.acl.Revoke(prefix); n == 0 {
+		// PG had it, memory diverged — keep going, the reload below
+		// also fixes memory; do not fail the revoke.
+		log.Printf("api key revoke: prefix %s live in PG but not in memory", prefix)
+	}
+	s.emitKeysRefresh()
 	s.audit(r, "revoke", "api_key", prefix, nil, nil)
 	writeJSON(w, 200, map[string]any{"revoked": prefix})
 }
@@ -84,7 +118,8 @@ func (s *Server) handleKeyRevoke(w http.ResponseWriter, r *http.Request) {
 // exists. GVOS_ADMIN_TOKEN (when set) becomes the key material so
 // scripted deployments are deterministic: the env value must already
 // be a full gvos_admin_<hex> key. Without it, a fresh key is
-// generated and printed once.
+// generated and printed once. PG mode persists it — otherwise every
+// boot would mint a different key from an empty table.
 func BootstrapKey(s *Server) {
 	if s.acl == nil || s.acl.Count() > 0 {
 		return
@@ -98,10 +133,16 @@ func BootstrapKey(s *Server) {
 		pt, prefix, hash = acl.GenerateKey(acl.RoleAdmin)
 		log.Printf("BOOTSTRAP admin API key (one-time, store now): %s", pt)
 	}
-	s.acl.Add(acl.Key{
+	key := acl.Key{
 		ID: prefix, TenantID: demoTenant, Role: acl.RoleAdmin, Prefix: prefix,
 		Hash: hash, CreatedBy: "bootstrap",
-	})
+	}
+	if s.pg != nil {
+		if err := s.pg.CreateAPIKey(context.Background(), key); err != nil {
+			log.Printf("BOOTSTRAP api key persist failed: %v (memory-only; the next boot mints another)", err)
+		}
+	}
+	s.acl.Add(key)
 }
 
 // routeKeysLegacy stub for /v1/admin/keys verb routes (not previously

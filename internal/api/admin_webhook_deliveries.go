@@ -30,8 +30,12 @@ func (s *Server) handleWebhookDeliveries(w http.ResponseWriter, r *http.Request)
 	}
 	subID := r.PathValue("id")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	rows, err := s.pg.ListWebhookDeliveries(r.Context(), subID, limit)
+	rows, next, err := s.pg.ListWebhookDeliveries(r.Context(), subID, limit, r.URL.Query().Get("cursor"))
 	if err != nil {
+		if len(err.Error()) > 9 && err.Error()[:9] == "bad cursor" {
+			httpErrorC(w, 400, "BAD_CURSOR", err.Error())
+			return
+		}
 		httpError(w, 500, err.Error())
 		return
 	}
@@ -44,7 +48,7 @@ func (s *Server) handleWebhookDeliveries(w http.ResponseWriter, r *http.Request)
 			// payload omitted from list (can be large); fetch via replay path
 		})
 	}
-	writeJSON(w, 200, map[string]any{"items": out, "deliveries": out, "count": len(out)})
+	writeJSON(w, 200, map[string]any{"items": out, "deliveries": out, "count": len(out), "next_cursor": next})
 }
 
 const timeRFC3339 = "2006-01-02T15:04:05Z07:00"

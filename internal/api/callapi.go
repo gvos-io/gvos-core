@@ -160,6 +160,11 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 		s.emit(events.SubjectRiskBlocked, map[string]string{
 			"account_id": accID, "dest": actualDest, "rule_id": h.RuleID, "reason": h.Reason,
 		})
+		username := req.From
+		if a, gerr := s.store.Get(accID); gerr == nil {
+			username = a.Username
+		}
+		s.publishRiskBlocked(accID, username, actualDest, h.RuleID, h.Reason)
 		return 403, map[string]errorEnvelope{"error": {Code: "FORBIDDEN", Message: "risk-blocked [" + h.RuleID + "]: " + h.Reason}}
 	} else if h.Alerted {
 		log.Printf("RISK-ALERT account=%s rule=%s: %s", accID, h.RuleID, h.Reason)
@@ -337,12 +342,16 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 	// gap so Redis/memory authority matches the CDR/ledger amount.
 	listCost := cdr.Cost
 	pr := s.pkg.Apply(cdr.AccountID, cdr.BilledSecs, cdr.Cost)
-	if pr.FreeSecs == 0 && pr.BillableSecs == 0 && cdr.BilledSecs > 0 {
-		// Contract event (Phase D): the free allowance and the paid
-		// tier both drained — the package is exhausted for this cycle.
+	if pr.ExhaustedNow {
+		// The allowance crossed its cap on this call. (The old
+		// FreeSecs==0 && BillableSecs==0 test fired on unrelated
+		// no-charge shapes; ExhaustedNow is the crossing itself.)
 		s.emit(events.SubjectPackageExhausted, map[string]string{
 			"account_id": cdr.AccountID, "call_id": cdr.CallID,
 		})
+		if pkg, ok := s.pkg.PackageOf(cdr.AccountID); ok {
+			s.publishPackageExhausted(cdr.AccountID, pkg.ID, pkg.FreeMinutes)
+		}
 	}
 	if pr.BillableSecs < float64(cdr.BilledSecs) || pr.Discount != 1 {
 		if float64(cdr.BilledSecs) > 0 {
@@ -363,6 +372,9 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 	// with the actual CDR cost (EstCost is the same 60s lock basis
 	// reserved at CheckCall/Start).
 	s.risk.SettleCost(cdr.AccountID, cdr.EstCost, cdr.Cost)
+	// Low-balance watch (best-effort, deduped): settlement is where
+	// balances dip below thresholds.
+	s.publishLowBalance(cdr.AccountID)
 	// Media plane: close the call's stream (subscribers drop, final
 	// stats reported for the RTT budget audit).
 	if st, ok := s.media.Close(req.CallID); ok && st.UplinkChunks+st.DownlinkChunks > 0 {

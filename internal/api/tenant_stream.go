@@ -39,13 +39,6 @@ func contractCDRData(c *callcore.CDR) webhook.CDRCompletedData {
 	}
 }
 
-// publishContract fans one internal event out to the customer
-// webhook plane as a contract envelope (api-conventions §Webhook).
-// Internal subjects map to contract events by stripping the gvos.
-// prefix; the payload is always the typed projection.
-func (s *Server) publishContract(subject string, tenant string, data webhook.CDRCompletedData) {
-}
-
 // handleTenantCDRStream upgrades to WebSocket and streams the
 // tenant's CDR events in real time (api-roadmap Phase D §4). Every
 // frame is one contract envelope (cdr.completed). Frames for other

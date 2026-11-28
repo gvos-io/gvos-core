@@ -102,7 +102,7 @@ func (s *Server) handleReports(w http.ResponseWriter, r *http.Request) {
 				httpError(w, 500, err.Error())
 				return
 			}
-			writeJSON(w, 200, map[string]any{"view": "gateway", "rows": rows, "count": len(rows)})
+			writeJSON(w, 200, map[string]any{"view": "gateway", "rows": rows, "items": rows, "count": len(rows)})
 			return
 		}
 		rows, err := s.pg.QueryDaily(ctx, day, account)
@@ -110,7 +110,7 @@ func (s *Server) handleReports(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 500, err.Error())
 			return
 		}
-		writeJSON(w, 200, map[string]any{"view": "daily", "rows": rows, "count": len(rows)})
+		writeJSON(w, 200, map[string]any{"view": "daily", "rows": rows, "items": rows, "count": len(rows)})
 	default:
 		httpError(w, 405, "GET or POST")
 	}
@@ -154,14 +154,14 @@ func (s *Server) handleReportViews(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 500, err.Error())
 			return
 		}
-		writeJSON(w, 200, map[string]any{"view": "blindzone", "rows": rows, "count": len(rows)})
+		writeJSON(w, 200, map[string]any{"view": "blindzone", "rows": rows, "items": rows, "count": len(rows)})
 	case "cross":
 		rows, err := s.pg.QueryCrossAnalysis(ctx, r.URL.Query().Get("day"))
 		if err != nil {
 			httpError(w, 500, err.Error())
 			return
 		}
-		writeJSON(w, 200, map[string]any{"view": "cross", "rows": rows, "count": len(rows)})
+		writeJSON(w, 200, map[string]any{"view": "cross", "rows": rows, "items": rows, "count": len(rows)})
 	default:
 		httpError(w, 400, "view must be blindzone|cross")
 	}
@@ -196,7 +196,7 @@ func (s *Server) handleReportList(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"day": day, "rows": rows})
+	writeJSON(w, 200, map[string]any{"day": day, "rows": rows, "items": rows})
 }
 
 // routeReportsLegacy: old verb route during the deprecation window.

@@ -67,7 +67,7 @@ const (
 //   - gvos.svc.* are request/reply service calls (call lifecycle
 //     mirroring the HTTP face, stats snapshot).
 const (
-	SubjectCfgReload = "gvos.cfg.reload" // payload entity: rate|blocklist|account|credit|recording|risk|ip_allowlist|package|gateway
+	SubjectCfgReload = "gvos.cfg.reload" // payload entity: rate|blocklist|account|credit|recording|risk|ip_allowlist|package|gateway|did|axb|keys
 )
 
 // Edge-alias subjects: the same events mirrored under dot-free names.

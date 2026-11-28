@@ -27,6 +27,7 @@ func (s *Server) handlePackages(w http.ResponseWriter, r *http.Request) {
 		Discount    float64 `json:"discount"`
 		MinSpend    float64 `json:"min_spend"`
 		Assign      string  `json:"assign_account"`
+		Unassign    string  `json:"unassign_account"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
 		httpError(w, 400, "id required")
@@ -72,6 +73,24 @@ func (s *Server) handlePackages(w http.ResponseWriter, r *http.Request) {
 		s.audit(r, "assign", "package", req.ID, nil, map[string]any{"account": assignID})
 		s.emit(events.SubjectCfgReload, map[string]any{"entity": "package", "op": "assign", "account": assignID, "package_id": req.ID})
 	}
+	if req.Unassign != "" {
+		// Same resolution rule as assign (SIP username or internal id).
+		unassignID := req.Unassign
+		if _, err := s.store.Get(unassignID); err != nil {
+			s.cfgMu.RLock()
+			id, ok := s.userIndex[unassignID]
+			s.cfgMu.RUnlock()
+			if ok {
+				unassignID = id
+			} else {
+				httpError(w, 400, "unassign_account not found: "+req.Unassign)
+				return
+			}
+		}
+		s.pkg.Unassign(unassignID)
+		s.audit(r, "unassign", "package", req.ID, nil, map[string]any{"account": unassignID})
+		s.emit(events.SubjectCfgReload, map[string]any{"entity": "package", "op": "unassign", "account": unassignID, "package_id": req.ID})
+	}
 	// One durability write covers both mutations (define+assign).
 	if s.pg != nil {
 		if err := s.pg.PutSetting(r.Context(), "packages", s.pkg.Snapshot()); err != nil {
@@ -89,6 +108,16 @@ func (s *Server) handlePackageUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	acc := r.URL.Query().Get("account")
+	// Accept the SIP username like every other account reference here.
+	if _, err := s.store.Get(acc); err != nil {
+		s.cfgMu.RLock()
+		if id, ok := s.userIndex[acc]; ok {
+			s.cfgMu.RUnlock()
+			acc = id
+		} else {
+			s.cfgMu.RUnlock()
+		}
+	}
 	free, spend, ok := s.pkg.Usage(acc)
 	short := s.pkg.MinSpendShortfall(acc)
 	writeJSON(w, 200, map[string]any{

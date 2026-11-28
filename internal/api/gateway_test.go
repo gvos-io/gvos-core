@@ -231,7 +231,10 @@ func TestGatewaySnapshot(t *testing.T) {
 		t.Fatalf("snapshot = %+v", body)
 	}
 	req2, _ := http.NewRequest("GET", srv.URL+"/v1/internal/gateway-snapshot", nil)
-	resp2, _ := srv.Client().Do(req2)
+	resp2, err := srv.Client().Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp2.Body.Close()
 	if resp2.StatusCode != 401 {
 		t.Fatalf("missing token status=%d", resp2.StatusCode)

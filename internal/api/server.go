@@ -40,41 +40,44 @@ import (
 )
 
 type Server struct {
-	store         *account.Store
-	rates         *rate.Table
-	rateList      []rate.Rate  // memory-mode source of truth for the table
-	cfgMu         sync.RWMutex // guards rates, rateList, userIndex
-	calls         *callcore.Manager
-	cdrs          []*callcore.CDR
-	cdrsMu        sync.Mutex           // guards cdrs (NATS responders append concurrently with HTTP reads)
-	pg            *store.PG            // nil in memory mode
-	userIndex     map[string]string    // SIP username -> account ID (PG mode)
-	recordEnabled bool                 // global recording opt-in (admin toggle)
-	blocklist     *blocklist.List      // number screening (black/white rules)
-	ipallow       *ipallow.List        // source-IP admission (default-deny)
-	risk          *riskctrl.Engine     // real-time fraud engine (freq/cost/prefix/reg_freq)
-	media         *mediastream.Manager // AI media plane (per-call bidirectional streams)
-	pkg           *pkgplan.Engine      // subscription packages (allowance/discount/min-spend)
-	gws           *gateway.List        // outbound gateway directory (API-authoritative)
-	regs          *regtable.Table      // SIP registration mirror (fed by gvos.reg.event)
-	axb           *axb.Store           // privacy-number bindings (AXB module)
-	dids          *did.Store           // inbound-DID registry (callee-billed, migration 013)
-	acl           *acl.Store           // API-key registry (Phase B; nil = keys off, legacy fallback)
-	idem          *idemStore           // Idempotency-Key registry for money routes
-	rds           *rds.Client          // Redis runtime-state authority (nil = off, memory authoritative)
-	recpipe       *recpipe.Uploader    // recording pipeline (nil = off)
-	recStore      recpipe.Storage      // archive backend (LocalFS or MinIO/S3)
-	whDispatch    *webhook.Dispatcher  // outbound webhook fan-out (nil = off)
-	whStore       WebhookStore         // subscription storage (nil = memory-local)
-	redisLocks    bool                 // single-runner locks active (rollup/rebroadcast dedup)
-	bal           *account.BalanceR    // redis balance face (nil = in-memory authority)
-	events        *events.Publisher    // NATS event bus (nil = publishing off)
-	webhookURL    string               // webhook dispatcher target ("" = off)
-	asyncCdr      bool                 // CDRW worker owns CDR persistence
-	asyncAudit    bool                 // AUDIT worker owns the audit trail
-	workers       []*events.Consumer   // running async workers (stopped at exit)
-	workerNames   []string             // surfaced in /v1/stats
-	startAt       time.Time
+	store          *account.Store
+	rates          *rate.Table
+	rateList       []rate.Rate  // memory-mode source of truth for the table
+	cfgMu          sync.RWMutex // guards rates, rateList, userIndex
+	calls          *callcore.Manager
+	cdrs           []*callcore.CDR
+	cdrsMu         sync.Mutex                // guards cdrs (NATS responders append concurrently with HTTP reads)
+	pg             *store.PG                 // nil in memory mode
+	userIndex      map[string]string         // SIP username -> account ID (PG mode)
+	recordEnabled  bool                      // global recording opt-in (admin toggle)
+	blocklist      *blocklist.List           // number screening (black/white rules)
+	ipallow        *ipallow.List             // source-IP admission (default-deny)
+	risk           *riskctrl.Engine          // real-time fraud engine (freq/cost/prefix/reg_freq)
+	media          *mediastream.Manager      // AI media plane (per-call bidirectional streams)
+	pkg            *pkgplan.Engine           // subscription packages (allowance/discount/min-spend)
+	gws            *gateway.List             // outbound gateway directory (API-authoritative)
+	regs           *regtable.Table           // SIP registration mirror (fed by gvos.reg.event)
+	axb            *axb.Store                // privacy-number bindings (AXB module)
+	dids           *did.Store                // inbound-DID registry (callee-billed, migration 013)
+	acl            *acl.Store                // API-key registry (Phase B; nil = keys off, legacy fallback)
+	idem           *idemStore                // Idempotency-Key registry for money routes
+	rds            *rds.Client               // Redis runtime-state authority (nil = off, memory authoritative)
+	recpipe        *recpipe.Uploader         // recording pipeline (nil = off)
+	recStore       recpipe.Storage           // archive backend (LocalFS or MinIO/S3)
+	whDispatch     *webhook.Dispatcher       // outbound webhook fan-out (nil = off)
+	whStore        WebhookStore              // subscription storage (nil = memory-local)
+	whMemSubs      []webhook.Subscription    // memory-mode subscriptions (whStore==nil); cfgMu-guarded
+	gwMu           sync.Mutex                // serializes gateway full-set read-modify-write
+	tenantSetCache map[string]tenantSetEntry // tenant→account-set cache (5s TTL)
+	redisLocks     bool                      // single-runner locks active (rollup/rebroadcast dedup)
+	bal            *account.BalanceR         // redis balance face (nil = in-memory authority)
+	events         *events.Publisher         // NATS event bus (nil = publishing off)
+	webhookURL     string                    // webhook dispatcher target ("" = off)
+	asyncCdr       bool                      // CDRW worker owns CDR persistence
+	asyncAudit     bool                      // AUDIT worker owns the audit trail
+	workers        []*events.Consumer        // running async workers (stopped at exit)
+	workerNames    []string                  // surfaced in /v1/stats
+	startAt        time.Time
 
 	// Tenant CDR stream taps (Phase D): per-connection subscribers of
 	// /v1/tenant/cdr-stream, fed from storeCdr. Non-blocking drops.
@@ -255,11 +258,20 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 		pg.Close()
 		return nil, err
 	}
-	s.rates, err = pg.LoadRates(ctx, "demo")
+	// Load the flat rate rows once and derive both the billing Table
+	// and the admin API list from them — otherwise GET /v1/admin/rates
+	// reads a nil rateList and reports an empty price book while the
+	// charger bills happily (and rebuildRates would rebuild from that
+	// empty list on a failed reload).
+	rows, err := pg.LoadRateRows(ctx, "demo")
 	if err != nil {
 		pg.Close()
 		return nil, err
 	}
+	s.cfgMu.Lock()
+	s.rateList = rows
+	s.rates = rate.NewTable(rows)
+	s.cfgMu.Unlock()
 	if n, err := pg.LoadBlocklist(ctx, s.blocklist); err != nil {
 		log.Printf("blocklist load failed: %v", err)
 	} else if n > 0 {
@@ -326,12 +338,37 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 			log.Printf("gateway table fallback load failed: %v", err)
 		}
 	}
+	// AXB bindings (migration 010 table): the memory store is the hot
+	// path; without this restore a restart dropped every binding and
+	// X-number dials 404'd until re-created.
+	if restored, err := pg.LoadAXBBindings(ctx); err != nil {
+		log.Printf("axb binding load failed: %v", err)
+	} else if len(restored) > 0 {
+		s.axb.Restore(restored)
+		log.Printf("restored %d AXB bindings", len(restored))
+	}
+	// API keys (migration 014): the table is the durable source; the
+	// hot auth path still reads the in-memory acl.Store (zero-IO
+	// Lookup), replicas converge via cfg.reload "keys".
+	if keys, err := pg.LoadAPIKeys(ctx); err != nil {
+		log.Printf("api key load failed: %v", err)
+	} else {
+		for _, k := range keys {
+			s.acl.Add(k)
+		}
+		if len(keys) > 0 {
+			log.Printf("loaded %d API keys", len(keys))
+		}
+	}
 	s.userIndex = map[string]string{}
 	for _, a := range mustList(s.store) {
 		s.userIndex[a.Username] = a.ID
 	}
 	log.Printf("loaded %d accounts from PostgreSQL", n)
 	s.startReportWorker()
+	// Hourly dead-row sweep: idempotency keys past the replay TTL and
+	// AXB bindings dead for over a day.
+	go pg.StartRuntimePurge(context.Background())
 	s.calls = s.newCallManager()
 	return s, nil
 }
@@ -543,8 +580,26 @@ func (s *Server) statsBody() map[string]any {
 	if s.rds != nil {
 		resp["redis"] = "on"
 	}
-	if bal, err := account.Balance(s.store, "1000"); err == nil {
-		resp["caller_bal"] = bal
+	// Resource counts for the ops dashboard (the old caller_bal field
+	// hardcoded demo account "1000" — absent in PG mode and consumed
+	// by nobody; the per-account face is /v1/tenant/stats).
+	accounts := 0
+	if accs, err := s.store.List(); err == nil {
+		accounts = len(accs)
+	}
+	tenants := 0
+	if s.pg != nil {
+		if n, err := s.pg.CountTenants(context.Background()); err == nil {
+			tenants = n
+		}
+	} else {
+		tenants = 1 // demo tenant
+	}
+	resp["counts"] = map[string]int{
+		"accounts":      accounts,
+		"gateways":      s.gws.Count(),
+		"registrations": s.regs.Online(),
+		"tenants":       tenants,
 	}
 	return resp
 }
@@ -650,9 +705,14 @@ func MuxFor(s *Server) http.Handler {
 	// verb-dispatcher routes are gone; 405/404 come from net/http.
 	mux.HandleFunc("POST /v1/admin/accounts", s.withIdempotency(s.handleAccountCreate))
 	mux.HandleFunc("GET /v1/admin/accounts", s.handleAccountList)
+	mux.HandleFunc("PATCH /v1/admin/accounts/{id}", s.handleAccountPatch)
+	mux.HandleFunc("DELETE /v1/admin/accounts/{id}", s.handleAccountDelete)
+	mux.HandleFunc("GET /v1/admin/accounts/{id}", s.handleAccountGet)
+	mux.HandleFunc("GET /v1/admin/accounts/{id}/ledger", s.handleAccountLedger)
 	mux.HandleFunc("POST /v1/admin/accounts/{id}/topup", s.withIdempotency(s.handleTopUp))
 	mux.HandleFunc("GET /v1/admin/rates", s.handleRateList)
 	mux.HandleFunc("PUT /v1/admin/rates", s.handleRateUpsert)
+	mux.HandleFunc("DELETE /v1/admin/rates/{prefix}", s.handleRateDelete)
 	mux.HandleFunc("GET /v1/admin/risk-rules", s.handleRiskRules)
 	mux.HandleFunc("PUT /v1/admin/risk-rules", s.handleRiskRules)
 	mux.HandleFunc("GET /v1/admin/gateways", s.handleGatewayList)
@@ -661,7 +721,7 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("GET /v1/admin/registrations", s.handleRegList)
 	mux.HandleFunc("GET /v1/admin/cdrs", s.handleCDRList)
 	mux.HandleFunc("POST /v1/admin/recording", s.handleRecordToggle)
-	mux.HandleFunc("GET /v1/admin/recording", s.handleRecordToggle)
+	mux.HandleFunc("GET /v1/admin/recording", s.handleRecordGet)
 	mux.HandleFunc("GET /v1/admin/blocklist-entries", s.handleBlocklistList)
 	mux.HandleFunc("POST /v1/admin/blocklist-entries", s.handleBlocklist)
 	mux.HandleFunc("DELETE /v1/admin/blocklist-entries/{id}", s.handleBlocklistDelete)
@@ -669,8 +729,9 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("POST /v1/admin/ipallow/rules", s.handleIPAllow)
 	mux.HandleFunc("DELETE /v1/admin/ipallow/rules/{id}", s.handleIPAllowDelete)
 	mux.HandleFunc("GET /v1/admin/packages", s.handlePackages)
-	mux.HandleFunc("PUT /v1/admin/packages", s.handlePackages)
+	mux.HandleFunc("PUT /v1/admin/packages", s.withIdempotency(s.handlePackages)) // assign moves money
 	mux.HandleFunc("GET /v1/admin/packages/usage", s.handlePackageUsage)
+	mux.HandleFunc("GET /v1/admin/audit", s.handleAuditList)
 	mux.HandleFunc("POST /v1/admin/reports/rollup", s.handleReports)
 	mux.HandleFunc("GET /v1/admin/reports", s.handleReportList)
 	mux.HandleFunc("GET /v1/admin/reports/views", s.handleReportViews)
@@ -691,6 +752,7 @@ func MuxFor(s *Server) http.Handler {
 	// Outbound webhooks (Phase D).
 	mux.HandleFunc("POST /v1/admin/webhooks", s.handleWebhookCreate)
 	mux.HandleFunc("GET /v1/admin/webhooks", s.handleWebhookList)
+	mux.HandleFunc("PATCH /v1/admin/webhooks/{id}", s.handleWebhookPatch)
 	mux.HandleFunc("DELETE /v1/admin/webhooks/{id}", s.handleWebhookDelete)
 	mux.HandleFunc("GET /v1/admin/webhooks/{id}/deliveries", s.handleWebhookDeliveries)
 	mux.HandleFunc("POST /v1/admin/webhooks/deliveries/{id}/replay", s.handleWebhookDeliveryReplay)
@@ -702,11 +764,14 @@ func MuxFor(s *Server) http.Handler {
 	// API key's tenant. Roles tenant|agent only.
 	mux.HandleFunc("GET /v1/tenant/me", s.handleTenantMe)
 	mux.HandleFunc("GET /v1/tenant/accounts", s.handleTenantAccounts)
+	mux.HandleFunc("POST /v1/tenant/accounts", s.withIdempotency(s.handleTenantAccountCreate))
+	mux.HandleFunc("POST /v1/tenant/accounts/{id}/topup", s.withIdempotency(s.handleTenantTopUp))
 	mux.HandleFunc("GET /v1/tenant/cdrs", s.handleTenantCDRs)
 	mux.HandleFunc("GET /v1/tenant/stats", s.handleTenantStats)
 	mux.HandleFunc("GET /v1/tenant/packages/usage", s.handleTenantPackageUsage)
 	mux.HandleFunc("POST /v1/tenant/webhooks", s.handleTenantWebhookCreate)
 	mux.HandleFunc("GET /v1/tenant/webhooks", s.handleTenantWebhookList)
+	mux.HandleFunc("DELETE /v1/tenant/webhooks/{id}", s.handleTenantWebhookDelete)
 	mux.HandleFunc("GET /v1/tenant/cdr-stream", s.handleTenantCDRStream)
 
 	// Recording pipeline (R2/R3).
@@ -718,7 +783,7 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
 
 	// API-key administration (Phase B).
-	mux.HandleFunc("POST /v1/admin/keys", s.handleKeyCreate)
+	mux.HandleFunc("POST /v1/admin/keys", s.withIdempotency(s.handleKeyCreate)) // retries must not mint two keys
 	mux.HandleFunc("GET /v1/admin/keys", s.handleKeyList)
 	mux.HandleFunc("DELETE /v1/admin/keys/{prefix}", s.handleKeyRevoke)
 
@@ -734,9 +799,7 @@ func MuxFor(s *Server) http.Handler {
 	// Media stream (WebSocket).
 	mux.HandleFunc("/v1/stream/", s.handleMediaStream)
 
-	// DEPRECATED spike UI — production ops/portal lives in gvos-console.
-	mux.HandleFunc("/ui", s.handleUI)
-	mux.HandleFunc("/ui/", s.handleUI)
+	// Human UI lives in gvos-console (ADR-0006); core serves no pages.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		fmt.Fprintln(w, "ok")
@@ -774,6 +837,32 @@ func (s *Server) handleCDRList(w http.ResponseWriter, r *http.Request) {
 			limit = int(n)
 		}
 	}
+	f, badParam := parseCDRFilters(r.URL.Query())
+	if badParam != "" {
+		httpErrorC(w, 400, "BAD_REQUEST", badParam+" must be RFC3339 or YYYY-MM-DD")
+		return
+	}
+
+	// PG mode: the history authority (the ring only holds the most
+	// recent ~10k rows). Keyset cursor is opaque base64.
+	if s.pg != nil {
+		rows, next, err := s.pg.QueryCDRs(r.Context(), store.CDRQuery{
+			Cursor: r.URL.Query().Get("cursor"), Limit: limit,
+			AccountID: f.AccountID, Dest: f.Dest, CallID: f.CallID,
+			From: f.From, To: f.To,
+		})
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "bad cursor") {
+				httpErrorC(w, 400, "BAD_CURSOR", err.Error())
+				return
+			}
+			httpError(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"cdrs": rows, "items": rows, "count": len(rows), "next_cursor": next})
+		return
+	}
+
 	s.cdrsMu.Lock()
 	n := len(s.cdrs)
 	// cursor = ring index one past the last returned row (0 = start
@@ -790,6 +879,9 @@ func (s *Server) handleCDRList(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]*callcore.CDR, 0, limit)
 	for i := n - 1 - cursor; i >= 0 && len(out) < limit; i-- {
+		if !f.match(s.cdrs[i]) {
+			continue
+		}
 		out = append(out, s.cdrs[i])
 	}
 	next := ""
@@ -797,18 +889,7 @@ func (s *Server) handleCDRList(w http.ResponseWriter, r *http.Request) {
 		next = json.Number(fmt.Sprintf("%d", cursor+len(out))).String()
 	}
 	s.cdrsMu.Unlock()
-	writeJSON(w, 200, map[string]any{"cdrs": out, "count": len(out), "next_cursor": next})
-}
-
-// handleUI serves the DEPRECATED embedded spike admin console.
-// Product UI is gvos-console (ADR-0006). Kept for break-glass local
-// debugging; response carries Deprecation + a banner in the HTML.
-func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Deprecation", "true")
-	w.Header().Set("Link", `</ui>; rel="successor-version"; title="use gvos-console"`)
-	w.Header().Set("Warning", `299 - "DEPRECATED: use gvos-console for ops/portal UI"`)
-	_, _ = w.Write([]byte(adminHTMLDeprecatedBanner + adminHTML))
+	writeJSON(w, 200, map[string]any{"cdrs": out, "items": out, "count": len(out), "next_cursor": next})
 }
 
 // routeAccounts dispatches by verb (Go 1.21: no method patterns).
@@ -851,6 +932,15 @@ func (s *Server) routeGateways(w http.ResponseWriter, r *http.Request) {
 func requirePOST(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		httpError(w, http.StatusMethodNotAllowed, "POST required")
+		return false
+	}
+	return true
+}
+
+// requirePATCH rejects non-PATCH calls.
+func requirePATCH(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodPatch {
+		httpError(w, http.StatusMethodNotAllowed, "PATCH required")
 		return false
 	}
 	return true
@@ -1040,13 +1130,17 @@ func distinctPrefixes(gws []gateway.Gateway) []string {
 // The legacy single-URL dispatcher (GVOS_WEBHOOK_URL) stays for
 // backward compatibility.
 func StartWebhookFanout(s *Server) bool {
-	if s.pg == nil {
-		return false
+	if s.pg != nil {
+		s.whStore = s.pg
 	}
-	s.whStore = s.pg
 	dsp := webhook.NewDispatcher(context.Background(), webhook.NewDeliverer())
-	dsp.SetDeliveryLogger(pgDeliveryLogger{pg: s.pg})
+	if s.whStore != nil {
+		dsp.SetDeliveryLogger(pgDeliveryLogger{pg: s.pg})
+	}
 	s.whDispatch = dsp
+	// Memory mode: the dispatcher now applies the process-local set
+	// (empty at boot; runtime creates actually deliver since the
+	// mem-subscription fix).
 	s.refreshWebhookDispatcher()
 	return len(dsp.SubscriptionCount()) > 0
 }

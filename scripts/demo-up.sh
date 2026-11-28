@@ -72,7 +72,7 @@ echo
 echo "=============================================="
 echo " gvos demo is up."
 echo "----------------------------------------------"
-echo " Admin console : http://127.0.0.1:${GVOS_API_PORT:-28080}/ui"
+echo " Admin console : gvos-console (separate repo; core serves no UI)"
 echo " Admin token   : dev-admin-token (legacy; deprecated once a key"
 echo "                 is set - create one: POST /v1/admin/keys)"
 echo " SIP endpoint  : udp/tcp 127.0.0.1:5060"

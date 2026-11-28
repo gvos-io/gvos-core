@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"runtime"
 	"strconv"
 	"time"
@@ -81,7 +82,8 @@ func (p *PG) Close() { p.pool.Close() }
 func (p *PG) LoadAccounts(ctx context.Context, dst *account.Store) (int, error) {
 	rows, err := p.pool.Query(ctx, `
         SELECT id::text, coalesce(parent_id::text, ''), name, username,
-               rate_group, postpaid, credit, max_debt, max_concurrent, max_cps
+               rate_group, postpaid, credit, max_debt, max_concurrent, max_cps,
+               low_balance_threshold
         FROM accounts
         WHERE deleted_at IS NULL
         ORDER BY created_at`)
@@ -92,13 +94,13 @@ func (p *PG) LoadAccounts(ctx context.Context, dst *account.Store) (int, error) 
 
 	n := 0
 	for rows.Next() {
-		var (
+			var (
 			id, parent, name, username, group string
 			postpaid                          bool
-			credit, maxDebt                   string // NUMERIC scans as string; money.FromDecimal converts
+			credit, maxDebt, lowBal           string // NUMERIC scans as string; money.FromDecimal converts
 			maxConc, maxCPS                   int
 		)
-		if err := rows.Scan(&id, &parent, &name, &username, &group, &postpaid, &credit, &maxDebt, &maxConc, &maxCPS); err != nil {
+		if err := rows.Scan(&id, &parent, &name, &username, &group, &postpaid, &credit, &maxDebt, &maxConc, &maxCPS, &lowBal); err != nil {
 			return n, fmt.Errorf("scan account: %w", err)
 		}
 		creditAmt, err := money.FromDecimal(credit)
@@ -109,10 +111,14 @@ func (p *PG) LoadAccounts(ctx context.Context, dst *account.Store) (int, error) 
 		if err != nil {
 			return n, fmt.Errorf("account %s max_debt %q: %w", id, maxDebt, err)
 		}
+		lowBalAmt, err := money.FromDecimal(lowBal)
+		if err != nil {
+			return n, fmt.Errorf("account %s low_balance %q: %w", id, lowBal, err)
+		}
 		if err := dst.Put(&account.Account{
 			ID: id, ParentID: parent, Name: name, Username: username,
 			RateGroup: group, Postpaid: postpaid, Credit: creditAmt, MaxDebt: debtAmt,
-			Concurrent: maxConc, CPS: maxCPS,
+			Concurrent: maxConc, CPS: maxCPS, LowBalance: lowBalAmt,
 		}); err != nil {
 			return n, err
 		}
@@ -125,6 +131,18 @@ func (p *PG) LoadAccounts(ctx context.Context, dst *account.Store) (int, error) 
 // rows map to Effective intervals: days as weekday ints, start/end as
 // "HH:MM" strings.
 func (p *PG) LoadRates(ctx context.Context, group string) (*rate.Table, error) {
+	rates, err := p.LoadRateRows(ctx, group)
+	if err != nil {
+		return nil, err
+	}
+	return rate.NewTable(rates), nil
+}
+
+// LoadRateRows returns the effective rates of a group as a flat slice
+// — the same rows LoadRates wraps into a lookup Table. The admin API
+// keeps this list so GET /v1/admin/rates reflects what billing uses
+// (the Table itself has no enumeration).
+func (p *PG) LoadRateRows(ctx context.Context, group string) ([]rate.Rate, error) {
 	rows, err := p.pool.Query(ctx, `
         SELECT prefix, price, init_dur, coalesce(init_price, 0),
                step_dur, min_dur, coalesce(days, '{}'::smallint[]),
@@ -176,7 +194,7 @@ func (p *PG) LoadRates(ctx context.Context, group string) (*rate.Table, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return rate.NewTable(rates), nil
+	return rates, nil
 }
 
 // LoadGateways reads the legacy gateways table as the restart
@@ -899,6 +917,46 @@ func (p *PG) DeleteWebhook(ctx context.Context, id string) (int, error) {
 	return int(tag.RowsAffected()), nil
 }
 
+// UpdateWebhook patches url/events/active (secret never changes —
+// rotating it would silently break delivery verification for the
+// customer; delete + re-create issues a deliberate new one).
+func (p *PG) UpdateWebhook(ctx context.Context, id string, url *string, events []string, active *bool) (int, error) {
+	sets, args := []string{}, []any{}
+	bind := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if url != nil {
+		sets = append(sets, "url = "+bind(*url))
+	}
+	if events != nil {
+		sets = append(sets, "events = "+bind(events))
+	}
+	if active != nil {
+		sets = append(sets, "active = "+bind(*active))
+	}
+	if len(sets) == 0 {
+		return 1, nil // nothing to do: idempotent no-op
+	}
+	args = append(args, id)
+	tag, err := p.pool.Exec(ctx, `UPDATE webhook_subscriptions SET `+strings.Join(sets, ", ")+` WHERE id = `+fmt.Sprintf("$%d::uuid", len(args)), args...)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// DeleteWebhookTenant revokes one tenant-owned subscription
+// (ownership in the WHERE — a tenant can never delete another
+// tenant's or an operator-created endpoint).
+func (p *PG) DeleteWebhookTenant(ctx context.Context, id, tenantID string) (int, error) {
+	tag, err := p.pool.Exec(ctx, `UPDATE webhook_subscriptions SET active = false WHERE id = $1::uuid AND tenant_id::text = $2`, id, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // WebhookDeliveryRow is one delivery-log entry for admin troubleshooting.
 type WebhookDeliveryRow struct {
 	ID        int64
@@ -927,7 +985,7 @@ func (p *PG) InsertWebhookDelivery(ctx context.Context, subID, url, subject, pay
 
 // ListWebhookDeliveries returns recent deliveries for one subscription
 // (or all when subID is empty).
-func (p *PG) ListWebhookDeliveries(ctx context.Context, subID string, limit int) ([]WebhookDeliveryRow, error) {
+func (p *PG) ListWebhookDeliveries(ctx context.Context, subID string, limit int, cursor string) ([]WebhookDeliveryRow, string, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -935,33 +993,51 @@ func (p *PG) ListWebhookDeliveries(ctx context.Context, subID string, limit int)
 		rows pgx.Rows
 		err  error
 	)
+	cursorSQL := ""
+	args := []any{limit}
+	if cursor != "" {
+		id, derr := decodeIDCursor(cursor)
+		if derr != nil {
+			return nil, "", derr
+		}
+		cursorSQL = " AND id < $2"
+		args = append(args, id)
+	}
 	if subID == "" {
 		rows, err = p.pool.Query(ctx, `
 			SELECT id, COALESCE(sub_id::text,''), url, subject, payload, status, attempts,
 			       COALESCE(last_error,''), COALESCE(tenant_id,''), created_at
 			FROM webhook_deliveries
-			ORDER BY id DESC LIMIT $1`, limit)
+			WHERE true`+cursorSQL+`
+			ORDER BY id DESC LIMIT $1`, args...)
 	} else {
 		rows, err = p.pool.Query(ctx, `
 			SELECT id, COALESCE(sub_id::text,''), url, subject, payload, status, attempts,
 			       COALESCE(last_error,''), COALESCE(tenant_id,''), created_at
 			FROM webhook_deliveries
-			WHERE sub_id = $1::uuid
-			ORDER BY id DESC LIMIT $2`, subID, limit)
+			WHERE sub_id = $1::uuid`+cursorSQL+`
+			ORDER BY id DESC LIMIT $2`, append([]any{subID}, args...)...)
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
 	var out []WebhookDeliveryRow
 	for rows.Next() {
 		var r WebhookDeliveryRow
 		if err := rows.Scan(&r.ID, &r.SubID, &r.URL, &r.Subject, &r.Payload, &r.Status, &r.Attempts, &r.LastError, &r.TenantID, &r.CreatedAt); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) == limit {
+		next = encodeIDCursor(out[len(out)-1].ID)
+	}
+	return out, next, nil
 }
 
 // GetWebhookDelivery loads one delivery by id.

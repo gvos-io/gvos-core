@@ -23,6 +23,7 @@ import (
 	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"github.com/gvos-io/gvos-core/internal/billingdomain/pkgplan"
 	"github.com/gvos-io/gvos-core/internal/callcore"
+	"github.com/gvos-io/gvos-core/internal/customerdomain/axb"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/blocklist"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/did"
 	"github.com/gvos-io/gvos-core/internal/customerdomain/gateway"
@@ -578,6 +579,33 @@ func StartCfgReloadSubscriber(s *Server) {
 			}
 			s.dids.Reload(snap.Dids)
 			log.Printf("CFG-RELOAD did registry reloaded via bus (%d)", len(snap.Dids))
+		case "axb":
+			// Full-snapshot apply: bindings resolve in core (call start),
+			// not at the edge, so peers converge on the live set (replace,
+			// not merge — mirrors "did").
+			var snap struct {
+				Bindings []axb.Binding `json:"bindings"`
+			}
+			if err := json.Unmarshal(data, &snap); err != nil {
+				log.Printf("CFG-RELOAD axb bad payload: %v", err)
+				return
+			}
+			s.axb.Restore(snap.Bindings)
+			log.Printf("CFG-RELOAD axb bindings applied via bus (%d)", len(snap.Bindings))
+		case "keys":
+			// API-key set changed on a peer: re-pull the durable source
+			// (the bus never carries hashes — the table is the truth).
+			// A replica that misses this keeps serving stale auth until
+			// its next boot: acceptable for key churn, fatal for none.
+			if s.pg != nil {
+				keys, err := s.pg.LoadAPIKeys(context.Background())
+				if err != nil {
+					log.Printf("CFG-RELOAD keys reload failed: %v", err)
+					return
+				}
+				s.acl.Reset(keys)
+				log.Printf("CFG-RELOAD api keys reloaded via bus (%d)", len(keys))
+			}
 		case "gateway":
 			if err := s.gatewayApply(payloadOf(data)); err != nil {
 				log.Printf("CFG-RELOAD gateway apply failed: %v", err)
@@ -618,6 +646,7 @@ func StartCfgReloadSubscriber(s *Server) {
 			// concurrent/CPS/max_debt used to admit against defaults
 			// until the next full reload.
 			var op struct {
+				Op      string `json:"op"`
 				Account struct {
 					ID            string       `json:"id"`
 					Username      string       `json:"username"`
@@ -629,10 +658,25 @@ func StartCfgReloadSubscriber(s *Server) {
 					MaxDebt       money.Amount `json:"max_debt"`
 					MaxConcurrent int          `json:"max_concurrent"`
 					MaxCPS        int          `json:"max_cps"`
+					LowBalance    money.Amount `json:"low_balance"`
 				} `json:"account"`
 			}
 			if err := json.Unmarshal(data, &op); err != nil || op.Account.ID == "" {
 				log.Printf("CFG-RELOAD account bad payload: %v", err)
+				return
+			}
+			if op.Op == "delete" {
+				s.store.Delete(op.Account.ID)
+				if s.userIndex != nil {
+					s.cfgMu.Lock()
+					for u, mapped := range s.userIndex {
+						if mapped == op.Account.ID {
+							delete(s.userIndex, u)
+						}
+					}
+					s.cfgMu.Unlock()
+				}
+				log.Printf("CFG-RELOAD account deleted via bus (%s)", op.Account.ID)
 				return
 			}
 			a := &account.Account{
@@ -640,6 +684,7 @@ func StartCfgReloadSubscriber(s *Server) {
 				ParentID: op.Account.ParentID, RateGroup: op.Account.RateGroup,
 				Postpaid: op.Account.Postpaid, Credit: op.Account.Credit,
 				MaxDebt: op.Account.MaxDebt, Concurrent: op.Account.MaxConcurrent, CPS: op.Account.MaxCPS,
+				LowBalance: op.Account.LowBalance,
 			}
 			if err := s.store.Put(a); err != nil {
 				log.Printf("CFG-RELOAD account apply failed (%s): %v", op.Account.ID, err)

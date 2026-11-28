@@ -5,18 +5,23 @@
 // traffic whose natural rate IS the CPS admission path, and limiting
 // it here would shadow the billing gate's own 429s.
 //
-// Keying: the authenticated identity when the plane carries one (the
-// API key prefix — each key gets its own bucket), else the client IP.
+// Keying: a hash of the presented bearer token when one is given
+// (each key/token = its own bucket — parsed from the header directly,
+// because the acl identity is only injected inside the handlers,
+// after this middleware has already run), else the client IP.
 // Unauthenticated callers share a hostile-world bucket per IP, so a
 // distributed guess attack still costs one bucket per source.
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"math"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -85,11 +90,19 @@ func (rl *rateLimiter) sweep(now time.Time) {
 	rl.lastSweep = now
 }
 
-// withRateLimit wraps the admin/tenant planes. Limit defaults: 100
-// burst, 20 req/s sustained per key/IP (GVOS_RATE_BURST /
-// GVOS_RATE_RPS override; 0/0 disables — bench and dev). 429 carries
-// Retry-After so well-behaved clients back off instead of retrying
-// harder (the opposite behavior would feed the storm it limits).
+// rateLimitedPath reports whether the path belongs to an operator
+// plane (admin/tenant). Only those are token-bucketed; signaling,
+// internal, media, recording and health paths pass through untouched.
+func rateLimitedPath(p string) bool {
+	return strings.HasPrefix(p, "/v1/admin/") || strings.HasPrefix(p, "/v1/tenant/")
+}
+
+// withRateLimit wraps the whole mux but enforces only on the
+// admin/tenant planes (rateLimitedPath). Limit defaults: 100 burst,
+// 20 req/s sustained per key/IP (GVOS_RATE_BURST / GVOS_RATE_RPS
+// override; 0/0 disables — bench and dev). 429 carries Retry-After so
+// well-behaved clients back off instead of retrying harder (the
+// opposite behavior would feed the storm it limits).
 func (s *Server) withRateLimit(next http.Handler) http.Handler {
 	burst := envInt("GVOS_RATE_BURST", 100)
 	rps := envFloat("GVOS_RATE_RPS", 20)
@@ -98,6 +111,10 @@ func (s *Server) withRateLimit(next http.Handler) http.Handler {
 	}
 	rl := newRateLimiter(burst, rps)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !rateLimitedPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		key := clientKey(r)
 		now := time.Now()
 		rl.mu.Lock()
@@ -118,11 +135,17 @@ func (s *Server) withRateLimit(next http.Handler) http.Handler {
 	})
 }
 
-// clientKey: the authenticated key prefix when the acl plane is on
-// (each API key = its own bucket), else the source IP.
+// clientKey: hash of the bearer token when one is presented (each
+// key/token = its own bucket; the header is read directly because the
+// acl identity is injected into the request only inside the handlers,
+// after this middleware has run), else the source IP.
 func clientKey(r *http.Request) string {
-	if id := whoAmI(r); id.Prefix != "" && id.Prefix != "legacy" {
-		return "key:" + id.Prefix
+	const prefix = "Bearer "
+	if auth := r.Header.Get("Authorization"); len(auth) > len(prefix) && auth[:len(prefix)] == prefix {
+		if tok := strings.TrimSpace(auth[len(prefix):]); tok != "" {
+			sum := sha256.Sum256([]byte(tok))
+			return "key:" + hex.EncodeToString(sum[:6])
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

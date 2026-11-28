@@ -8,6 +8,19 @@ import (
 	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
 
+// GET /v1/admin/recording reports the global opt-in state (the POST
+// counterpart toggles it). This is the query half the OpenAPI spec has
+// always promised; it used to fall through to requirePOST and 405.
+func (s *Server) handleRecordGet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	s.cfgMu.RLock()
+	enabled := s.recordEnabled
+	s.cfgMu.RUnlock()
+	writeJSON(w, 200, map[string]any{"enabled": enabled})
+}
+
 func (s *Server) handleRecordToggle(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) || !requirePOST(w, r) {
 		return
@@ -19,8 +32,10 @@ func (s *Server) handleRecordToggle(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "body required")
 		return
 	}
+	s.cfgMu.Lock()
 	before := s.recordEnabled
 	s.recordEnabled = req.Enabled
+	s.cfgMu.Unlock()
 	// Persist (PG mode) so restarts and new replicas load the toggle;
 	// broadcast so existing peers follow instantly.
 	if s.pg != nil {

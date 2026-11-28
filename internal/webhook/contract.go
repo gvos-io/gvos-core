@@ -110,3 +110,58 @@ func BuildCallTeardown(tenant string, seq int64, at time.Time, d CallTeardownDat
 	}
 	return json.Marshal(env)
 }
+
+// P1 event additions (gap analysis M8, roadmap Phase D's planned
+// four-to-two completion). Additive per the v1 rules: new keys, no
+// change to existing payloads.
+const (
+	// EventAccountLowBalance fires when an account's balance first
+	// drops to/below its low_balance threshold (at most once per hour
+	// per account, re-armed by a top-up).
+	EventAccountLowBalance = "account.low_balance"
+	// EventRiskBlocked fires when the fraud engine blocks a call
+	// attempt (rule hit, action=block).
+	EventRiskBlocked = "risk.blocked"
+	// EventPackageExhausted fires when a call consumes the last free
+	// seconds of the cycle allowance.
+	EventPackageExhausted = "package.exhausted"
+)
+
+// AccountLowBalanceData: the balance state a billing/CRM integration
+// needs to chase a recharge.
+type AccountLowBalanceData struct {
+	AccountID string `json:"account_id"`
+	Balance   string `json:"balance"`   // decimal string, account currency
+	Threshold string `json:"threshold"` // decimal string
+	Currency  string `json:"currency"`
+}
+
+// RiskBlockedData: one blocked call attempt.
+type RiskBlockedData struct {
+	AccountID string `json:"account_id"`
+	Username  string `json:"username"`
+	Dest      string `json:"dest"`
+	RuleID    string `json:"rule_id"`
+	Reason    string `json:"reason"`
+}
+
+// PackageExhaustedData: the cycle allowance ran out on this call.
+type PackageExhaustedData struct {
+	AccountID   string `json:"account_id"`
+	PackageID   string `json:"package_id"`
+	FreeMinutes int    `json:"free_minutes"`
+}
+
+// ContractSubjects is the closed set of subscribable events in
+// "gvos.<event>" form — the single source the admin and tenant
+// creation faces validate against (they used to carry two drifting
+// copies of the enum).
+func ContractSubjects() map[string]bool {
+	return map[string]bool{
+		"gvos." + EventCDRCompleted:      true,
+		"gvos." + EventCallTeardown:      true,
+		"gvos." + EventAccountLowBalance: true,
+		"gvos." + EventRiskBlocked:       true,
+		"gvos." + EventPackageExhausted:  true,
+	}
+}

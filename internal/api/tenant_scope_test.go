@@ -175,6 +175,12 @@ func (f *fakeWebhookStore) ListWebhooks(context.Context) ([]store.WebhookRow, er
 	return f.rows, nil
 }
 func (f *fakeWebhookStore) DeleteWebhook(context.Context, string) (int, error) { return 0, nil }
+func (f *fakeWebhookStore) UpdateWebhook(context.Context, string, *string, []string, *bool) (int, error) {
+	return 0, nil
+}
+func (f *fakeWebhookStore) DeleteWebhookTenant(context.Context, string, string) (int, error) {
+	return 0, nil
+}
 
 // A tenant lists only its own webhook subscriptions. Operator-created
 // ones (no tenant) used to be listed to every tenant, endpoints

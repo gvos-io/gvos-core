@@ -14,12 +14,16 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/gvos-io/gvos-core/internal/callcore"
 
 	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
 	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"github.com/gvos-io/gvos-core/internal/shared/acl"
+	"github.com/gvos-io/gvos-core/internal/shared/store"
 	"github.com/gvos-io/gvos-core/internal/webhook"
 )
 
@@ -63,6 +67,43 @@ func (s *Server) requireTenant(w http.ResponseWriter, r *http.Request) (identity
 // tenant filter for every query on this plane. It used to stop at the
 // direct children, so a tenant never saw the calls of its agents' own
 // customers.
+// tenantSetEntry caches one tenant's account set (the O(N×depth) tree
+// walk ran on every request across six tenant routes).
+type tenantSetEntry struct {
+	set map[string]bool
+	at  time.Time
+}
+
+const tenantSetCacheTTL = 5 * time.Second
+
+// tenantAccountsCached returns the tenant's account set from a 5s
+// cache when fresh. Set membership only changes on account
+// create/delete, which drop the entry (dropTenantSet).
+func (s *Server) tenantAccountsCached(tenantID string) map[string]bool {
+	s.cfgMu.RLock()
+	if e, ok := s.tenantSetCache[tenantID]; ok && time.Since(e.at) < tenantSetCacheTTL {
+		s.cfgMu.RUnlock()
+		return e.set
+	}
+	s.cfgMu.RUnlock()
+	set := s.tenantAccounts(tenantID)
+	s.cfgMu.Lock()
+	if s.tenantSetCache == nil {
+		s.tenantSetCache = map[string]tenantSetEntry{}
+	}
+	s.tenantSetCache[tenantID] = tenantSetEntry{set: set, at: time.Now()}
+	s.cfgMu.Unlock()
+	return set
+}
+
+// dropTenantSet invalidates the cached set after an account
+// create/delete (membership changed).
+func (s *Server) dropTenantSet() {
+	s.cfgMu.Lock()
+	s.tenantSetCache = nil
+	s.cfgMu.Unlock()
+}
+
 func (s *Server) tenantAccounts(tenantID string) map[string]bool {
 	set := map[string]bool{tenantID: true}
 	all, err := s.store.List()
@@ -140,7 +181,7 @@ func (s *Server) handleTenantAccounts(w http.ResponseWriter, r *http.Request) {
 			"postpaid": a.Postpaid, "concurrent": a.Concurrent, "cps": a.CPS,
 		})
 	}
-	writeJSON(w, 200, map[string]any{"accounts": out, "count": len(out)})
+	writeJSON(w, 200, map[string]any{"accounts": out, "items": out, "count": len(out)})
 }
 
 // GET /v1/tenant/cdrs — CDRs filtered to the tenant's account set.
@@ -152,13 +193,59 @@ func (s *Server) handleTenantCDRs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	set := s.tenantAccounts(id.TenantID)
+	set := s.tenantAccountsCached(id.TenantID)
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if n, err := json.Number(l).Int64(); err == nil && n > 0 && n <= 500 {
 			limit = int(n)
 		}
 	}
+	f, badParam := parseCDRFilters(r.URL.Query())
+	if badParam != "" {
+		httpErrorC(w, 400, "BAD_REQUEST", badParam+" must be RFC3339 or YYYY-MM-DD")
+		return
+	}
+	// An account_id outside the tenant set is an escape attempt, not
+	// an empty result.
+	if f.AccountID != "" && !set[f.AccountID] {
+		httpErrorC(w, 403, "FORBIDDEN", "account outside your scope")
+		return
+	}
+
+	// PG mode: query the history authority scoped to the tenant's
+	// account set; cursor is the opaque keyset marker.
+	if s.pg != nil {
+		accounts := make([]string, 0, len(set))
+		for a := range set {
+			accounts = append(accounts, a)
+		}
+		rows, next, err := s.pg.QueryCDRs(r.Context(), store.CDRQuery{
+			Cursor: r.URL.Query().Get("cursor"), Limit: limit,
+			Accounts: accounts, AccountID: f.AccountID,
+			Dest: f.Dest, CallID: f.CallID, From: f.From, To: f.To,
+		})
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "bad cursor") {
+				httpErrorC(w, 400, "BAD_CURSOR", err.Error())
+				return
+			}
+			httpError(w, 500, err.Error())
+			return
+		}
+		out := make([]*tenantCDRRow, 0, len(rows))
+		for i := range rows {
+			c := &rows[i]
+			out = append(out, &tenantCDRRow{
+				CallID: c.CallID, AccountID: c.AccountID, Dest: c.Dest,
+				StartTime: c.StartTime.Format(time.RFC3339), Duration: c.Duration,
+				BilledSecs: c.BilledSecs, Cost: c.Cost.String(),
+				Currency: "CNY", Release: c.Release, SIPCode: c.SIPCode,
+			})
+		}
+		writeJSON(w, 200, map[string]any{"cdrs": out, "items": out, "count": len(out), "next_cursor": next, "has_more": next != ""})
+		return
+	}
+
 	s.cdrsMu.Lock()
 	n := len(s.cdrs)
 	cursor := 0
@@ -195,7 +282,9 @@ func (s *Server) handleTenantCDRs(w http.ResponseWriter, r *http.Request) {
 		nextCursor, hasMore = n-1-i, true
 	}
 	s.cdrsMu.Unlock()
-	writeJSON(w, 200, map[string]any{"cdrs": out, "count": len(out), "cursor": nextCursor, "has_more": hasMore})
+	// Envelope: next_cursor is the api-conventions §4 name; the legacy
+	// cursor/has_more pair stays for v1 compatibility.
+	writeJSON(w, 200, map[string]any{"cdrs": out, "items": out, "count": len(out), "cursor": nextCursor, "has_more": hasMore, "next_cursor": nextCursor})
 }
 
 // tenantCDRRow is the stable projection for the tenant plane (same
@@ -220,28 +309,52 @@ func (s *Server) handleTenantStats(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	set := s.tenantAccounts(id.TenantID)
-	s.cdrsMu.Lock()
-	live, spent, zero := 0, 0, money.Amount(0)
-	spend := money.Amount(0)
-	_ = zero
+	set := s.tenantAccountsCached(id.TenantID)
+	live := s.calls.LiveByAccounts(set)
 	today := time.Now().Format("2006-01-02")
-	for _, cdr := range s.cdrs {
-		if !set[cdr.AccountID] {
-			continue
+	spent, spend := 0, money.Amount(0)
+	if s.pg != nil {
+		// Rollup authority (hourly pass fills today's rows); the
+		// memory ring used to silently truncate at 10k rows.
+		if n, amt, err := s.pg.TenantDaySpend(r.Context(), today, setKeys(set)); err == nil {
+			spent, spend = n, amt
+		} else {
+			httpError(w, 500, err.Error())
+			return
 		}
-		if cdr.StartTime.Format("2006-01-02") == today {
-			spent++
-			spend = spend.Add(cdr.Cost)
+	} else {
+		// Snapshot under the write lock, compute outside — holding
+		// cdrsMu across the scan blocked storeCdr (the billing write
+		// path) for the whole walk.
+		s.cdrsMu.Lock()
+		ring := append([]*callcore.CDR(nil), s.cdrs...)
+		s.cdrsMu.Unlock()
+		for _, cdr := range ring {
+			if !set[cdr.AccountID] {
+				continue
+			}
+			if cdr.StartTime.Format("2006-01-02") == today {
+				spent++
+				spend = spend.Add(cdr.Cost)
+			}
 		}
 	}
-	// live calls for the tenant: the manager scan is the authority
-	live = s.calls.LiveByAccounts(set)
-	s.cdrsMu.Unlock()
 	writeJSON(w, 200, map[string]any{
 		"tenant_id": id.TenantID, "live_calls": live,
 		"today_cdrs": spent, "today_spend": spend,
+		"spend_source": map[bool]string{true: "usage_daily", false: "memory_ring"}[s.pg != nil],
 	})
+}
+
+// setKeys extracts a map[string]bool set into a sorted slice (stable
+// SQL ANY() binding).
+func setKeys(set map[string]bool) []string {
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // GET /v1/tenant/packages/usage — per-account package usage, scoped.
@@ -271,7 +384,7 @@ func (s *Server) handleTenantPackageUsage(w http.ResponseWriter, r *http.Request
 				"free_secs_used": free, "cycle_spend": spend})
 		}
 	}
-	writeJSON(w, 200, map[string]any{"usage": out, "count": len(out)})
+	writeJSON(w, 200, map[string]any{"usage": out, "items": out, "count": len(out)})
 }
 
 // POST /v1/tenant/webhooks — the tenant registers its own callback
@@ -296,9 +409,8 @@ func (s *Server) handleTenantWebhookCreate(w http.ResponseWriter, r *http.Reques
 		httpErrorC(w, 400, "BAD_REQUEST", "webhook url rejected: "+err.Error())
 		return
 	}
-	allowed := map[string]bool{"gvos.cdr.completed": true, "gvos.call.teardown": true}
 	for _, e := range req.Events {
-		if !allowed[e] {
+		if !webhook.ContractSubjects()[e] {
 			httpErrorC(w, 400, "BAD_REQUEST", "unknown contract event "+e)
 			return
 		}
@@ -314,6 +426,7 @@ func (s *Server) handleTenantWebhookCreate(w http.ResponseWriter, r *http.Reques
 		}
 	} else {
 		wid = "wh-" + secret[6:14]
+		s.memAddWebhookSub(webhook.Subscription{ID: wid, URL: req.URL, Secret: secret, Events: req.Events, Active: true, Tenant: id.TenantID})
 	}
 	s.refreshWebhookDispatcher()
 	s.audit(r, "create", "tenant_webhook", wid, nil, map[string]any{"url": req.URL, "events": req.Events, "tenant_id": id.TenantID})
@@ -347,6 +460,54 @@ func (s *Server) handleTenantWebhookList(w http.ResponseWriter, r *http.Request)
 			}
 			out = append(out, map[string]any{"id": rw.ID, "url": rw.URL, "events": rw.Events, "active": rw.Active})
 		}
+	} else {
+		for _, sub := range s.memWebhookSubs() {
+			if sub.Tenant != id.TenantID {
+				continue
+			}
+			out = append(out, map[string]any{"id": sub.ID, "url": sub.URL, "events": sub.Events, "active": sub.Active})
+		}
 	}
-	writeJSON(w, 200, map[string]any{"webhooks": out, "count": len(out)})
+	writeJSON(w, 200, map[string]any{"webhooks": out, "items": out, "count": len(out)})
+}
+
+// DELETE /v1/tenant/webhooks/{id}: the tenant revokes its OWN
+// subscription — ownership rides the WHERE clause (PG) or the mem-sub
+// tenant field (memory mode); another tenant's or an operator-created
+// endpoint is a 404, not an error message leaking existence.
+func (s *Server) handleTenantWebhookDelete(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.requireTenant(w, r)
+	if !ok {
+		return
+	}
+	wid := r.PathValue("id")
+	if s.whStore != nil {
+		if n, err := s.whStore.DeleteWebhookTenant(r.Context(), wid, id.TenantID); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		} else if n == 0 {
+			httpErrorC(w, 404, "NOT_FOUND", "no such webhook")
+			return
+		}
+	} else {
+		s.cfgMu.Lock()
+		found := false
+		kept := s.whMemSubs[:0]
+		for _, sub := range s.whMemSubs {
+			if sub.ID == wid && sub.Tenant == id.TenantID {
+				found = true
+				continue
+			}
+			kept = append(kept, sub)
+		}
+		s.whMemSubs = kept
+		s.cfgMu.Unlock()
+		if !found {
+			httpErrorC(w, 404, "NOT_FOUND", "no such webhook")
+			return
+		}
+	}
+	s.refreshWebhookDispatcher()
+	s.audit(r, "delete", "tenant_webhook", wid, nil, nil)
+	writeJSON(w, 200, map[string]any{"deleted": wid})
 }

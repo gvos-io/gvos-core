@@ -1,5 +1,9 @@
 // AXB privacy-number administration (the VOS AXB module's open
-// equivalent): bind/unbind/list virtual numbers.
+// equivalent): bind/unbind/list virtual numbers. Bindings resolve in
+// core (callapi → axb.Resolve), so persistence (migration 010) and
+// the cfg.reload "axb" snapshot keep restarts and replica sets
+// converged — a restart used to drop every binding and X-number dials
+// 404'd until re-created.
 package api
 
 import (
@@ -8,7 +12,15 @@ import (
 	"time"
 
 	"github.com/gvos-io/gvos-core/internal/customerdomain/axb"
+	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
+
+// emitAXB broadcasts the full live binding set (peers apply as a
+// replace — same contract as the did snapshot).
+func (s *Server) emitAXB() {
+	list := s.axb.List()
+	s.emit(events.SubjectCfgReload, map[string]any{"entity": "axb", "bindings": list, "count": len(list)})
+}
 
 // handleAXBBind serves POST /v1/admin/axb/bindings
 // {"a_number","b_number","ttl_hours"}: allocates X, returns the
@@ -27,7 +39,7 @@ func (s *Server) handleAXBBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ttl := time.Duration(req.TTLHours * float64(time.Hour))
-	if ttl <= 0 {
+	if !(ttl > 0) { // also catches NaN (NaN <= 0 is false)
 		ttl = 24 * time.Hour
 	}
 	bd, err := s.axb.Bind(req.ANumber, req.BNumber, ttl)
@@ -35,6 +47,16 @@ func (s *Server) handleAXBBind(w http.ResponseWriter, r *http.Request) {
 		httpErrorC(w, 400, "BAD_REQUEST", err.Error())
 		return
 	}
+	if s.pg != nil {
+		if err := s.pg.UpsertAXBBinding(r.Context(), *bd); err != nil {
+			// Undo the memory allocation so memory and PG stay
+			// consistent (the X number must not survive only in RAM).
+			_ = s.axb.RevokeByX(bd.XNumber)
+			httpError(w, 500, err.Error())
+			return
+		}
+	}
+	s.emitAXB()
 	s.audit(r, "create", "axb_binding", bd.ID, nil, bd)
 	writeJSON(w, 201, bd)
 }
@@ -56,7 +78,7 @@ func (s *Server) handleAXBList(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, bd)
 	}
-	writeJSON(w, 200, map[string]any{"bindings": out, "count": len(out)})
+	writeJSON(w, 200, map[string]any{"bindings": out, "items": out, "count": len(out)})
 }
 
 // handleAXBDel serves DELETE /v1/admin/axb/bindings/{x}: revoke by
@@ -66,10 +88,19 @@ func (s *Server) handleAXBDel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	x := r.PathValue("x")
+	// Write-through before memory (blocklist-remove pattern): the DB
+	// row is what restarts and new replicas load back.
+	if s.pg != nil {
+		if err := s.pg.DeactivateAXBByX(r.Context(), x); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+	}
 	if s.axb.RevokeByX(x) == 0 {
 		httpErrorC(w, 404, "NOT_FOUND", "no active binding for "+x)
 		return
 	}
+	s.emitAXB()
 	s.audit(r, "revoke", "axb_binding", x, nil, nil)
 	writeJSON(w, 200, map[string]any{"revoked": x})
 }

@@ -4,13 +4,18 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
+	"strconv"
 
 	"github.com/gvos-io/gvos-core/internal/customerdomain/gateway"
 	"github.com/gvos-io/gvos-core/internal/shared/events"
 )
 
 func (s *Server) handleGatewaySet(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) || r.Method != http.MethodPut {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if r.Method != http.MethodPut {
 		httpError(w, 405, "PUT required")
 		return
 	}
@@ -22,6 +27,11 @@ func (s *Server) handleGatewaySet(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err.Error())
 		return
 	}
+
+	// Full-set operations are read-modify-write; two concurrent
+	// writers used to lose updates (PUT vs DELETE races).
+	s.gwMu.Lock()
+	defer s.gwMu.Unlock()
 
 	current := s.gws.Gateways()
 
@@ -94,9 +104,42 @@ func (s *Server) handleRegList(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
+	regs := s.regs.Entries()
+	// Stable order (Entries is a map walk): newest activity first.
+	sort.Slice(regs, func(i, j int) bool { return regs[i].LastReg > regs[j].LastReg })
+	limit, offset := listPage(r, len(regs))
+	page := regs[offset : offset+limit]
+	next := ""
+	if offset+limit < len(regs) {
+		next = strconv.Itoa(offset + limit)
+	}
 	writeJSON(w, 200, map[string]any{
-		"registrations": s.regs.Entries(), "count": s.regs.Count(), "online": s.regs.Online(),
+		"registrations": page, "items": page, "count": len(page),
+		"total": len(regs), "online": s.regs.Online(), "next_cursor": next,
 	})
+}
+
+// listPage parses the shared ?limit=&cursor= paging pair (numeric
+// offset cursor) for the small in-memory directories (registrations,
+// DIDs). Defaults 50, cap 500; cursor past the end clamps to empty.
+func listPage(r *http.Request, total int) (limit, offset int) {
+	limit = 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		if n, err := strconv.Atoi(c); err == nil && n > 0 && n < total {
+			offset = n
+		} else if err == nil && n >= total {
+			offset = total
+		}
+	}
+	if offset+limit > total {
+		limit = total - offset
+	}
+	return limit, offset
 }
 
 // POST /v1/admin/stream-push {"call_id","direction":"uplink|downlink","audio":<base64 or raw>}
@@ -110,6 +153,8 @@ func (s *Server) handleGatewayDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	s.gwMu.Lock()
+	defer s.gwMu.Unlock()
 	gws := s.gws.Gateways()
 	kept := gws[:0:0]
 	found := false
@@ -124,7 +169,19 @@ func (s *Server) handleGatewayDelete(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 404, "gateway not found: "+id)
 		return
 	}
-	s.gws.Reload(kept)
+	// Persist before flipping memory (same order as the PUT paths) —
+	// a delete that skips PutSetting resurrects the gateway on the
+	// next restart/replica reload.
+	if s.pg != nil {
+		if err := s.pg.PutSetting(r.Context(), "gateways", kept); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+	}
+	if _, err := s.gws.Reload(kept); err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
 	s.audit(r, "remove", "gateway", id, map[string]any{"removed": 1}, nil)
 	s.emit(events.SubjectCfgReload, map[string]any{"entity": "gateway", "gateways": s.lcrGateways()})
 	writeJSON(w, 200, map[string]any{"removed": id})

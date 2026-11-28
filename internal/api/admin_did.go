@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
+	"strconv"
 	"sync/atomic"
 
 	"github.com/gvos-io/gvos-core/internal/customerdomain/did"
@@ -24,15 +26,26 @@ func didPayload(list []did.DID) map[string]any {
 
 // handleDIDPut serves POST /v1/admin/dids
 // {"did_number","account_id","destination_type","destination","enabled"}:
-// registers or replaces one inbound number.
+// registers or replaces one inbound number. `enabled` is optional and
+// defaults to true — a DID registered without it used to land disabled
+// (the zero value) and Resolve silently never matched it.
 func (s *Server) handleDIDPut(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	var d did.DID
-	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
+	var req struct {
+		did.DID
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpErrorC(w, 400, "BAD_REQUEST", "body required")
 		return
+	}
+	d := req.DID
+	if req.Enabled != nil {
+		d.Enabled = *req.Enabled
+	} else {
+		d.Enabled = true
 	}
 	if d.ID == "" {
 		d.ID = fmt.Sprintf("did-%d", atomic.AddInt64(&didSerial, 1))
@@ -58,7 +71,15 @@ func (s *Server) handleDIDList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	list := s.dids.List()
-	writeJSON(w, 200, map[string]any{"dids": list, "count": len(list)})
+	// Stable order (Store.List is a map walk): by number.
+	sort.Slice(list, func(i, j int) bool { return list[i].Number < list[j].Number })
+	limit, offset := listPage(r, len(list))
+	page := list[offset : offset+limit]
+	next := ""
+	if offset+limit < len(list) {
+		next = strconv.Itoa(offset + limit)
+	}
+	writeJSON(w, 200, map[string]any{"dids": page, "items": page, "count": len(page), "total": len(list), "next_cursor": next})
 }
 
 // handleDIDDelete serves DELETE /v1/admin/dids/{number}: immediate;

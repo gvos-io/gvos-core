@@ -89,6 +89,7 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		s.userIndex[req.Username] = id
 		s.cfgMu.Unlock()
 	}
+	s.dropTenantSet()
 	s.audit(r, "create", "account", id, nil,
 		map[string]any{"username": req.Username, "credit": req.Credit})
 	// Peer replicas apply the account directly (HA1 never leaves PG:
@@ -102,6 +103,7 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 			"parent_id": req.ParentID, "rate_group": req.RateGroup,
 			"postpaid": req.Postpaid, "credit": req.Credit,
 			"max_debt": acc.MaxDebt, "max_concurrent": acc.Concurrent, "max_cps": acc.CPS,
+			"low_balance": acc.LowBalance,
 		},
 	})
 	writeJSON(w, 201, map[string]any{
@@ -189,6 +191,10 @@ func (s *Server) handleTopUp(w http.ResponseWriter, r *http.Request) {
 		"entity": "credit", "op": "topup",
 		"account_id": reqAccountID, "credit": balance,
 	})
+	// A top-up re-arms the low-balance notify window: a renewed dip
+	// signals immediately instead of waiting out the dedupe hour.
+	rearmLowBalance(reqAccountID)
+	s.publishLowBalance(reqAccountID)
 	writeJSON(w, 200, map[string]any{"account_id": reqAccountID, "balance": balance})
 }
 
@@ -269,4 +275,208 @@ func (s *Server) snapshotRedisBalances(ctx context.Context) {
 	if n > 0 {
 		log.Printf("REDIS balance snapshot: %d accounts written back to PG", n)
 	}
+}
+
+// handleAccountGet serves GET /v1/admin/accounts/{id}: one account by
+// id (or username, for operator convenience). The console detail page
+// used to pull the full list and match client-side — O(N) and broken
+// under pagination.
+func (s *Server) handleAccountGet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if mapped, ok := s.userIndex[id]; ok {
+		id = mapped // username → account id
+	}
+	acc, err := s.store.Get(id)
+	if err != nil {
+		httpErrorC(w, 404, "NOT_FOUND", "no account "+id)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"account": acc, "item": acc})
+}
+
+// PATCH /v1/admin/accounts/{id}: optional-field update of the
+// management knobs (name, rate_group, postpaid, max_debt,
+// max_concurrent, max_cps). Credit is deliberately not patchable —
+// balance moves only through topup/settlement so balance_ledger stays
+// the single money story. Disabling an account is NOT here: the
+// schema and admission path have no enabled flag yet (gap analysis
+// M6 remainder).
+func (s *Server) handleAccountPatch(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) || !requirePATCH(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if mapped, ok := s.userIndex[id]; ok {
+		id = mapped
+	}
+	acc, err := s.store.Get(id)
+	if err != nil {
+		httpErrorC(w, 404, "NOT_FOUND", "no account "+id)
+		return
+	}
+	before := *acc
+	var req struct {
+		Name          *string  `json:"name"`
+		RateGroup     *string  `json:"rate_group"`
+		Postpaid      *bool    `json:"postpaid"`
+		MaxDebt       *float64 `json:"max_debt"`
+		MaxConcurrent *int     `json:"max_concurrent"`
+		MaxCPS        *int     `json:"max_cps"`
+		LowBalance    *float64 `json:"low_balance"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpErrorC(w, 400, "BAD_REQUEST", "body required")
+		return
+	}
+	var maxDebt *money.Amount
+	if req.MaxDebt != nil {
+		if *req.MaxDebt < 0 {
+			httpErrorC(w, 400, "BAD_REQUEST", "max_debt must be >= 0")
+			return
+		}
+		amt, err := money.FromYuan(*req.MaxDebt)
+		if err != nil {
+			httpErrorC(w, 400, "BAD_AMOUNT", err.Error())
+			return
+		}
+		maxDebt = &amt
+		acc.MaxDebt = amt
+	}
+	if req.Name != nil {
+		acc.Name = *req.Name
+	}
+	if req.RateGroup != nil {
+		if *req.RateGroup == "" {
+			httpErrorC(w, 400, "BAD_REQUEST", "rate_group must be non-empty")
+			return
+		}
+		acc.RateGroup = *req.RateGroup
+	}
+	if req.Postpaid != nil {
+		acc.Postpaid = *req.Postpaid
+	}
+	if req.MaxConcurrent != nil {
+		if *req.MaxConcurrent < 0 {
+			httpErrorC(w, 400, "BAD_REQUEST", "max_concurrent must be >= 0")
+			return
+		}
+		acc.Concurrent = *req.MaxConcurrent
+	}
+	if req.MaxCPS != nil {
+		if *req.MaxCPS < 0 {
+			httpErrorC(w, 400, "BAD_REQUEST", "max_cps must be >= 0")
+			return
+		}
+		acc.CPS = *req.MaxCPS
+	}
+	var lowBal *money.Amount
+	if req.LowBalance != nil {
+		if *req.LowBalance < 0 {
+			httpErrorC(w, 400, "BAD_REQUEST", "low_balance must be >= 0")
+			return
+		}
+		amt, err := money.FromYuan(*req.LowBalance)
+		if err != nil {
+			httpErrorC(w, 400, "BAD_AMOUNT", err.Error())
+			return
+		}
+		lowBal = &amt
+		acc.LowBalance = amt
+		rearmLowBalance(id)
+	}
+	// Durable first, then the in-memory mirror (same discipline as
+	// gateway PUT).
+	if s.pg != nil {
+		if err := s.pg.UpdateAccountPatch(r.Context(), id, req.Name, req.RateGroup, req.Postpaid, maxDebt, req.MaxConcurrent, req.MaxCPS, lowBal); err != nil {
+			log.Printf("PATCH account %s failed: %v", id, err)
+			httpError(w, 500, err.Error())
+			return
+		}
+	}
+	if err := s.store.Put(acc); err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	s.audit(r, "update", "account", id, before, acc)
+	// Peer replicas apply the same snapshot (create/update share the
+	// apply path; op distinguishes audit semantics only).
+	s.emit(events.SubjectCfgReload, map[string]any{
+		"entity": "account", "op": "update",
+		"account": map[string]any{
+			"id": acc.ID, "username": acc.Username, "name": acc.Name,
+			"parent_id": acc.ParentID, "rate_group": acc.RateGroup,
+			"postpaid": acc.Postpaid, "credit": acc.Credit.String(),
+			"max_debt": acc.MaxDebt.String(), "max_concurrent": acc.Concurrent, "max_cps": acc.CPS,
+			"low_balance": acc.LowBalance.String(),
+		},
+	})
+	writeJSON(w, 200, map[string]any{"account": acc})
+}
+
+// DELETE /v1/admin/accounts/{id}: soft delete (deleted_at; LoadAccounts
+// already filters it). Refused while live children exist — deleting a
+// parent would orphan the charging chain.
+func (s *Server) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if mapped, ok := s.userIndex[id]; ok {
+		id = mapped
+	}
+	acc, err := s.store.Get(id)
+	if err != nil {
+		httpErrorC(w, 404, "NOT_FOUND", "no account "+id)
+		return
+	}
+	children := 0
+	if s.pg != nil {
+		if children, err = s.pg.CountAccountChildren(r.Context(), id); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+	} else {
+		if all, lerr := s.store.List(); lerr == nil {
+			for _, a := range all {
+				if a.ParentID == id {
+					children++
+				}
+			}
+		}
+	}
+	if children > 0 {
+		httpErrorC(w, 409, "HAS_CHILDREN", "account has live child accounts; delete or move them first")
+		return
+	}
+	if s.pg != nil {
+		if n, derr := s.pg.SoftDeleteAccount(r.Context(), id); derr != nil {
+			httpError(w, 500, derr.Error())
+			return
+		} else if n == 0 {
+			httpErrorC(w, 404, "NOT_FOUND", "no account "+id)
+			return
+		}
+	}
+	s.store.Delete(id)
+	s.dropTenantSet()
+	// Drop stale username mappings pointing at the deleted account.
+	s.cfgMu.Lock()
+	for u, mapped := range s.userIndex {
+		if mapped == id {
+			delete(s.userIndex, u)
+		}
+	}
+	s.cfgMu.Unlock()
+	// The Redis balance key is left in place: Seed() filters deleted
+	// accounts on next boot, and re-creating the same username mints a
+	// new id, so the stale key is unreachable.
+	s.audit(r, "delete", "account", id, acc, nil)
+	s.emit(events.SubjectCfgReload, map[string]any{
+		"entity": "account", "op": "delete",
+		"account": map[string]any{"id": id, "username": acc.Username},
+	})
+	writeJSON(w, 200, map[string]any{"deleted": id})
 }

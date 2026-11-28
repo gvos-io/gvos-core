@@ -35,6 +35,9 @@ type Account struct {
 	MaxDebt    money.Amount `json:"max_debt"`   // allowed negative balance
 	Concurrent int          `json:"concurrent"` // concurrent-call cap, 0 = unlimited
 	CPS        int          `json:"cps"`        // calls-per-second cap, 0 = unlimited
+	// LowBalance: when set (non-zero) the account.low_balance webhook
+	// fires as the balance first drops to/below it. 0 = off.
+	LowBalance money.Amount `json:"low_balance"`
 }
 
 // ParseID guards the PG-mode topup path: only strict non-UUID shapes
@@ -211,4 +214,16 @@ func Balance(s *Store, id string) (money.Amount, error) {
 		return 0, err
 	}
 	return a.Credit, nil
+}
+
+// Delete removes an account from the registry. PG soft-delete
+// (deleted_at) is the authority; memory mode is the demo mirror.
+func (s *Store) Delete(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.accounts[id]; !ok {
+		return false
+	}
+	delete(s.accounts, id)
+	return true
 }

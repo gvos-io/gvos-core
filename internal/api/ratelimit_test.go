@@ -75,3 +75,59 @@ func TestWithRateLimitDisabled(t *testing.T) {
 		}
 	}
 }
+
+// The signaling plane must never be token-bucketed: its natural rate
+// IS the CPS admission gate and a limiter here would shadow the
+// billing gate's own 429s (regression: the limiter used to wrap the
+// whole mux, clamping /v1/call/* to ~20 rps per IP).
+func TestRateLimitSkipsSignalingPlane(t *testing.T) {
+	t.Setenv("GVOS_RATE_BURST", "1")
+	t.Setenv("GVOS_RATE_RPS", "1")
+	s := NewServer()
+	h := s.MuxForTest()
+	for i := 0; i < 30; i++ {
+		req := httptest.NewRequest("GET", "/v1/stats", nil)
+		req.RemoteAddr = "10.9.9.7:1234"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("signaling plane request %d was rate-limited", i)
+		}
+	}
+	// Control: the admin plane on the same mux does limit.
+	req := httptest.NewRequest("GET", "/v1/admin/rates", nil)
+	req.RemoteAddr = "10.9.9.7:1234"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	// First admin hit may pass (fresh bucket); exhaust it.
+	for i := 0; i < 3 && rec.Code != http.StatusTooManyRequests; i++ {
+		req = httptest.NewRequest("GET", "/v1/admin/rates", nil)
+		req.RemoteAddr = "10.9.9.7:1234"
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+	}
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("admin plane never limited (last code %d)", rec.Code)
+	}
+}
+
+// Keying: two callers with different bearer tokens get independent
+// buckets; a caller without a token is keyed by IP.
+func TestClientKeyBearerSeparation(t *testing.T) {
+	mk := func(tok string) *http.Request {
+		req := httptest.NewRequest("GET", "/v1/admin/rates", nil)
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		return req
+	}
+	if clientKey(mk("gvos_admin_aaaa")) == clientKey(mk("gvos_admin_bbbb")) {
+		t.Fatal("different bearer tokens share one bucket")
+	}
+	if clientKey(mk("gvos_admin_aaaa")) != clientKey(mk("gvos_admin_aaaa")) {
+		t.Fatal("same bearer token must map to one stable bucket")
+	}
+	if clientKey(mk("")) != clientKey(mk("")) {
+		t.Fatal("tokenless callers must share the IP bucket")
+	}
+}

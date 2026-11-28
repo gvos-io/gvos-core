@@ -73,7 +73,8 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		s.emitListOp("add", blocklist.Entry{Kind: req.Kind, Scope: req.Scope, Pattern: req.Pattern, IsRegex: req.IsRegex})
 		writeJSON(w, 201, map[string]any{"kind": req.Kind, "scope": req.Scope, "pattern": req.Pattern})
 	case http.MethodGet:
-		writeJSON(w, 200, map[string]any{"rules": s.blocklist.Count()})
+		entries := s.blocklist.Snapshot()
+		writeJSON(w, 200, map[string]any{"rules": s.blocklist.Count(), "items": entries, "count": len(entries)})
 	default:
 		httpError(w, 405, "POST or GET")
 	}
@@ -87,7 +88,8 @@ func (s *Server) handleRiskRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		writeJSON(w, 200, map[string]any{"rules": s.risk.Rules(), "count": len(s.risk.Rules())})
+		rules := s.risk.Rules()
+		writeJSON(w, 200, map[string]any{"rules": rules, "items": rules, "count": len(rules)})
 		return
 	}
 	var req struct {
@@ -245,25 +247,35 @@ func (s *Server) handleBlocklistList(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBlocklistDelete serves DELETE /v1/admin/blocklist-entries/{id}
-// where {id} is "<scope>:<pattern>" (e.g. dest:86139). Path parameter
-// replaces the legacy {"remove":true} body flag.
+// where {id} is "<scope>:<pattern>" (e.g. dest:86139, kind defaults to
+// black) or "<kind>:<scope>:<pattern>" (e.g. white:dest:8613927…) so
+// whitelist entries can be lifted too — the 2-part form stays for
+// backward compatibility. Path parameter replaces the legacy
+// {"remove":true} body flag.
 func (s *Server) handleBlocklistDelete(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	scope, pattern := "dest", r.PathValue("id")
-	if parts := strings.SplitN(pattern, ":", 2); len(parts) == 2 {
+	kind, scope, pattern := "black", "dest", r.PathValue("id")
+	switch parts := strings.SplitN(pattern, ":", 3); len(parts) {
+	case 3:
+		kind, scope, pattern = parts[0], parts[1], parts[2]
+	case 2:
 		scope, pattern = parts[0], parts[1]
 	}
+	if (kind != "black" && kind != "white") || (scope != "src" && scope != "dest") || pattern == "" {
+		httpError(w, 400, "id must be [black|white:]<src|dest>:<pattern>")
+		return
+	}
 	if s.pg != nil {
-		if _, err := s.pg.RemoveNumberList(r.Context(), "", "black", scope, pattern); err != nil {
+		if _, err := s.pg.RemoveNumberList(r.Context(), "", kind, scope, pattern); err != nil {
 			httpError(w, 500, err.Error())
 			return
 		}
 	}
-	n := s.blocklist.Remove("", "black", scope, pattern)
+	n := s.blocklist.Remove("", kind, scope, pattern)
 	s.audit(r, "remove", "blocklist", pattern, map[string]any{"removed": n}, nil)
-	s.emitListOp("remove", blocklist.Entry{Kind: "black", Scope: scope, Pattern: pattern})
+	s.emitListOp("remove", blocklist.Entry{Kind: kind, Scope: scope, Pattern: pattern})
 	writeJSON(w, 200, map[string]any{"removed": n})
 }
 

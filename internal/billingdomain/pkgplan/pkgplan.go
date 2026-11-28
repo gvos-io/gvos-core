@@ -175,6 +175,10 @@ type RateResult struct {
 	// - the caller already has the list-price math; we return the
 	// multiplier to apply).
 	Discount float64
+	// ExhaustedNow: this call crossed the cycle allowance from below
+	// the cap to at/after it — the package.exhausted webhook signal.
+	// Best-effort: the crossing detection rides the local mirror.
+	ExhaustedNow bool
 }
 
 // Apply runs package semantics for one call of billedSecs at
@@ -261,7 +265,8 @@ func (e *Engine) Apply(accountID string, billedSecs int, ratedCost money.Amount)
 	}
 	e.mu.Unlock()
 
-	return RateResult{FreeSecs: free, BillableSecs: billable, Discount: discount}
+	exhaustedNow := maxFree > 0 && free > 0 && localUsed < maxFree && localUsed+free >= maxFree
+	return RateResult{FreeSecs: free, BillableSecs: billable, Discount: discount, ExhaustedNow: exhaustedNow}
 }
 
 // MinSpendShortfall returns how much the account is below its
@@ -310,4 +315,16 @@ func roundUp7(p float64) float64 {
 		whole++
 	}
 	return whole / 1e7
+}
+
+// PackageOf returns the assigned package definition, if any (the
+// package.exhausted webhook payload needs the package identity).
+func (e *Engine) PackageOf(accountID string) (Package, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	a, ok := e.accounts[accountID]
+	if !ok {
+		return Package{}, false
+	}
+	return a.pkg, true
 }
