@@ -111,7 +111,7 @@ CREATE INDEX idx_calls_account ON calls(account_id, created_at DESC);
 
 | 期 | 内容 | 判定 |
 |---|---|---|
-| F1 | 双向回拨全链路（originate 指令 + UAC 微服务 + calls 资源 + call.state 事件 + 计费接入） | SIPp 桥接两端真实接通、CDR=ledger 逐分零漂移、webhook 状态序列正确 |
+| F1 | 双向回拨全链路（originate 指令 + UAC 微服务 + calls 资源 + call.state 事件 + 计费接入） | **core 侧 + 拨号器已交付（2026-11-28）**：/v1/calls 全套 API、gvos.call.originate 协议、gvos-originate 二进制（单腿 + RFC 3725 flow-I 双腿 3PCC、CANCEL/BYE、max_duration、durable 队列）；SIP 逻辑回环包级验证。**剩余门槛：真实 Kamailio 互通（SIPp 两端桥接 + CDR=ledger 对账）需联调环境** |
 | F2 | AI 外呼（media_agent + 流桥接） | livekit/pipecat 桥接 e2e，ASR 代理工作 |
 | F3 | 批量任务（campaign 资源 + 速率调度） | 压测 1000 级任务队列，CPS 配额生效 |
 
