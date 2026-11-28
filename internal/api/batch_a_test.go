@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/gvos-io/gvos-core/internal/shared/acl"
 )
 
 func doAdmin(t *testing.T, h http.Handler, method, path string, body any) *httptest.ResponseRecorder {
