@@ -211,3 +211,94 @@ curl -X POST -H "Authorization: Bearer <token>"   -d '{"rules":[],"confirm_empty
 - 每次交付跑 `bash test/security/baseline.sh`（含 NTP 同步与 chrony 偏移检查项）；
 - 跨副本对账报告含"时钟偏差抽检"一节；
 - 套餐周期 key（cycleKey）与风控日费用窗口由 gv-core 统一生成，Kamailio 不生成周期边界 key。
+
+## 9. API 路由总账（2026-11-28 对齐版）
+
+> 2026-11-28 起本节取代旧版零散 curl 示例（旧 §1.1 等处的路径若与本
+> 节冲突，以本节 + /openapi.json 为准）。
+
+本节是运维视角的接口面总账：curl 例子 + 平面归属 + 关键行为。
+契约的**唯一权威**是 `GET /openapi.json`（51 路径，spec→路由有 CI
+回归测试守护）；本节是运维手册的人读版本。鉴权三平面：
+`X-GVOS-Internal`（信令面 1-4，缺省 fail-closed）、
+`Authorization: Bearer gvos_*` API key（admin/tenant/客户面）、
+无鉴权（healthz/stats）。
+
+### 9.1 信令事件面（内部 token，Kamailio → core）
+
+| 路由 | 用途 |
+|---|---|
+| `POST /v1/call/start` | INVITE 计费预锁（403 DISABLED/FORBIDDEN/INSUFFICIENT_CREDIT、429 限额、503 权威不可用） |
+| `POST /v1/call/answer` / `POST /v1/call/end` | 应答/结算 + CDR |
+| `GET /v1/stats` | 全局快照 + counts |
+
+### 9.2 客户发起面 `/v1/calls`（API key；M11 F1）
+
+```bash
+curl -X POST :28080/v1/calls \
+  -H "Authorization: Bearer $KEY" -H "Idempotency-Key: $UNIQ" \
+  -d '{"caller":"13800001234","callee":"13900005678","account_id":"1000"}'
+# 202 {call_id, state:pending} — 状态经 GET /v1/calls/{id} 或 call.state webhook
+curl -X DELETE :28080/v1/calls/$CALL_ID ...   # 取消/拆线
+```
+边缘侧由 `gvos-originate` 二进制消费 `gvos.call.originate` 拨号（
+`GVOS_ORIG_SIP_ADDR` 指向 Kamailio trunk）。
+
+### 9.3 admin 面速查（Bearer key；全部有审计）
+
+**账户**：`GET/POST /v1/admin/accounts`（分页 limit/cursor）、
+`GET/PATCH/DELETE /v1/admin/accounts/{id}`（PATCH 旋钮含 enabled、
+DELETE 软删 409 有子账户；**credit 不可 PATCH**——余额只走
+topup/结算/划拨）、`POST .../topup`、`GET .../ledger`（账本流水）、
+`GET .../tree`（计费链）、`GET .../live`（并发 vs 限额）。
+
+**租户/费率**：`GET/POST/PATCH/DELETE /v1/admin/tenants`（重名 409、
+有账户 409）、`GET/PUT /v1/admin/rates?group=`（组参数，行带组名）、
+`DELETE /v1/admin/rates/{prefix}?group=`、`GET/POST /v1/admin/rate-groups`
+（demo 组受保护不可删）、`POST /v1/admin/rates/quote`（试算）。
+
+**路由/熔断**：`GET/PUT /v1/admin/gateways`、`DELETE .../{id}`（落库不
+复活）、`GET .../{id}/breaker`、`POST .../{id}/unlock`（M12 解锁）、
+`GET/PUT /v1/admin/gateways-breaker/config`、`POST /v1/admin/routes/preview`。
+
+**风控/策略**：`GET/PUT /v1/admin/risk-rules`（含 counters）、黑名单
+`GET/POST/DELETE blocklist-entries`（三段式 `[black|white:]src|dest:pattern`）、
+`PUT/DELETE /v1/admin/blocklist-sources`（feed 源管理，boot 覆盖 env）、
+ipallow `GET/POST/DELETE`（清空需 confirm_empty）。
+
+**运营数据**：`GET /v1/admin/cdrs`（PG 历史权威 + account_id/dest/call_id/
+from/to 过滤 + keyset）、`GET /v1/admin/audit`（审计回溯）、
+`GET /v1/admin/reports?day=|from=&to=`、`GET /v1/admin/settings`（只读巡检——
+**没有通用写面**，写走各专属 API）、`GET /v1/admin/media/stats`。
+
+**套餐/DID/AXB**：`GET/PUT /v1/admin/packages`（assign/unassign_account）、
+DID `POST/GET/DELETE`（enabled 缺省 true）、AXB `POST/GET/DELETE bindings`
++ stats（PG 持久 + cfg.reload axb 广播）。
+
+**webhook**：`POST/GET/PATCH/DELETE /v1/admin/webhooks`（PATCH 的 secret
+不可变）、`GET .../deliveries`（游标）、`POST .../deliveries/{id}/replay`、
+`GET/PUT /v1/admin/webhooks/retry-policy`。
+
+**密钥**：`POST/GET/DELETE /v1/admin/keys`（key 明文只显一次；PG 持久 +
+cfg.reload keys 副本收敛）。
+
+### 9.4 tenant 自助面（Bearer key role=tenant|agent）
+
+只读：`me/accounts/cdrs/stats/packages/usage` + WS `cdr-stream`（心跳/
+pong/since 续传/丢帧 ctrl 帧）。写（role=tenant only）：`POST /v1/tenant/
+accounts`（初始额度=从租户余额**划拨**）、`POST /v1/tenant/accounts/{id}/
+topup`（正 delta 下行划拨）、`POST/GET/DELETE /v1/tenant/webhooks`。
+
+### 9.5 webhook 事件封闭枚举（v1 信封）
+
+`cdr.completed`、`call.teardown`、`account.low_balance`、`risk.blocked`、
+`package.exhausted`、`call.state`。签名为 Stripe 风格 HMAC（重放窗口
+5 分钟），订阅 URL 强制 https+公网。
+
+### 9.6 运维要点速记
+
+- 所有列表面统一 `items/next_cursor` 包络（console 兼容）
+- 幂等键覆盖动钱路由（topup/allocate/packages/keys/calls）
+- 保留策略：webhook_deliveries 7 天（GVOS_DELIVERY_TTL_DAYS）、录音
+  GVOS_RECORDING_TTL_DAYS（0=永久）、幂等键 24h、AXB 死绑定 24h
+- 内存 demo 模式对 audit/ledger/rate-groups/tenants 写面诚实回 503
