@@ -69,6 +69,10 @@ type Server struct {
 	whMemSubs      []webhook.Subscription    // memory-mode subscriptions (whStore==nil); cfgMu-guarded
 	gwMu           sync.Mutex                // serializes gateway full-set read-modify-write
 	tenantSetCache map[string]tenantSetEntry // tenant→account-set cache (5s TTL)
+	origMu         sync.RWMutex              // origination resource state (below)
+	origCalls      map[string]*store.CallRow // memory-mode origination rows
+	origIndex      map[string]bool           // live originated call ids (event hooks)
+	origDedup      map[string]time.Time      // (caller,callee) anti-storm window
 	redisLocks     bool                      // single-runner locks active (rollup/rebroadcast dedup)
 	bal            *account.BalanceR         // redis balance face (nil = in-memory authority)
 	events         *events.Publisher         // NATS event bus (nil = publishing off)
@@ -216,7 +220,8 @@ func (s *Server) rebuildRates() {
 
 // NewServer builds the in-memory demo server (dev/test mode).
 func NewServer() *Server {
-	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), axb: axb.NewStore(), dids: did.NewStore(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), axb: axb.NewStore(), dids: did.NewStore(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now(),
+		origCalls: map[string]*store.CallRow{}, origIndex: map[string]bool{}, origDedup: map[string]time.Time{}}
 	s.userIndex = map[string]string{}
 
 	// Demo seed: one tenant chain and a small rate table. The tenant
@@ -245,7 +250,8 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), axb: axb.NewStore(), dids: did.NewStore(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now()}
+	s := &Server{store: account.NewStore(), pg: pg, blocklist: blocklist.New(), ipallow: ipallow.New(), risk: riskctrl.New(), media: mediastream.New(), pkg: pkgplan.New(), gws: gateway.New(), axb: axb.NewStore(), dids: did.NewStore(), regs: regtable.New(), acl: acl.NewStore(), idem: newIdemStore(), startAt: time.Now(),
+		origCalls: map[string]*store.CallRow{}, origIndex: map[string]bool{}, origDedup: map[string]time.Time{}}
 	// CDR partitions: the schema ships a fixed window only, and the
 	// first month without one fails every CDR insert. Make sure this
 	// month and the next few exist before any CDR needs one (the
@@ -346,6 +352,19 @@ func NewPGServer(ctx context.Context, dsn string) (*Server, error) {
 	} else if len(restored) > 0 {
 		s.axb.Restore(restored)
 		log.Printf("restored %d AXB bindings", len(restored))
+	}
+	// Live origination calls: the signaling event hooks key off this
+	// in-process index, so a restart must re-track pending/dialing
+	// rows or their lifecycle would freeze mid-flight.
+	if liveIDs, err := pg.ListLiveCallIDs(ctx); err != nil {
+		log.Printf("live origination load failed: %v", err)
+	} else {
+		for _, cid := range liveIDs {
+			s.trackOrigination(cid)
+		}
+		if len(liveIDs) > 0 {
+			log.Printf("tracking %d live origination calls", len(liveIDs))
+		}
 	}
 	// API keys (migration 014): the table is the durable source; the
 	// hot auth path still reads the in-memory acl.Store (zero-IO
@@ -700,6 +719,13 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("POST /v1/call/answer", s.handleAnswer)
 	mux.HandleFunc("POST /v1/call/end", s.handleEnd)
 	mux.HandleFunc("GET /v1/stats", s.handleStats)
+
+	// Origination calls resource (M11 F1, customer plane — API key,
+	// NOT the internal token).
+	mux.HandleFunc("POST /v1/calls", s.withIdempotency(s.handleCallCreate))
+	mux.HandleFunc("GET /v1/calls", s.handleCallList)
+	mux.HandleFunc("GET /v1/calls/{id}", s.handleCallGet)
+	mux.HandleFunc("DELETE /v1/calls/{id}", s.handleCallCancel)
 
 	// Admin plane: resource routes (Go 1.22 method patterns). The
 	// verb-dispatcher routes are gone; 405/404 come from net/http.

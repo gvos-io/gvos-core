@@ -199,7 +199,7 @@
 ### 接口缺失
 | 域 | 项 |
 |---|---|
-| 战略 | M11 F1/F2/F3 实施（设计已批，docs/click-to-call-design.md）；账户 disable（需 schema+准入加 enabled 标志）；在线网关熔断+解锁（先立项熔断设计） |
+| 战略 | M11 **F1 core 侧已交付**（/v1/calls + originate 指令 + 状态机 + call.state；UAC 拨号器二进制待实施）；F2/F3 未开工；账户 disable（需 schema+准入加 enabled 标志）；在线网关熔断+解锁（先立项熔断设计） |
 | 资源缺口 | 费率组管理（全部锁死 demo 组）；租户 CRUD；路由规则 API（routes/route_legs 零引用，用或删）+ dispatcher 处置；settings 通用 KV |
 | 能力缺口 | 路由预览 / 费率试算 / 账户树 / 实时并发 / 风控计数器 / 媒体流统计；VOS CSV 导入 API；录音删除+retention；webhook 重试策略可配+deliveries 清理；黑名单源增删；报表时间范围查询；OIDC/SSO（P3） |
 
@@ -217,3 +217,4 @@
 | 2026-11-28 | P0 全量交付（M1-M5 + §7 事故级九项 + 幂等/包络部分 P1），见交付状态注与 CHANGELOG [Unreleased] |
 | 2026-11-28 | P1 追加交付：M6/M7/M8/M9 + 改造小项；M12 裁决修正（在线目录无熔断，解锁 API 无的放矢，需先立项熔断设计）；M10/M11 待决策 |
 | 2026-11-28 | M10 按授权模型裁决交付（tenant 划拨式充值+建下级）；M11 立项，设计稿落 docs/click-to-call-design.md |
+| 2026-11-28 | M11 F1 core 侧交付（calls 资源 + originate 协议 + 状态机 + call.state 事件；迁移 015）；包 1 契约对齐 + 包 2 健壮性收尾交付 |

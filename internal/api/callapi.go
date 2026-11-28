@@ -204,6 +204,10 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 	// can attach even before the first RTP chunk.
 	s.media.Open(req.CallID)
 
+	// Origination lifecycle: the UAC dialer uses the resource id as
+	// the SIP Call-ID, so this event IS the A-leg dial confirmation.
+	s.advanceOrigination(req.CallID, origDialing, "")
+
 	answer := map[string]any{
 		"call_id":     req.CallID,
 		"rate_prefix": entry.Prefix,
@@ -251,6 +255,7 @@ func (s *Server) callStart(req callStartReq) (int, any) {
 // either way — it has nothing to retry.
 func (s *Server) callAnswer(callID string) (int, any) {
 	_ = s.calls.Answer(callID)
+	s.advanceOrigination(callID, origAnswered, "")
 	return 200, map[string]string{"call_id": callID, "status": "live"}
 }
 
@@ -409,5 +414,8 @@ func (s *Server) callEnd(ctx context.Context, req callEndReq) (int, any) {
 		}
 	}
 	mCallsEnded.Inc(1)
+	// Origination lifecycle: a platform-dialed call ends here too
+	// (reason rides the CDR release).
+	s.advanceOrigination(req.CallID, origEnded, cdr.Release)
 	return 200, cdr
 }

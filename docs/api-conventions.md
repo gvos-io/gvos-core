@@ -84,6 +84,8 @@ cursor 式:`?cursor=&limit=`(默认 50,上限 500),响应带 `next_cursor`(空=�
 | `gvos.cfg.reload` | entity(gateway/ip_allowlist/blocklist/rate/account/credit/recording/risk/package) + 全量快照 | gv-core 副本 + 边缘 htable(GW_SYNC/IPALLOW_APPLY/BL_APPLY) |
 | `gvos.recording.completed` | call_id, track(agent/user), object_key, backend, size_bytes, format | 上传下游、Webhook(Phase D) |
 | `gvos.svc.call.start/.answer/.end`、`gvos.svc.stats` | req/reply 服务面(与 HTTP 面镜像) | Kamailio(RPC 档)、运维工具 |
+| `gvos.call.originate` | op(dial\|cancel), call_id(=calls.id,SIP Call-ID), caller, callee, to_agent, account_id, max_duration_s | 出板 UAC 拨号器(M11 F1, docs/click-to-call-design.md) + 各副本 tracker |
+| webhook `call.state` | call_id, state(pending\|dialing\|answered\|ended\|cancelled\|failed), reason, caller, callee, to_agent | 客户系统(M11 F1 生命周期事件) |
 
 边缘无点别名(gvos-edge-cfg/-risk/-tear)载荷与正名字节一致,不入 JetStream。
 

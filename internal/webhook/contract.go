@@ -125,6 +125,10 @@ const (
 	// EventPackageExhausted fires when a call consumes the last free
 	// seconds of the cycle allowance.
 	EventPackageExhausted = "package.exhausted"
+	// EventCallState fires on every origination-call lifecycle
+	// transition (M11 F1): state ∈ pending|dialing|answered|ended|
+	// cancelled|failed.
+	EventCallState = "call.state"
 )
 
 // AccountLowBalanceData: the balance state a billing/CRM integration
@@ -152,6 +156,16 @@ type PackageExhaustedData struct {
 	FreeMinutes int    `json:"free_minutes"`
 }
 
+// CallStateData: one origination-call lifecycle transition.
+type CallStateData struct {
+	CallID   string `json:"call_id"`
+	State    string `json:"state"`
+	Reason   string `json:"reason,omitempty"` // release reason on ended/failed/cancelled
+	Caller   string `json:"caller"`
+	Callee   string `json:"callee,omitempty"`
+	ToAgent  string `json:"to_agent,omitempty"`
+}
+
 // ContractSubjects is the closed set of subscribable events in
 // "gvos.<event>" form — the single source the admin and tenant
 // creation faces validate against (they used to carry two drifting
@@ -163,5 +177,6 @@ func ContractSubjects() map[string]bool {
 		"gvos." + EventAccountLowBalance: true,
 		"gvos." + EventRiskBlocked:       true,
 		"gvos." + EventPackageExhausted:  true,
+		"gvos." + EventCallState:         true,
 	}
 }

@@ -31,6 +31,10 @@ type oasParam struct {
 // openAPIEndpoints enumerates the public surface (internal control
 // plane, stream-push test hook and the media stream stay out).
 var openAPIEndpoints = []oasEndpoint{
+	{"POST", "/v1/calls", "Originate a platform-dialed call (click-to-call / AI outbound): 202 async, lifecycle via GET + call.state webhook; Idempotency-Key supported", "calls", true, nil},
+	{"GET", "/v1/calls", "List origination calls (state/account filters, cursor paging)", "calls", false, []oasParam{pLimit(), pCursor(), {"state", "pending|dialing|answered|ended|cancelled|failed"}, {"account_id", "exact account id (tenant keys are scoped to their subtree)"}}},
+	{"GET", "/v1/calls/{id}", "Read one origination call", "calls", false, nil},
+	{"DELETE", "/v1/calls/{id}", "Cancel (pending/dialing) or tear down (answered)", "calls", false, nil},
 	{"POST", "/v1/call/start", "Billing pre-lock for an INVITE (internal token)", "signaling", true, nil},
 	{"POST", "/v1/call/answer", "Mark the call answered", "signaling", true, nil},
 	{"POST", "/v1/call/end", "Settle the call and emit the CDR", "signaling", true, nil},

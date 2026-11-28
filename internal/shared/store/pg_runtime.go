@@ -133,6 +133,7 @@ func (p *PG) TestResetRuntimeState(ctx context.Context) error {
 		`DELETE FROM idempotency_keys`,
 		`DELETE FROM axb_bindings`,
 		`DELETE FROM cdr`,
+		`DELETE FROM calls`,
 		`DELETE FROM settings WHERE key = 'gateways'`,
 		// integration-test fixtures share the throwaway schema; the
 		// ledger rows go first (FK balance_ledger→accounts).
@@ -716,4 +717,171 @@ func (p *PG) TransferCredit(ctx context.Context, fromID, toID string, delta mone
 		return 0, 0, err
 	}
 	return fromBal, toBal, nil
+}
+
+// --- Origination calls resource (M11 F1) ----------------------------
+
+// CallRow is one origination call: a pending→dialing→answered→ended
+// lifecycle driven by the normal signaling event flow, billed by the
+// normal /v1/call/start path (the row itself never bills).
+type CallRow struct {
+	ID           string          `json:"id"`
+	TenantID     string          `json:"tenant_id"`
+	AccountID    string          `json:"account_id"`
+	Caller       string          `json:"caller"`
+	Callee       string          `json:"callee,omitempty"`
+	ToAgent      string          `json:"to_agent,omitempty"`
+	State        string          `json:"state"`
+	FailReason   string          `json:"fail_reason,omitempty"`
+	MaxDurationS int             `json:"max_duration_s"`
+	Custom       json.RawMessage `json:"custom,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+}
+
+// CreateCall inserts one origination call (state pending).
+func (p *PG) CreateCall(ctx context.Context, c CallRow) (string, error) {
+	var id string
+	err := p.pool.QueryRow(ctx, `
+        INSERT INTO calls (tenant_id, account_id, caller, callee, to_agent, max_duration_s, custom)
+        VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::jsonb)
+        RETURNING id::text`,
+		c.TenantID, c.AccountID, c.Caller, textOrNull(c.Callee), textOrNull(c.ToAgent),
+		c.MaxDurationS, textOrNull(string(c.Custom))).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("create call: %w", err)
+	}
+	return id, nil
+}
+
+// GetCall reads one origination call.
+func (p *PG) GetCall(ctx context.Context, id string) (*CallRow, error) {
+	var c CallRow
+	var custom []byte
+	err := p.pool.QueryRow(ctx, `
+        SELECT id::text, tenant_id::text, account_id::text, caller,
+               coalesce(callee, ''), coalesce(to_agent, ''), state,
+               coalesce(fail_reason, ''), max_duration_s,
+               coalesce(custom, 'null'::jsonb), created_at, updated_at
+        FROM calls WHERE id = $1::uuid`, id).
+		Scan(&c.ID, &c.TenantID, &c.AccountID, &c.Caller, &c.Callee, &c.ToAgent,
+			&c.State, &c.FailReason, &c.MaxDurationS, &custom, &c.CreatedAt, &c.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if string(custom) != "null" {
+		c.Custom = custom
+	}
+	return &c, nil
+}
+
+// UpdateCallState advances the lifecycle (idempotent no-op when the
+// row is already terminal). Returns rows affected.
+func (p *PG) UpdateCallState(ctx context.Context, id, state, failReason string) (int, error) {
+	tag, err := p.pool.Exec(ctx, `
+        UPDATE calls SET state = $2, fail_reason = $3, updated_at = now()
+        WHERE id = $1::uuid AND state NOT IN ('ended','cancelled','failed')`, id, state, textOrNull(failReason))
+	if err != nil {
+		return 0, fmt.Errorf("update call state: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// ListCalls reads origination calls newest-first, optional state +
+// account-set filters, keyset on created_at+id via the offset-free
+// id cursor.
+func (p *PG) ListCalls(ctx context.Context, state string, accounts []string, limit int, cursor string) ([]CallRow, string, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	args := []any{}
+	conds := []string{}
+	bind := func(vals ...any) string {
+		idx := make([]string, len(vals))
+		for i, v := range vals {
+			args = append(args, v)
+			idx[i] = fmt.Sprintf("$%d", len(args))
+		}
+		return strings.Join(idx, ", ")
+	}
+	if state != "" {
+		conds = append(conds, fmt.Sprintf("state = %s", bind(state)))
+	}
+	if len(accounts) > 0 {
+		conds = append(conds, fmt.Sprintf("account_id::text = ANY(%s)", bind(accounts)))
+	}
+	if cursor != "" {
+		st, id, err := decodeCDRCursor(cursor)
+		if err != nil {
+			return nil, "", err
+		}
+		// calls.id is a uuid — keyset on (created_at, id) like the CDR
+		// face keys on (start_time, call_id); the encoded marker is
+		// the same base64 "time|id" shape.
+		conds = append(conds, fmt.Sprintf("(created_at, id) < (%s::timestamptz, %s::uuid)", bind(st), bind(id)))
+	}
+	where := ""
+	if len(conds) > 0 {
+		where = " WHERE " + strings.Join(conds, " AND ")
+	}
+	rows, err := p.pool.Query(ctx, `
+        SELECT id::text, tenant_id::text, account_id::text, caller,
+               coalesce(callee, ''), coalesce(to_agent, ''), state,
+               coalesce(fail_reason, ''), max_duration_s,
+               coalesce(custom, 'null'::jsonb), created_at, updated_at
+        FROM calls`+where+`
+        ORDER BY created_at DESC, id DESC`+fmt.Sprintf(" LIMIT $%d", len(args)+1), append(args, limit)...)
+	if err != nil {
+		return nil, "", fmt.Errorf("list calls: %w", err)
+	}
+	defer rows.Close()
+	out := make([]CallRow, 0, limit)
+	for rows.Next() {
+		var c CallRow
+		var custom []byte
+		if err := rows.Scan(&c.ID, &c.TenantID, &c.AccountID, &c.Caller, &c.Callee, &c.ToAgent,
+			&c.State, &c.FailReason, &c.MaxDurationS, &custom, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, "", err
+		}
+		if string(custom) != "null" {
+			c.Custom = custom
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) == limit {
+		last := out[len(out)-1]
+		next = base64.URLEncoding.EncodeToString([]byte(last.CreatedAt.Format(time.RFC3339Nano) + "|" + last.ID))
+	}
+	return out, next, nil
+}
+
+// ListLiveCallIDs returns ids of calls not yet terminal — answered
+// calls still owe an end event, so boot tracking includes them.
+func (p *PG) ListLiveCallIDs(ctx context.Context) ([]string, error) {
+	rows, err := p.pool.Query(ctx, `SELECT id::text FROM calls WHERE state NOT IN ('ended','cancelled','failed')`)
+	if err != nil {
+		return nil, fmt.Errorf("list live calls: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// textOrNull maps "" to SQL NULL (nullable text columns).
+func textOrNull(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
