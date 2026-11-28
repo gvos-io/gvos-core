@@ -4,6 +4,9 @@ All notable changes to gvos-core follow this file. Format: Keep a Changelog; ver
 
 ## [Unreleased]
 
+### Added — gateway circuit breaker design (M12 ruling artifact, 2026-11-28)
+- `docs/gateway-circuit-breaker-design.md`: the online gateway directory has no failure counting today (locked_until exists only in the dead legacy-bootstrap path). Design: CDR-settlement hook counters (no synchronous writes on the call path), per-gateway state machine with minimum-sample windows and exponential-backoff cooldowns, 404/486 explicitly not counted (callee problems are not gateway problems), route exclusion via the existing cfg.reload broadcast, breaker observation fields + unlock API (the original M12 ask, meaningful only once the breaker exists), boot replay from the CDR window.
+
 ### Added — tenant administration + settings inspection (remaining-list item, 2026-11-28)
 - **Tenant CRUD**: `GET/POST/PATCH/DELETE /v1/admin/tenants` — the tenants table existed since migration 001 with one seeded row and no API (multi-tenancy was schema-only). Provision/rename/soft-delete with live-account guards (409 IN_USE), duplicate live names 409 (migration 016 adds the partial unique index), per-tenant currency. Memory mode: demo tenant read-only, writes 503.
 - **Settings inspection**: `GET /v1/admin/settings` — the six runtime settings keys with their values, read-only by design (every mutable setting has a dedicated owning API; a generic write face would fork that authority). Memory mode 503.

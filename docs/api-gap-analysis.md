@@ -199,7 +199,7 @@
 ### 接口缺失
 | 域 | 项 |
 |---|---|
-| 战略 | M11 **F1 core 侧已交付**（/v1/calls + originate 指令 + 状态机 + call.state；UAC 拨号器二进制待实施）；F2/F3 未开工；账户 disable（需 schema+准入加 enabled 标志）；在线网关熔断+解锁（先立项熔断设计） |
+| 战略 | M11 **F1 core 侧已交付**（/v1/calls + originate 指令 + 状态机 + call.state；UAC 拨号器二进制待实施）；F2/F3 未开工；账户 disable（需 schema+准入加 enabled 标志）；在线网关熔断+解锁（**设计稿已落** docs/gateway-circuit-breaker-design.md，切片 CB-1/2/3 待实施） |
 | 资源缺口 | ~~费率组管理~~ ✅ 已交付（多组计费运行时 + CRUD + quote，2026-11-28）；~~租户 CRUD~~ ✅（2026-11-28，迁移 016 唯一索引）；路由规则 API（**裁决：延后激活**——LCR on gateways 覆盖当前选路，路由引擎触及边缘，见 §9）；~~settings 通用 KV~~ ✅（只读巡检面，写入走各专属 API） |
 | 能力缺口 | 路由预览 / ~~费率试算~~ ✅ / 账户树 / 实时并发 / 风控计数器 / 媒体流统计；VOS CSV 导入 API；录音删除+retention；webhook 重试策略可配+~~deliveries 清理~~ ✅（包 2）；黑名单源增删；~~报表时间范围查询~~ ✅；OIDC/SSO（P3） |
 
