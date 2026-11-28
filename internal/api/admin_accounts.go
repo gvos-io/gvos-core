@@ -4,11 +4,14 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 	"log"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gvos-io/gvos-core/internal/billingdomain/money"
 
 	"github.com/gvos-io/gvos-core/internal/billingdomain/account"
 	"github.com/gvos-io/gvos-core/internal/shared/events"
@@ -53,7 +56,9 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 	sipPass := genSIPPassword(12)
 	ha1 := computeHA1(req.Username, "gvos.local", sipPass)
 
-	id := "acc-" + req.Username + "-" + time.Now().Format("150405")
+	// UnixNano: the HHMMSS form collided on same-second creates (two
+	// accounts sharing an id corrupt the registry).
+	id := "acc-" + req.Username + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	if s.pg != nil {
 		var err error
 		id, err = s.pg.CreateAccountWithHA1(r.Context(), demoTenant, req.ParentID,
@@ -235,8 +240,16 @@ func (s *Server) handleAccountList(w http.ResponseWriter, r *http.Request) {
 		}
 		accs = filtered
 	}
+	// Stable order (Store.List is a map walk): by username, then page.
+	sort.Slice(accs, func(i, j int) bool { return accs[i].Username < accs[j].Username })
+	limit, offset := listPage(r, len(accs))
+	page := accs[offset : offset+limit]
+	next := ""
+	if offset+limit < len(accs) {
+		next = strconv.Itoa(offset + limit)
+	}
 	// Dual keys: historical "accounts" + console-friendly "items".
-	writeJSON(w, 200, map[string]any{"accounts": accs, "items": accs, "count": len(accs)})
+	writeJSON(w, 200, map[string]any{"accounts": page, "items": page, "count": len(page), "total": len(accs), "next_cursor": next})
 }
 
 // POST /v1/admin/rates {"prefix","price","init_dur","step_dur","min_dur"}

@@ -3,13 +3,17 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gvos-io/gvos-core/internal/callcore"
 	"github.com/gvos-io/gvos-core/internal/mediamain/mediastream"
+	"github.com/gvos-io/gvos-core/internal/shared/store"
 	"github.com/gvos-io/gvos-core/internal/webhook"
 )
 
@@ -40,9 +44,12 @@ func contractCDRData(c *callcore.CDR) webhook.CDRCompletedData {
 }
 
 // handleTenantCDRStream upgrades to WebSocket and streams the
-// tenant's CDR events in real time (api-roadmap Phase D §4). Every
-// frame is one contract envelope (cdr.completed). Frames for other
-// tenants are filtered before the fan-out, never client-side.
+// tenant's CDR events in real time (api-roadmap Phase D §4). Data
+// frames are cdr.completed projections (same JSON the webhook data
+// carries); control frames are {"ctrl":...} objects (resume/dropped).
+// Frames for other tenants are filtered before the fan-out, never
+// client-side. Protocol: ping/pong both ways, 30s server heartbeat,
+// ?since=RFC3339 replay window, dropped-frame control frames.
 func (s *Server) handleTenantCDRStream(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.requireTenant(w, r)
 	if !ok {
@@ -52,6 +59,18 @@ func (s *Server) handleTenantCDRStream(w http.ResponseWriter, r *http.Request) {
 	if key == "" || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		httpError(w, 400, "websocket upgrade required")
 		return
+	}
+	// Resume cursor: ?since=RFC3339 replays that window (PG history or
+	// the memory ring) before attaching to the live feed — a reconnect
+	// no longer silently loses the disconnect window.
+	var since time.Time
+	if v := r.URL.Query().Get("since"); v != "" {
+		st, perr := time.Parse(time.RFC3339, v)
+		if perr != nil {
+			httpError(w, 400, "since must be RFC3339")
+			return
+		}
+		since = st
 	}
 	hj, ok2 := w.(http.Hijacker)
 	if !ok2 {
@@ -78,11 +97,11 @@ func (s *Server) handleTenantCDRStream(w http.ResponseWriter, r *http.Request) {
 
 	// Register a per-tenant CDR tap. The CDR ring append is the hook:
 	// storeCdr is called by both faces, so a channel fed from there
-	// streams every contract envelope for this tenant.
-	set := s.tenantAccounts(id.TenantID)
+	// streams every event for this tenant.
+	set := s.tenantAccountsCached(id.TenantID)
 	ch := make(chan []byte, 64)
-	s.cdrTapsMu.Lock()
 	tap := &cdrTap{set: set, ch: ch}
+	s.cdrTapsMu.Lock()
 	s.cdrTaps = append(s.cdrTaps, tap)
 	s.cdrTapsMu.Unlock()
 	defer func() {
@@ -96,21 +115,136 @@ func (s *Server) handleTenantCDRStream(w http.ResponseWriter, r *http.Request) {
 		s.cdrTapsMu.Unlock()
 	}()
 
-	// Reader loop drains client pings/control frames until close.
+	// All writes (data, control, ping, pong) serialize here — the
+	// reader answers pings from its goroutine while the loop below
+	// streams, and RFC6455 forbids interleaved frames.
+	var writeMu sync.Mutex
+	write := func(op int, payload []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		if err := mediastream.WriteFrame(rw.Writer, op, payload); err != nil {
+			return err
+		}
+		if f := rw.Flush; f != nil {
+			f()
+		}
+		return nil
+	}
+
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
+		// Reader loop: answer client pings (they used to be swallowed —
+		// well-behaved clients would time out), honor closes.
 		for {
-			if _, err := mediastream.ReadFrame(rw.Reader); err != nil {
+			f, rerr := mediastream.ReadFrame(rw.Reader)
+			if rerr != nil {
+				return
+			}
+			switch f.Opcode {
+			case mediastream.OpPingValue:
+				if werr := write(mediastream.OpPongValue, f.Payload); werr != nil {
+					return
+				}
+			case mediastream.OpCloseValue:
 				return
 			}
 		}
 	}()
 
-	for frame := range ch {
-		if err := mediastream.WriteFrame(rw.Writer, mediastream.OpTextValue, frame); err != nil {
-			return
+	// Replay window (bounded): PG history in pages, the ring in memory
+	// mode. partial=true tells the client the window exceeded the cap
+	// and it should re-since from the earliest frame received.
+	replayed, partial := 0, false
+	if !since.IsZero() {
+		writeFrame := func(c *callcore.CDR) bool {
+			b, merr := json.Marshal(contractCDRData(c))
+			if merr != nil {
+				return true
+			}
+			return write(mediastream.OpTextValue, b) == nil
 		}
-		if f := rw.Flush; f != nil {
-			f()
+		if s.pg != nil {
+			cursor := ""
+			for page := 0; page < 5; page++ {
+				pctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				rows, next, qerr := s.pg.QueryCDRs(pctx, store.CDRQuery{
+					Cursor: cursor, Limit: 500, Accounts: setKeys(set), From: since,
+				})
+				cancel()
+				if qerr != nil {
+					break
+				}
+				for i := range rows {
+					if !writeFrame(&rows[i]) {
+						return
+					}
+					replayed++
+				}
+				if next == "" {
+					break
+				}
+				cursor = next
+				if page == 4 {
+					partial = true
+				}
+			}
+		} else {
+			s.cdrsMu.Lock()
+			ring := append([]*callcore.CDR(nil), s.cdrs...)
+			s.cdrsMu.Unlock()
+			// ring is oldest→newest; replay in chronological order.
+			for _, c := range ring {
+				if set[c.AccountID] && c.StartTime.After(since) {
+					if !writeFrame(c) {
+						return
+					}
+					replayed++
+				}
+			}
+		}
+	}
+	if b, merr := json.Marshal(map[string]any{"ctrl": "resume", "replayed": replayed, "partial": partial}); merr == nil {
+		_ = write(mediastream.OpTextValue, b)
+	}
+
+	// Live loop: stream frames, heartbeat every 30s (LB idle timeouts
+	// used to kill silent connections), and surface drops — slow taps
+	// lost frames silently before; the loss count now follows the next
+	// drained frame or heartbeat as a {"ctrl":"dropped","n":N} frame.
+	heartbeat := time.NewTicker(30 * time.Second)
+	defer heartbeat.Stop()
+	lastDropped := tap.dropped.Load()
+	reportDrops := func() bool {
+		if d := tap.dropped.Load() - lastDropped; d > 0 {
+			lastDropped = tap.dropped.Load()
+			if b, merr := json.Marshal(map[string]any{"ctrl": "dropped", "n": d}); merr == nil {
+				return write(mediastream.OpTextValue, b) == nil
+			}
+		}
+		return true
+	}
+	for {
+		select {
+		case frame, ok := <-ch:
+			if !ok {
+				return
+			}
+			if err := write(mediastream.OpTextValue, frame); err != nil {
+				return
+			}
+			if !reportDrops() {
+				return
+			}
+		case <-heartbeat.C:
+			if err := write(mediastream.OpPingValue, []byte("hb")); err != nil {
+				return
+			}
+			if !reportDrops() {
+				return
+			}
+		case <-done:
+			return
 		}
 	}
 }
@@ -119,8 +253,9 @@ func (s *Server) handleTenantCDRStream(w http.ResponseWriter, r *http.Request) {
 // snapshotted at connect (a mid-stream account creation is picked up
 // on reconnect — documented in api-conventions §Webhook).
 type cdrTap struct {
-	set map[string]bool
-	ch  chan []byte
+	set     map[string]bool
+	ch      chan []byte
+	dropped atomic.Int64 // frames shed on a full buffer, surfaced to the client
 }
 
 // fanCDRTap delivers one contract envelope to every matching tap.
@@ -134,6 +269,7 @@ func (s *Server) fanCDRTap(env []byte, accountID string) {
 			select {
 			case t.ch <- env:
 			default:
+				t.dropped.Add(1)
 			}
 		}
 	}

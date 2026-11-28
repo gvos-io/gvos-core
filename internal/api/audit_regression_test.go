@@ -237,12 +237,16 @@ func TestMediaStreamAuthIsFailClosed(t *testing.T) {
 	}{
 		{"no credentials", nil},
 		{"legacy admin constant", map[string]string{"Authorization": "Bearer " + adminToken}},
-		{"tenant API key", map[string]string{"Authorization": "Bearer " + tenantKey}},
 		{"wrong internal token", map[string]string{"X-GVOS-Internal": "nope"}},
 	} {
 		if code := hit(tc.hdr); code != 401 {
 			t.Errorf("%s: code = %d, want 401", tc.name, code)
 		}
+	}
+	// Tenant keys are now scope-authorized instead of locked out: an
+	// unknown call answers 403 (denied without leaking existence).
+	if code := hit(map[string]string{"Authorization": "Bearer " + tenantKey}); code != 403 {
+		t.Errorf("tenant API key: code = %d, want 403 (scope denial on unknown call)", code)
 	}
 	if code := hit(map[string]string{"Authorization": "Bearer " + adminKey}); code != 400 {
 		t.Errorf("admin API key: code = %d, want 400 (past the gate, no upgrade)", code)

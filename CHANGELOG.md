@@ -4,6 +4,13 @@ All notable changes to gvos-core follow this file. Format: Keep a Changelog; ver
 
 ## [Unreleased]
 
+### Changed — robustness closeout (remaining-list item 2, 2026-11-28)
+- **Tenant CDR stream protocol maturity**: client pings are now answered with pongs (they used to be swallowed — well-behaved clients timed out); a 30s server heartbeat keeps LBs from reaping idle streams; slow consumers no longer lose frames silently — the drop count follows the next drained frame or heartbeat as a `{"ctrl":"dropped","n":N}` frame; and `?since=RFC3339` replays the disconnect window (PG history pages in PG mode, the ring in memory mode) before attaching live, acknowledged by a `{"ctrl":"resume"}` frame. (gvos-console portal patched alongside to skip ctrl frames.)
+- **Media stream per-call scoping**: tenant/agent keys are now admitted with a scope check (the call must belong to their subtree — unknown calls deny without existence leak) instead of being locked out entirely; previously ANY operator key could listen to ANY call's audio, which pushed integrations toward key sharing. Internal token (edge) and admin/operator keep full access. Fail-closed behavior unchanged.
+- **Webhook delivery-log retention**: the hourly purge now trims `webhook_deliveries` to 7 days (`GVOS_DELIVERY_TTL_DAYS` overrides) — the table used to grow without bound.
+- **Accounts list pagination**: stable username order, `limit/cursor` + `total`/"next_cursor" (the last list face still dumping unbounded).
+- Memory-mode account IDs switch to UnixNano suffixes (the HHMMSS form collided on same-second creates); recording playback refuses locators outside the configured archive root (defense in depth: the locator rides in a DB column nothing else vouches for).
+
 ### Added — contract alignment pack (gap analysis remaining-list item 1, 2026-11-28)
 - OpenAPI spec caught up with the shipped surface: 51 paths now document every public route — single-account GET/PATCH/DELETE, ledger, audit, rate DELETE, webhook PATCH, tenant account provisioning/topup, tenant webhook DELETE, blocklist white-form DELETE — plus query-parameter schemas for the paginated/filtered faces (CDR filters account_id/dest/call_id/from/to, audit entity/tenant_id, paging pairs) and the closed webhook event enum in the description.
 - Spec↔route consistency regression test: every endpoint the registry promises is probed against the live mux; a router-level 404 (plaintext) fails the test while handler-level 404s (JSON envelope) pass — this is the net that catches spec-promised/never-implemented interfaces (the recording-GET-405 class and a silently missed route registration).

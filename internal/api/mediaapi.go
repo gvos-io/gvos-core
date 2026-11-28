@@ -24,24 +24,42 @@ import (
 	"github.com/gvos-io/gvos-core/internal/shared/acl"
 )
 
-// mediaAuthorized gates the AI media plane: the internal token, or an
-// admin/operator API key. Fail-closed — with neither presented the
-// stream answers 401 — and no constant is honoured: the stream carries
-// live call audio, and the legacy admin constant used to open it to
-// anyone who knows the published string, API keys or not.
-func (s *Server) mediaAuthorized(w http.ResponseWriter, r *http.Request) bool {
+// mediaAuthorized gates the AI media plane: the internal token (the
+// edge — all calls), an admin/operator key (all calls), or a
+// tenant/agent key scoped to the call's own account. Fail-closed —
+// with nothing presented the stream answers 401 — and no constant is
+// honoured: the stream carries live call audio. Tenant keys used to
+// be locked out entirely, which pushed integrations toward sharing
+// operator keys; the scoping check is what makes per-tenant keys safe
+// instead (before this, ANY operator key could listen to ANY call).
+func (s *Server) mediaAuthorized(w http.ResponseWriter, r *http.Request, callID string) bool {
 	if internalTokenOK(r) {
 		return true
 	}
 	h := r.Header.Get("Authorization")
 	const bearer = "Bearer "
 	if strings.HasPrefix(h, bearer) && s.acl != nil {
-		if k, ok := s.acl.Lookup(strings.TrimPrefix(h, bearer)); ok &&
-			(k.Role == acl.RoleAdmin || k.Role == acl.RoleOperator) {
-			return true
+		if k, ok := s.acl.Lookup(strings.TrimPrefix(h, bearer)); ok {
+			switch k.Role {
+			case acl.RoleAdmin, acl.RoleOperator:
+				return true
+			case acl.RoleTenant, acl.RoleAgent:
+				accID, live := s.calls.AccountOf(callID)
+				if !live {
+					httpErrorC(w, 403, "FORBIDDEN", "call unknown or already ended")
+					return false
+				}
+				if !s.tenantAccountsCached(k.TenantID)[accID] {
+					// Bare 404 semantics: never confirm another
+					// tenant's call exists.
+					httpErrorC(w, 403, "FORBIDDEN", "call outside your scope")
+					return false
+				}
+				return true
+			}
 		}
 	}
-	httpErrorC(w, 401, "UNAUTHORIZED", "media stream requires an internal token or an admin API key")
+	httpErrorC(w, 401, "UNAUTHORIZED", "media stream requires an internal token or an API key")
 	return false
 }
 
@@ -52,7 +70,7 @@ func (s *Server) handleMediaStream(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "call_id required in path")
 		return
 	}
-	if !s.mediaAuthorized(w, r) {
+	if !s.mediaAuthorized(w, r, callID) {
 		return
 	}
 	if s.media == nil {

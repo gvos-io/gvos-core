@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -71,6 +72,22 @@ func (s *Server) handleRecordingPlay(w http.ResponseWriter, r *http.Request) {
 		}
 		if u := s.presignRecording(r, rr.Locator); u != "" {
 			http.Redirect(w, r, u, http.StatusFound)
+			return
+		}
+		// Defense in depth: the locator rides in the DB, so only open
+		// file paths that sit inside the configured archive root (the
+		// write path is controlled, but nothing else vouches for the
+		// column).
+		if lfs, ok := s.recStore.(*recpipe.LocalFS); ok {
+			root := filepath.Clean(lfs.Root) + string(os.PathSeparator)
+			if !strings.HasPrefix(filepath.Clean(rr.Locator)+string(os.PathSeparator), root) {
+				httpErrorC(w, 404, "NOT_FOUND", "artifact outside archive root")
+				return
+			}
+		} else if s.recStore != nil {
+			// S3 backend: only s3:// locators are served (presign path
+			// above); a file-path locator has no trusted root to check.
+			httpErrorC(w, 404, "NOT_FOUND", "artifact missing from backend")
 			return
 		}
 		f, err := os.Open(rr.Locator) // locator = LocalFS absolute path

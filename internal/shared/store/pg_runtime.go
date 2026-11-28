@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -206,9 +207,30 @@ func (p *PG) PurgeAXBBindings(ctx context.Context) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
+// deliveryRetentionDays: how long webhook delivery-log rows live.
+// Default 7 days; the table used to grow without bound.
+func deliveryRetentionDays() int {
+	if v := os.Getenv("GVOS_DELIVERY_TTL_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 7
+}
+
+// PurgeWebhookDeliveries trims the delivery log to the retention
+// window.
+func (p *PG) PurgeWebhookDeliveries(ctx context.Context, days int) (int64, error) {
+	tag, err := p.pool.Exec(ctx, `DELETE FROM webhook_deliveries WHERE created_at < now() - make_interval(days => $1)`, days)
+	if err != nil {
+		return 0, fmt.Errorf("purge webhook deliveries: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // StartRuntimePurge runs the hourly dead-row sweep (idempotency +
-// AXB). Blocks; run in a goroutine. Immediate first pass clears what
-// accumulated while the process was down.
+// AXB + webhook delivery log). Blocks; run in a goroutine. Immediate
+// first pass clears what accumulated while the process was down.
 func (p *PG) StartRuntimePurge(ctx context.Context) {
 	run := func() {
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -222,6 +244,11 @@ func (p *PG) StartRuntimePurge(ctx context.Context) {
 			log.Printf("axb purge failed: %v\n", err)
 		} else if n > 0 {
 			log.Printf("purged %d axb bindings\n", n)
+		}
+		if n, err := p.PurgeWebhookDeliveries(cctx, deliveryRetentionDays()); err != nil {
+			log.Printf("delivery purge failed: %v\n", err)
+		} else if n > 0 {
+			log.Printf("purged %d webhook deliveries\n", n)
 		}
 	}
 	run()

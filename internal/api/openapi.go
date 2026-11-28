@@ -183,7 +183,7 @@ func buildOpenAPI() map[string]any {
 				params = append(params, map[string]any{
 					"name": prm.Name, "in": "query", "required": false,
 					"description": prm.Desc,
-					"schema":     map[string]any{"type": "string"},
+					"schema":      map[string]any{"type": "string"},
 				})
 			}
 			op["parameters"] = params

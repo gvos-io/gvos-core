@@ -204,9 +204,9 @@
 | 能力缺口 | 路由预览 / 费率试算 / 账户树 / 实时并发 / 风控计数器 / 媒体流统计；VOS CSV 导入 API；录音删除+retention；webhook 重试策略可配+deliveries 清理；黑名单源增删；报表时间范围查询；OIDC/SSO（P3） |
 
 ### 功能/工程缺失
-- **契约漂移（已核实，包 1 处理中）**：openapi.go 缺本轮新增 10+ 路由（accounts/{id} GET/PATCH/DELETE、ledger、audit、rates/{prefix} DELETE、tenant accounts/topup、tenant webhooks DELETE、事件枚举 5 个），且 spec 全文无 query 参数/分页 envelope schema → 根治 = Phase E 的 spec 代码生成 + CI 契约校验
-- **协议成熟度**：tenant CDR-WS 无 pong/心跳/Last-Event-ID 续传/丢帧提示；媒体 WS 无 per-call 归属校验
-- **健壮性**：webhook_deliveries 无保留策略（只进不出）；admin accounts 列表无分页；内存账户 ID 同秒可撞；recording 播放不校验 locator 前缀
+- ~~契约漂移~~ ✅ 包 1 已交付（2026-11-28，f78eb5d）：spec 51 路径 + 参数 schema + 事件枚举 + spec→路由一致性回归测试
+- ~~协议成熟度~~ ✅ 包 2 已交付：tenant CDR-WS pong/心跳/since 续传/丢帧 ctrl 帧；媒体 WS per-call 归属校验（tenant/agent 按子树放行，此前任意 operator key 可听任意通话）
+- ~~健壮性~~ ✅ 包 2 已交付：webhook_deliveries 7 天保留（GVOS_DELIVERY_TTL_DAYS 可调）；accounts 分页；内存账户 ID 改 UnixNano；recording locator 归档根校验
 - **竞品验证线**：媒体面生产化（B 线）；20 万注册 / 2 万并发容量验证
 
 ## 10. 变更记录
