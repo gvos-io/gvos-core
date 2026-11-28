@@ -4,6 +4,11 @@ All notable changes to gvos-core follow this file. Format: Keep a Changelog; ver
 
 ## [Unreleased]
 
+### Added — tenant administration + settings inspection (remaining-list item, 2026-11-28)
+- **Tenant CRUD**: `GET/POST/PATCH/DELETE /v1/admin/tenants` — the tenants table existed since migration 001 with one seeded row and no API (multi-tenancy was schema-only). Provision/rename/soft-delete with live-account guards (409 IN_USE), duplicate live names 409 (migration 016 adds the partial unique index), per-tenant currency. Memory mode: demo tenant read-only, writes 503.
+- **Settings inspection**: `GET /v1/admin/settings` — the six runtime settings keys with their values, read-only by design (every mutable setting has a dedicated owning API; a generic write face would fork that authority). Memory mode 503.
+- Route-rules tables decision recorded: activation deferred (LCR on gateways covers current routing; a route engine touches the edge) — the tables stay, the gap doc carries the ruling.
+
 ### Added — per-account pricing (rate groups end-to-end, 2026-11-28)
 - **rate_group is no longer decorative**: accounts price calls against their own rate group, falling back to the default demo table. Before this, every account priced from the single demo table regardless of the rate_group column — per-account pricing existed in schema only. Admission (signaling + origination faces) picks the account's table; rebuildRates rebuilds all groups.
 - Rate group CRUD: `GET/POST /v1/admin/rate-groups`, `DELETE /{name}` (refused 409 while live rates or account references remain; the demo group is protected as the pricing fallback); memory mode keeps its single implicit demo group (create answers 503 with the reason, like audit/ledger).

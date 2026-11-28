@@ -789,6 +789,11 @@ func MuxFor(s *Server) http.Handler {
 	mux.HandleFunc("PUT /v1/admin/packages", s.withIdempotency(s.handlePackages)) // assign moves money
 	mux.HandleFunc("GET /v1/admin/packages/usage", s.handlePackageUsage)
 	mux.HandleFunc("GET /v1/admin/audit", s.handleAuditList)
+	mux.HandleFunc("GET /v1/admin/tenants", s.handleTenantAdminList)
+	mux.HandleFunc("POST /v1/admin/tenants", s.handleTenantAdminCreate)
+	mux.HandleFunc("PATCH /v1/admin/tenants/{id}", s.handleTenantAdminPatch)
+	mux.HandleFunc("DELETE /v1/admin/tenants/{id}", s.handleTenantAdminDelete)
+	mux.HandleFunc("GET /v1/admin/settings", s.handleSettingsList)
 	mux.HandleFunc("POST /v1/admin/reports/rollup", s.handleReports)
 	mux.HandleFunc("GET /v1/admin/reports", s.handleReportList)
 	mux.HandleFunc("GET /v1/admin/reports/views", s.handleReportViews)

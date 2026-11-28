@@ -1062,3 +1062,76 @@ func (p *PG) ResolveRateGroup(ctx context.Context, name string) (string, bool, e
 	}
 	return id, true, nil
 }
+
+// --- Tenant administration (migration 001 tenants table) -----------
+
+// TenantRow is one tenant (the tree root an account belongs to).
+type TenantRow struct {
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Currency  string     `json:"currency"`
+	CreatedAt time.Time  `json:"created_at"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	Accounts  int        `json:"accounts"` // live account count (list projection)
+}
+
+// ListTenants reads tenants with their live account counts.
+func (p *PG) ListTenants(ctx context.Context, includeDeleted bool) ([]TenantRow, error) {
+	rows, err := p.pool.Query(ctx, `
+        SELECT t.id::text, t.name, t.currency, t.created_at, t.deleted_at,
+               (SELECT count(*) FROM accounts a WHERE a.tenant_id = t.id AND a.deleted_at IS NULL)
+        FROM tenants t
+        ORDER BY t.created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("list tenants: %w", err)
+	}
+	defer rows.Close()
+	var out []TenantRow
+	for rows.Next() {
+		var t TenantRow
+		if err := rows.Scan(&t.ID, &t.Name, &t.Currency, &t.CreatedAt, &t.DeletedAt, &t.Accounts); err != nil {
+			return nil, err
+		}
+		if !includeDeleted && t.DeletedAt != nil {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// CreateTenant inserts one tenant.
+func (p *PG) CreateTenant(ctx context.Context, name, currency string) (string, error) {
+	var id string
+	err := p.pool.QueryRow(ctx, `
+        INSERT INTO tenants (name, currency) VALUES ($1, $2) RETURNING id::text`,
+		name, currency).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("create tenant: %w", err)
+	}
+	return id, nil
+}
+
+// UpdateTenant patches name/currency.
+func (p *PG) UpdateTenant(ctx context.Context, id, name, currency string) (int, error) {
+	tag, err := p.pool.Exec(ctx, `
+        UPDATE tenants SET name = $2, currency = $3 WHERE id = $1::uuid AND deleted_at IS NULL`,
+		id, name, currency)
+	if err != nil {
+		return 0, fmt.Errorf("update tenant: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// DeleteTenant soft-deletes; refused while live accounts reference it
+// (the FK on accounts.tenant_id would break the tree otherwise).
+func (p *PG) DeleteTenant(ctx context.Context, id string) (int, error) {
+	tag, err := p.pool.Exec(ctx, `
+        UPDATE tenants SET deleted_at = now()
+        WHERE id = $1::uuid AND deleted_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.tenant_id = $1::uuid AND a.deleted_at IS NULL)`, id)
+	if err != nil {
+		return 0, fmt.Errorf("delete tenant: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
